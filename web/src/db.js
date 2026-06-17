@@ -55,6 +55,32 @@ export async function createProduct(p) {
   return id;
 }
 
+export async function updateProduct(p) {
+  const id = p.product_id;
+  const { error } = await supabase.from("product").update({
+    name: p.name, category: p.category, brand: p.brand, supc: p.supc,
+    purchase_unit: p.purchase_unit, pack: p.pack, size: p.size, size_unit: p.size_unit,
+    count_unit: p.count_unit, count_per_case: p.count_per_case,
+    use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level,
+    updated_at: new Date().toISOString(),
+  }).eq("product_id", id);
+  if (error) throw error;
+  await supabase.from("product_barcode").delete().eq("product_id", id);
+  await supabase.from("product_vendor").delete().eq("product_id", id);
+  await supabase.from("product_location").delete().eq("product_id", id);
+  if (p.barcodes?.length)
+    await supabase.from("product_barcode").insert(p.barcodes.map((c) => ({ product_id: id, code: c })));
+  if (p.vendors?.length)
+    await supabase.from("product_vendor").insert(p.vendors.map((v) => ({
+      product_id: id, vendor_id: v.vendor_id, current_price: v.price, is_primary: v.primary,
+    })));
+  if (p.locations?.length)
+    await supabase.from("product_location").insert(p.locations.map((l) => ({
+      product_id: id, location_id: l.location_id, is_primary: l.primary,
+    })));
+  return id;
+}
+
 export async function deleteProduct(id) {
   const { error } = await supabase.from("product").update({ active: false }).eq("product_id", id);
   if (error) throw error;
