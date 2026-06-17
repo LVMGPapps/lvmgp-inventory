@@ -345,65 +345,130 @@ function Count({ products, locations, onhand, reload }) {
   );
 }
 
-function Receive({ products, vendors, locations, reload }) {
-  const [rows, setRows] = useState([]);
+function Receive({ products, vendors, reload }) {
+  const [rows, setRows] = useState(null);   // awaiting (purchased) rows, editable
+  const [extras, setExtras] = useState([]); // scanned lines not on the purchased list
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
+  const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
-  const update = (i, patch) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, ...patch } : r));
+  const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+
+  async function load() {
+    try {
+      const r = await db.getReceivables();
+      setRows(r.map((x) => ({ ...x, case_cost: x.unit_cost ?? "", scanned: false })));
+    } catch (e) { setErr("Couldn't load purchased items: " + (e.message || e)); setRows([]); }
+  }
+  useEffect(() => { load(); }, []);
+  if (rows === null) return <div className="empty">Loading…</div>;
+
+  const setRow = (id, patch) => setRows((rs) => rs.map((r) => r.shopping_line_id === id ? { ...r, ...patch } : r));
+  const setExtra = (i, patch) => setExtras((es) => es.map((e, j) => j === i ? { ...e, ...patch } : e));
 
   async function onFile(e) {
     const f = e.target.files?.[0]; if (!f) return;
-    setBusy(true); setErr(""); setDone(false);
+    setBusy(true); setErr(""); setMsg("");
     try {
       const d = await db.scanReceipt(f, "receipt");
       const ven = vendors.find((v) => (d.vendor || "").toLowerCase().includes(v.name.toLowerCase()));
-      const newRows = (d.lines || []).map((ln) => {
-        const m = products.find((p) => p.name.toLowerCase().includes((ln.name || "").toLowerCase().slice(0, 6)));
-        return { product_id: m?.product_id || "", qty: ln.qty || 1, case_cost: ln.unit_price ?? "", vendor_id: ven?.vendor_id || (vendors[0]?.vendor_id ?? ""), date: d.date || new Date().toISOString().slice(0, 10), guess: ln.name };
-      });
-      setRows((rs) => [...rs, ...newRows]);
-    } catch (e2) { setErr("Couldn't read that receipt. Add lines by hand, or try a clearer photo."); }
+      const next = rows.map((r) => ({ ...r }));
+      let matched = 0; const newExtras = [];
+      for (const ln of (d.lines || [])) {
+        const key = (ln.name || "").toLowerCase().slice(0, 6);
+        const hit = key && next.find((r) => !r.scanned && r.product_name?.toLowerCase().includes(key));
+        if (hit) { hit.qty = ln.qty ?? hit.qty; hit.case_cost = ln.unit_price ?? hit.case_cost; hit.scanned = true; matched++; }
+        else {
+          const m = products.find((p) => key && p.name.toLowerCase().includes(key));
+          newExtras.push({ product_id: m?.product_id || "", qty: ln.qty || 1, case_cost: ln.unit_price ?? "", vendor_id: ven?.vendor_id || (vendors[0]?.vendor_id ?? ""), guess: ln.name });
+        }
+      }
+      setRows(next);
+      setExtras((es) => [...es, ...newExtras]);
+      setMsg(`Receipt scanned — ${matched} matched to purchased item${matched === 1 ? "" : "s"}${newExtras.length ? `, ${newExtras.length} not on the list (below)` : ""}. Review the numbers, then Receive.`);
+    } catch (e2) { setErr("Couldn't read that receipt. You can still receive items by hand."); }
     finally { setBusy(false); e.target.value = ""; }
   }
 
-  async function post() {
-    const lines = rows.filter((r) => r.product_id && num(r.qty) > 0).map((r) => {
-      const p = products.find((x) => x.product_id === Number(r.product_id));
-      return { product_id: Number(r.product_id), location_id: null, purchase_qty: num(r.qty), unit_cost: r.case_cost !== "" ? num(r.case_cost) : null, count_per_case: p.count_per_case };
-    });
-    if (!lines.length) return;
-    const vendor_id = Number(rows.find((r) => r.vendor_id)?.vendor_id) || null;
-    const received_date = rows[0]?.date || new Date().toISOString().slice(0, 10);
-    await db.postReceipt({ vendor_id, received_date, reference: null }, lines);
-    setRows([]); setDone(true); reload();
+  async function receive(list) {
+    const payload = list.map((r) => ({
+      shopping_line_id: r.shopping_line_id, product_id: Number(r.product_id),
+      vendor_id: r.vendor_id ? Number(r.vendor_id) : null,
+      qty: num(r.qty), unit_cost: (r.case_cost !== "" && r.case_cost != null) ? num(r.case_cost) : null,
+      count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
+    })).filter((r) => r.product_id && num(r.qty) > 0);
+    if (!payload.length) return;
+    setBusy(true);
+    try { await db.receiveRows(payload); setMsg(`Received ${payload.length} item${payload.length === 1 ? "" : "s"}. Prices updated.`); await load(); reload(); }
+    catch (e) { setErr("Receive failed: " + (e.message || e)); }
+    finally { setBusy(false); }
   }
+  async function receiveExtras(idxs) {
+    await receive(idxs.map((i) => extras[i]));
+    setExtras((es) => es.filter((_, i) => !idxs.includes(i)));
+  }
+
+  const groups = {};
+  for (const r of rows) { const k = r.vendor_id ?? "none"; (groups[k] ||= []).push(r); }
+  const order = Object.keys(groups);
 
   return (
     <div>
       <div className="toolbar">
-        <label className="btn btn-primary">{busy ? <><span className="spin" /> Reading…</> : "📷 Scan a receipt"}<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} disabled={busy} /></label>
-        <button className="btn btn-ghost" onClick={() => setRows((rs) => [...rs, { product_id: "", qty: 1, case_cost: "", vendor_id: vendors[0]?.vendor_id ?? "", date: new Date().toISOString().slice(0, 10) }])}>+ Add line</button>
+        <label className="btn btn-primary">{busy ? <><span className="spin" /> Working…</> : "📷 Scan a receipt"}<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} disabled={busy} /></label>
+        {rows.length > 0 && <button className="btn btn-ghost" onClick={() => receive(rows)}>Receive everything</button>}
       </div>
       {err && <div className="err">{err}</div>}
-      {done && <div className="ok">Posted. Prices and on-hand updated.</div>}
-      {rows.length === 0 ? <div className="empty">Scan a receipt to auto-fill items, or add them by hand.</div> : (
-        <div className="vgroup" style={{ padding: 14 }}>
-          <table className="tbl"><thead><tr><th>Product</th><th>Qty</th><th>Case $</th><th>Vendor</th><th>Date</th><th></th></tr></thead>
-            <tbody>{rows.map((r, i) => (
+      {msg && <div className="ok">{msg}</div>}
+
+      {rows.length === 0 && extras.length === 0 && (
+        <div className="empty">Nothing waiting to be received.<br />Mark items <b>Purchased</b> on the Shopping tab and they'll appear here — or scan a receipt.</div>
+      )}
+
+      {order.map((k) => {
+        const g = groups[k]; const vn = g[0].vendor_name || "No vendor";
+        return (
+          <div className="vgroup" key={k}>
+            <div className="vgroup-h">
+              <span className="vname">{vn}</span>
+              <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span className="stat">{g.length} awaiting</span>
+                <button className="mini" onClick={() => receive(g)}>Receive all</button>
+              </span>
+            </div>
+            <table className="tbl" style={{ border: "none" }}>
+              <thead><tr><th>Item</th><th>Qty (cases)</th><th>Case $</th><th></th></tr></thead>
+              <tbody>{g.map((r) => (
+                <tr key={r.shopping_line_id}>
+                  <td>{r.product_name}{r.scanned && <span className="bchip" style={{ marginLeft: 6, background: "#E6F4F0", borderColor: "#0E7C6B" }}>from receipt</span>}<div className="stat">1 case = {r.count_per_case} {r.count_unit}</div></td>
+                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /></td>
+                  <td><input className="fig" style={{ width: 80 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => setRow(r.shopping_line_id, { case_cost: e.target.value })} /></td>
+                  <td><button className="mini" onClick={() => receive([r])}>Receive</button></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        );
+      })}
+
+      {extras.length > 0 && (
+        <div className="vgroup">
+          <div className="vgroup-h"><span className="vname">Not on the purchased list</span>
+            <button className="mini" onClick={() => receiveExtras(extras.map((_, i) => i))}>Receive all</button></div>
+          <table className="tbl" style={{ border: "none" }}>
+            <thead><tr><th>Item (from receipt)</th><th>Qty</th><th>Case $</th><th>Vendor</th><th></th></tr></thead>
+            <tbody>{extras.map((r, i) => (
               <tr key={i}>
-                <td style={{ minWidth: 150 }}><select value={r.product_id} onChange={(e) => update(i, { product_id: e.target.value })} style={{ width: "100%" }}>
+                <td style={{ minWidth: 150 }}><select value={r.product_id} onChange={(e) => setExtra(i, { product_id: e.target.value })} style={{ width: "100%" }}>
                   <option value="">{r.guess ? `? ${r.guess}` : "— pick —"}</option>
                   {products.slice().sort((a, b) => a.name.localeCompare(b.name)).map((p) => <option key={p.product_id} value={p.product_id}>{p.name}</option>)}
                 </select></td>
-                <td><input className="fig" style={{ width: 60 }} type="number" value={r.qty} onChange={(e) => update(i, { qty: e.target.value })} /></td>
-                <td><input className="fig" style={{ width: 70 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => update(i, { case_cost: e.target.value })} /></td>
-                <td><select value={r.vendor_id} onChange={(e) => update(i, { vendor_id: e.target.value })}>{vendors.map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>)}</select></td>
-                <td><input type="date" value={r.date} onChange={(e) => update(i, { date: e.target.value })} /></td>
-                <td><button className="mini mini-danger" onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}>✕</button></td>
+                <td><input className="fig" style={{ width: 60 }} type="number" value={r.qty} onChange={(e) => setExtra(i, { qty: e.target.value })} /></td>
+                <td><input className="fig" style={{ width: 70 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => setExtra(i, { case_cost: e.target.value })} /></td>
+                <td><select value={r.vendor_id} onChange={(e) => setExtra(i, { vendor_id: e.target.value })}>{vendors.map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>)}</select></td>
+                <td><button className="mini" onClick={() => receiveExtras([i])}>Receive</button></td>
               </tr>
-            ))}</tbody></table>
-          <div style={{ marginTop: 12 }}><button className="btn btn-primary" onClick={post}>Post received</button></div>
+            ))}</tbody>
+          </table>
         </div>
       )}
     </div>
@@ -411,39 +476,84 @@ function Receive({ products, vendors, locations, reload }) {
 }
 
 function Shopping({ products, vendors }) {
+  const [listId, setListId] = useState(null);
   const [lines, setLines] = useState(null);
-  const [saved, setSaved] = useState(false);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+  const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
 
-  useEffect(() => { db.getShopping().then((d) => setLines(d.lines.map((l) => ({ ...l })))).catch(() => setLines([])); }, []);
+  async function load() {
+    try { const d = await db.getShopping(); setListId(d.id); setLines(d.lines); }
+    catch { setLines([]); }
+  }
+  useEffect(() => { load(); }, []);
   if (lines === null) return <div className="empty">Loading…</div>;
 
-  const update = (i, patch) => setLines((ls) => ls.map((l, j) => j === i ? { ...l, ...patch } : l));
-  const add = (p) => { if (!lines.some((l) => l.product_id === p.product_id)) setLines([...lines, { product_id: p.product_id, vendor_id: (p.vendors.find((v) => v.primary) || p.vendors[0])?.vendor_id ?? null, qty: 1 }]); };
-  async function save() { await db.saveShopping(lines); setSaved(true); setTimeout(() => setSaved(false), 2000); }
+  async function add(p) {
+    const v = p.vendors.find((x) => x.primary) || p.vendors[0];
+    await db.addShoppingLine(listId, { product_id: p.product_id, vendor_id: v?.vendor_id ?? null, qty: 1, unit_cost: v?.price ?? null });
+    load();
+  }
+  async function setQty(line, qty) {
+    setLines((ls) => ls.map((l) => l.shopping_line_id === line.shopping_line_id ? { ...l, qty } : l));
+    await db.updateShoppingLine(line.shopping_line_id, { qty: num(qty) || 0 });
+  }
+  async function setVendor(line, vendor_id) {
+    const price = byId[line.product_id]?.vendors.find((v) => v.vendor_id === vendor_id)?.price ?? null;
+    await db.updateShoppingLine(line.shopping_line_id, { vendor_id, unit_cost: price });
+    load();
+  }
+  async function purchase(line, on) { await db.updateShoppingLine(line.shopping_line_id, { status: on ? "purchased" : "open" }); load(); }
+  async function purchaseVendor(vid, on) { await db.setVendorStatus(listId, vid, on ? "purchased" : "open", on ? "open" : "purchased"); load(); }
+  async function remove(line) { await db.removeShoppingLine(line.shopping_line_id); load(); }
+
+  const groups = {};
+  for (const l of lines) { const k = l.vendor_id ?? "none"; (groups[k] ||= []).push(l); }
+  const order = Object.keys(groups).sort((a, b) => (vName[a] || "zz").localeCompare(vName[b] || "zz"));
 
   return (
     <div>
       <div className="toolbar">
         <Picker products={products} exclude={lines.map((l) => l.product_id)} onPick={add} />
-        <button className="btn btn-primary" onClick={save}>Save list</button>
       </div>
-      <div className="note" style={{ marginBottom: 14 }}>Manual list for now. Automatic "build from usage" suggestions arrive once you've logged a few weeks of counts.</div>
-      {saved && <div className="ok">Saved.</div>}
-      {lines.length === 0 ? <div className="empty">Add items to build your order.</div> : (
-        <div className="vgroup" style={{ padding: 14 }}>
-          <table className="tbl"><thead><tr><th>Item</th><th>Vendor</th><th>Qty</th><th></th></tr></thead>
-            <tbody>{lines.map((l, i) => {
+      <div className="note" style={{ marginBottom: 14 }}>Build the order, then mark items <b>Purchased</b> — one at a time, or a whole vendor at once. Purchased items move to the <b>Receive</b> tab. Automatic "build from usage" suggestions arrive once you've logged a few weeks of counts.</div>
+      {lines.length === 0 ? <div className="empty">Add items to build your order.</div> : order.map((k) => {
+        const g = groups[k];
+        const openCount = g.filter((l) => l.status === "open").length;
+        return (
+          <div className="vgroup" key={k}>
+            <div className="vgroup-h">
+              <span className="vname">{vName[k] || "No vendor"}</span>
+              <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span className="stat">{g.length} items</span>
+                {openCount > 0
+                  ? <button className="mini" onClick={() => purchaseVendor(k === "none" ? null : Number(k), true)}>Mark all purchased</button>
+                  : <button className="mini" onClick={() => purchaseVendor(k === "none" ? null : Number(k), false)}>Undo all</button>}
+              </span>
+            </div>
+            {g.map((l) => {
               const p = byId[l.product_id]; if (!p) return null;
-              return (<tr key={i}>
-                <td>{p.name}</td>
-                <td><select value={l.vendor_id ?? ""} onChange={(e) => update(i, { vendor_id: Number(e.target.value) })}>{(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}</select></td>
-                <td><input className="fig" style={{ width: 60 }} type="number" value={l.qty} onChange={(e) => update(i, { qty: num(e.target.value) || 0 })} /></td>
-                <td><button className="mini mini-danger" onClick={() => setLines(lines.filter((_, j) => j !== i))}>✕</button></td>
-              </tr>);
-            })}</tbody></table>
-        </div>
-      )}
+              const done = l.status === "purchased";
+              return (
+                <div className="crow" style={{ gridTemplateColumns: "1fr 130px 70px 130px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
+                  <div><b>{p.name}</b><div className="stat">{p.count_unit} · {p.purchase_unit}</div></div>
+                  <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
+                    {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
+                  </select>
+                  <input className="fig" type="number" min="0" value={l.qty} onChange={(e) => setQty(l, e.target.value)} disabled={done} />
+                  <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                    {done
+                      ? <button className="mini" style={{ background: "#E6F4F0", borderColor: "#0E7C6B", color: "#0a5c50" }} onClick={() => purchase(l, false)}>✓ Purchased</button>
+                      : <>
+                          <button className="mini" style={{ borderColor: "#0E7C6B", color: "#0a5c50" }} onClick={() => purchase(l, true)}>Purchased</button>
+                          <button className="mini mini-danger" onClick={() => remove(l)}>✕</button>
+                        </>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
     </div>
   );
 }
