@@ -184,28 +184,108 @@ export async function onHand() {
   return data;
 }
 
-// ---- Shopping ----
-export async function getShopping(domain = "fnb") {
-  const { data: list } = await supabase.from("shopping_list")
-    .select("shopping_list_id").eq("domain", domain).eq("status", "open")
-    .order("created_at", { ascending: false }).limit(1).maybeSingle();
-  if (!list) return { id: null, lines: [] };
-  const { data: lines } = await supabase.from("shopping_line")
-    .select("product_id, vendor_id, qty").eq("shopping_list_id", list.shopping_list_id);
-  return { id: list.shopping_list_id, lines: lines ?? [] };
-}
-export async function saveShopping(lines, domain = "fnb") {
+// ---- Shopping (open -> purchased -> received) ----
+export async function ensureOpenList(domain = "fnb") {
   let { data: list } = await supabase.from("shopping_list")
     .select("shopping_list_id").eq("domain", domain).eq("status", "open")
     .order("created_at", { ascending: false }).limit(1).maybeSingle();
   if (!list) {
     const ins = await supabase.from("shopping_list").insert({ domain }).select("shopping_list_id").single();
+    if (ins.error) throw ins.error;
     list = ins.data;
   }
-  await supabase.from("shopping_line").delete().eq("shopping_list_id", list.shopping_list_id);
-  if (lines.length)
-    await supabase.from("shopping_line").insert(lines.map((l) => ({
-      shopping_list_id: list.shopping_list_id, product_id: l.product_id, vendor_id: l.vendor_id, qty: l.qty,
-    })));
   return list.shopping_list_id;
+}
+
+// Returns the working list and its open + purchased lines (received are hidden here).
+export async function getShopping(domain = "fnb") {
+  const listId = await ensureOpenList(domain);
+  const { data, error } = await supabase.from("shopping_line")
+    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status")
+    .eq("shopping_list_id", listId).neq("status", "received")
+    .order("shopping_line_id");
+  if (error) throw error;
+  return { id: listId, lines: data ?? [] };
+}
+
+export async function addShoppingLine(listId, line) {
+  const { data, error } = await supabase.from("shopping_line").insert({
+    shopping_list_id: listId, product_id: line.product_id, vendor_id: line.vendor_id ?? null,
+    qty: line.qty ?? 1, unit_cost: line.unit_cost ?? null, status: "open",
+  }).select("shopping_line_id").single();
+  if (error) throw error;
+  return data.shopping_line_id;
+}
+export async function updateShoppingLine(lineId, patch) {
+  const { error } = await supabase.from("shopping_line").update(patch).eq("shopping_line_id", lineId);
+  if (error) throw error;
+}
+export async function removeShoppingLine(lineId) {
+  const { error } = await supabase.from("shopping_line").delete().eq("shopping_line_id", lineId);
+  if (error) throw error;
+}
+// Bulk move all lines for one vendor (vendorId may be null) from one status to another.
+export async function setVendorStatus(listId, vendorId, toStatus, fromStatus) {
+  let q = supabase.from("shopping_line").update({ status: toStatus }).eq("shopping_list_id", listId);
+  q = vendorId == null ? q.is("vendor_id", null) : q.eq("vendor_id", vendorId);
+  if (fromStatus) q = q.eq("status", fromStatus);
+  const { error } = await q;
+  if (error) throw error;
+}
+
+// Purchased lines waiting to be received, with product + vendor detail for the Receive tab.
+export async function getReceivables(domain = "fnb") {
+  const listId = await ensureOpenList(domain);
+  const { data, error } = await supabase.from("shopping_line")
+    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status," +
+      " product(name, count_per_case, count_unit, purchase_unit, product_vendor(vendor_id, current_price))," +
+      " vendor(name)")
+    .eq("shopping_list_id", listId).eq("status", "purchased").order("shopping_line_id");
+  if (error) throw error;
+  return (data ?? []).map((l) => {
+    const pv = (l.product?.product_vendor ?? []).find((v) => v.vendor_id === l.vendor_id);
+    return {
+      shopping_line_id: l.shopping_line_id, product_id: l.product_id, vendor_id: l.vendor_id,
+      qty: l.qty, unit_cost: l.unit_cost ?? pv?.current_price ?? null,
+      product_name: l.product?.name, count_per_case: l.product?.count_per_case,
+      count_unit: l.product?.count_unit, purchase_unit: l.product?.purchase_unit,
+      vendor_name: l.vendor?.name,
+    };
+  });
+}
+
+// Receive a set of rows: writes a receipt per vendor, updates price, marks lines received.
+// rows: [{shopping_line_id?, product_id, vendor_id, qty, unit_cost, count_per_case}]
+export async function receiveRows(rows, received_date) {
+  const me = await uid();
+  const date = received_date || new Date().toISOString().slice(0, 10);
+  const byVendor = {};
+  for (const r of rows) (byVendor[r.vendor_id ?? "none"] ||= []).push(r);
+  for (const key of Object.keys(byVendor)) {
+    const group = byVendor[key];
+    const vendor_id = group[0].vendor_id ?? null;
+    const { data: rec, error } = await supabase.from("receipt").insert({
+      vendor_id, received_date: date, entered_by: me,
+    }).select("receipt_id").single();
+    if (error) throw error;
+    for (const ln of group) {
+      const qcu = (Number(ln.qty) || 0) * (Number(ln.count_per_case) || 1);
+      await supabase.from("receipt_line").insert({
+        receipt_id: rec.receipt_id, product_id: ln.product_id, location_id: null,
+        purchase_qty: ln.qty, unit_cost: ln.unit_cost, qty_count_units: qcu,
+      });
+      if (ln.unit_cost != null && vendor_id != null) {
+        await supabase.from("product_vendor").upsert(
+          { product_id: ln.product_id, vendor_id, current_price: ln.unit_cost },
+          { onConflict: "product_id,vendor_id" });
+        await supabase.from("price_history").insert({
+          product_id: ln.product_id, vendor_id, price: ln.unit_cost, source: "receipt" });
+      }
+      if (ln.shopping_line_id) {
+        await supabase.from("shopping_line")
+          .update({ status: "received", received_at: new Date().toISOString(), qty: ln.qty, unit_cost: ln.unit_cost })
+          .eq("shopping_line_id", ln.shopping_line_id);
+      }
+    }
+  }
 }
