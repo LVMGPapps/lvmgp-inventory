@@ -595,6 +595,30 @@ function costPerCount(p) {
 }
 function lineCost(l) { return (Number(l.purchase_qty) || 0) * (Number(l.unit_cost) || 0); }
 
+function weekStart(dateStr) {
+  const dt = new Date(dateStr + "T00:00:00");
+  const off = (dt.getDay() + 6) % 7; // Monday = start of week
+  dt.setDate(dt.getDate() - off); dt.setHours(0, 0, 0, 0);
+  return dt;
+}
+function computeWeekly(recs, n = 8) {
+  const cur = weekStart(new Date().toISOString().slice(0, 10));
+  const buckets = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(cur); d.setDate(d.getDate() - i * 7);
+    buckets.push({ key: d.toISOString().slice(0, 10), ts: d.getTime(), amt: 0 });
+  }
+  const idx = Object.fromEntries(buckets.map((b, i) => [b.key, i]));
+  for (const r of recs) {
+    const k = weekStart(r.received_date).toISOString().slice(0, 10);
+    if (k in idx) buckets[idx[k]].amt += (r.receipt_line || []).reduce((a, l) => a + lineCost(l), 0);
+  }
+  return buckets.map((b, i) => ({
+    ...b, current: i === buckets.length - 1,
+    label: new Date(b.ts).toLocaleDateString(undefined, { month: "short", day: "numeric" }),
+  }));
+}
+
 function computeUsage(products, counts, receipts) {
   const byProd = {};
   for (const c of counts) {
@@ -632,7 +656,7 @@ function Dashboard({ products, onhand, vendors }) {
   const [counts, setCounts] = useState([]);
   const [ship, setShip] = useState({ open: 0, purchased: 0 });
   const [open, setOpen] = useState("onhand");
-  const [spendDays, setSpendDays] = useState(30);
+  const [spendDays, setSpendDays] = useState(7);
 
   useEffect(() => {
     db.getReceipts(120).then(setReceipts).catch(() => setReceipts([]));
@@ -659,6 +683,10 @@ function Dashboard({ products, onhand, vendors }) {
   const since30 = Date.now() - 30 * 864e5;
   const recs30 = recs.filter((r) => new Date(r.received_date).getTime() >= since30);
   const spend30 = recs30.reduce((a, r) => a + (r.receipt_line || []).reduce((s, l) => s + lineCost(l), 0), 0);
+  const since7 = Date.now() - 7 * 864e5;
+  const recs7 = recs.filter((r) => new Date(r.received_date).getTime() >= since7);
+  const spend7 = recs7.reduce((a, r) => a + (r.receipt_line || []).reduce((s, l) => s + lineCost(l), 0), 0);
+  const weekly = computeWeekly(recs, 8);
 
   const everyday = products.filter((p) => p.menu === "everyday").length;
   const events = products.filter((p) => p.menu === "events").length;
@@ -680,9 +708,24 @@ function Dashboard({ products, onhand, vendors }) {
       <div className="tiles">
         {tile("Items tracked", products.length, `${everyday} everyday · ${events} events`)}
         {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true)}
-        {tile("Purchases · 30d", fmtUSD(spend30), `${recs30.length} receipt${recs30.length === 1 ? "" : "s"}`)}
+        {tile("Purchases · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`)}
         {tile("To buy / awaiting", `${ship.open} / ${ship.purchased}`, "open · purchased")}
       </div>
+
+      <div className="secthead">Spend by week · last 8 weeks</div>
+      {weekly.every((w) => w.amt === 0)
+        ? <div className="note">No receipts logged yet. Each week's spend builds here as you receive orders.</div>
+        : <div style={{ background: "#fff", border: "1.5px solid #E6E1D6", borderRadius: 11, padding: 14 }}>
+            {weekly.map((w) => {
+              const max = Math.max(1, ...weekly.map((x) => x.amt));
+              return <div key={w.key} style={{ marginBottom: 9 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 3 }}>
+                  <span>Week of {w.label}{w.current ? <b> · this week</b> : ""}</span><span className="fig">{money(w.amt)}</span>
+                </div>
+                <div className="bar"><span style={{ width: (w.amt / max * 100) + "%", background: w.current ? "#191B1F" : "#E0392B" }} /></div>
+              </div>;
+            })}
+          </div>}
 
       <div className="secthead">Spend by vendor · last {spendDays} days</div>
       {Object.keys(spendByVendor).length === 0
