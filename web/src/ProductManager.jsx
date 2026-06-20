@@ -69,6 +69,21 @@ const STYLE = `
 .pm .bchip { display:inline-flex; align-items:center; gap:5px; background:#F1EEE6; border:1px solid var(--line); border-radius:6px; padding:3px 8px; font-size:12px; margin:0 5px 5px 0; }
 .pm .spin { display:inline-block; width:14px; height:14px; border:2.5px solid rgba(255,255,255,.4); border-top-color:#fff; border-radius:50%; animation:s .7s linear infinite; }
 @keyframes s { to { transform:rotate(360deg); } }
+.pm .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(175px,1fr)); gap:12px; margin-bottom:8px; }
+.pm .tile { background:#fff; border:1.5px solid var(--line); border-radius:12px; padding:14px 16px; }
+.pm .tile.dark { background:var(--ink); color:#F5F2EA; border-color:var(--ink); }
+.pm .tile .k { font-size:10px; text-transform:uppercase; letter-spacing:.1em; font-weight:600; color:var(--muted); }
+.pm .tile.dark .k { color:#9aa0a8; }
+.pm .tile .v { font-family:'Barlow Condensed',sans-serif; font-weight:700; font-size:30px; line-height:1.05; margin-top:3px; }
+.pm .tile .sub { font-size:11.5px; color:var(--muted); margin-top:2px; }
+.pm .tile.dark .sub { color:#9aa0a8; }
+.pm .panel { background:#fff; border:1.5px solid var(--line); border-radius:11px; margin-bottom:10px; overflow:hidden; }
+.pm .panel-h { display:flex; justify-content:space-between; align-items:center; padding:13px 16px; cursor:pointer; font-family:'Barlow Condensed',sans-serif; text-transform:uppercase; letter-spacing:.04em; font-weight:600; font-size:16px; }
+.pm .panel-h:hover { background:#FAF8F2; }
+.pm .panel-b { padding:6px 16px 16px; border-top:1.5px solid var(--line); }
+.pm .bar { height:9px; background:#EFEBE1; border-radius:5px; overflow:hidden; }
+.pm .bar > span { display:block; height:100%; background:var(--chili); }
+.pm .secthead { font-family:'Barlow Condensed',sans-serif; text-transform:uppercase; letter-spacing:.08em; font-weight:700; font-size:13px; color:var(--muted); margin:20px 0 9px; }
 `;
 
 export default function App() {
@@ -104,7 +119,7 @@ export default function App() {
 
   if (loading) return <div className="pm"><style>{STYLE}</style><div className="wrap" style={{ padding: 60, textAlign: "center", color: "#71757E" }}>Loading…</div></div>;
 
-  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["receive", "Receive"], ["shopping", "Shopping"], ["reports", "Reports"]];
+  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["receive", "Receive"], ["shopping", "Shopping"], ["reports", "Dashboard"]];
 
   return (
     <div className="pm">
@@ -128,7 +143,7 @@ export default function App() {
         {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
         {tab === "shopping" && <Shopping products={products} vendors={vendors} />}
-        {tab === "reports" && <Reports products={products} onhand={onhand} />}
+        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} />}
       </div>
     </div>
   );
@@ -573,22 +588,213 @@ function Picker({ products, exclude, onPick }) {
   );
 }
 
-function Reports({ products, onhand }) {
-  const rows = products.slice().sort((a, b) => a.name.localeCompare(b.name));
+const fmtUSD = (n) => (n == null || isNaN(n)) ? "$0" : "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+function costPerCount(p) {
+  const v = (p.vendors || []).find((x) => x.primary) || (p.vendors || [])[0];
+  return v?.price != null ? v.price / (p.count_per_case || 1) : null;
+}
+function lineCost(l) { return (Number(l.purchase_qty) || 0) * (Number(l.unit_cost) || 0); }
+
+function computeUsage(products, counts, receipts) {
+  const byProd = {};
+  for (const c of counts) {
+    const d = c.counted_at.slice(0, 10);
+    (byProd[c.product_id] ||= []).push({ d, loc: c.location_id, qty: Number(c.qty), t: new Date(c.counted_at).getTime() });
+  }
+  const recByProd = {};
+  for (const r of receipts) for (const l of (r.receipt_line || [])) {
+    (recByProd[l.product_id] ||= []).push({ d: r.received_date, units: Number(l.qty_count_units) || (Number(l.purchase_qty) || 0) });
+  }
+  const rows = []; let totalCost = 0; let interval = null;
+  for (const p of products) {
+    const evs = byProd[p.product_id]; if (!evs) continue;
+    const days = [...new Set(evs.map((e) => e.d))].sort();
+    if (days.length < 2) continue;
+    const d1 = days[days.length - 2], d2 = days[days.length - 1];
+    const ohAt = (day) => {
+      const latest = {};
+      for (const e of evs) if (e.d <= day && (!latest[e.loc] || e.t >= latest[e.loc].t)) latest[e.loc] = e;
+      return Object.values(latest).reduce((a, e) => a + e.qty, 0);
+    };
+    const recd = (recByProd[p.product_id] || []).filter((x) => x.d > d1 && x.d <= d2).reduce((a, x) => a + x.units, 0);
+    let used = ohAt(d1) + recd - ohAt(d2); if (used < 0) used = 0;
+    const cpc = costPerCount(p); const cost = cpc != null ? used * cpc : null;
+    if (cost != null) totalCost += cost;
+    rows.push({ id: p.product_id, name: p.name, used, unit: p.count_unit, cost });
+    interval = interval || [d1, d2];
+  }
+  rows.sort((a, b) => (b.cost || 0) - (a.cost || 0));
+  return { rows, totalCost, interval };
+}
+
+function Dashboard({ products, onhand, vendors }) {
+  const [receipts, setReceipts] = useState(null);
+  const [counts, setCounts] = useState([]);
+  const [ship, setShip] = useState({ open: 0, purchased: 0 });
+  const [open, setOpen] = useState("onhand");
+  const [spendDays, setSpendDays] = useState(30);
+
+  useEffect(() => {
+    db.getReceipts(120).then(setReceipts).catch(() => setReceipts([]));
+    db.getCounts(120).then(setCounts).catch(() => setCounts([]));
+    db.shoppingCounts().then(setShip).catch(() => {});
+  }, []);
+
+  const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
+  const recs = receipts || [];
+
+  let invValue = 0; const valByCat = {};
+  for (const p of products) {
+    const cpc = costPerCount(p); const oh = onhand[p.product_id]?.total || 0;
+    if (cpc != null && oh) { const val = cpc * oh; invValue += val; const c = p.category || "Uncategorized"; valByCat[c] = (valByCat[c] || 0) + val; }
+  }
+
+  const sinceSpend = Date.now() - spendDays * 864e5;
+  const spendByVendor = {};
+  for (const r of recs) {
+    if (new Date(r.received_date).getTime() < sinceSpend) continue;
+    const c = (r.receipt_line || []).reduce((a, l) => a + lineCost(l), 0);
+    spendByVendor[r.vendor_id ?? "none"] = (spendByVendor[r.vendor_id ?? "none"] || 0) + c;
+  }
+  const since30 = Date.now() - 30 * 864e5;
+  const recs30 = recs.filter((r) => new Date(r.received_date).getTime() >= since30);
+  const spend30 = recs30.reduce((a, r) => a + (r.receipt_line || []).reduce((s, l) => s + lineCost(l), 0), 0);
+
+  const everyday = products.filter((p) => p.menu === "everyday").length;
+  const events = products.filter((p) => p.menu === "events").length;
+  const usage = computeUsage(products, counts, recs);
+
+  const tile = (k, v, sub, dark) => <div className={"tile" + (dark ? " dark" : "")}><div className="k">{k}</div><div className="v fig">{v}</div>{sub && <div className="sub">{sub}</div>}</div>;
+  const reports = [
+    ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
+    ["value", "Inventory value — by category", <ValueReport valByCat={valByCat} total={invValue} />],
+    ["spend", "Purchasing — by vendor", <SpendReport recs={recs} vName={vName} days={spendDays} setDays={setSpendDays} />],
+    ["foodcost", "Weekly food cost & usage", <UsageReport usage={usage} />],
+    ["complete", "Catalog completeness", <CompletenessReport products={products} />],
+    ["menu", "Everyday vs Events", <MenuReport products={products} />],
+  ];
+
+  if (receipts === null) return <div className="empty">Loading…</div>;
   return (
     <div>
-      <div className="vname" style={{ marginBottom: 10 }}>On hand — by location</div>
-      <table className="tbl"><thead><tr><th>Item</th><th>Total in stock</th><th>Where it's stocked</th></tr></thead>
-        <tbody>{rows.map((p) => {
-          const oh = onhand[p.product_id];
-          const where = oh ? Object.entries(oh.byLoc).filter(([, q]) => q > 0) : [];
-          return (<tr key={p.product_id}>
-            <td>{p.name}<div className="stat">{p.count_unit}</div></td>
-            <td className="fig" style={{ fontWeight: 700 }}>{oh?.total ?? 0}</td>
-            <td>{where.length ? where.map(([n, q]) => <span className="bchip" key={n}>{n}: <b className="fig" style={{ marginLeft: 4 }}>{q}</b></span>) : <span className="stat">—</span>}</td>
-          </tr>);
-        })}</tbody></table>
-      <div className="note" style={{ marginTop: 18 }}>Usage trends, weekly food cost, price-change history, and the investigate flags come online once you've logged a few weeks of counts — they're computed from the count and receipt history you're now building.</div>
+      <div className="tiles">
+        {tile("Items tracked", products.length, `${everyday} everyday · ${events} events`)}
+        {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true)}
+        {tile("Purchases · 30d", fmtUSD(spend30), `${recs30.length} receipt${recs30.length === 1 ? "" : "s"}`)}
+        {tile("To buy / awaiting", `${ship.open} / ${ship.purchased}`, "open · purchased")}
+      </div>
+
+      <div className="secthead">Spend by vendor · last {spendDays} days</div>
+      {Object.keys(spendByVendor).length === 0
+        ? <div className="note">No receipts in this window yet. As you receive orders, spend shows up here.</div>
+        : <div style={{ background: "#fff", border: "1.5px solid #E6E1D6", borderRadius: 11, padding: 14 }}>
+            {Object.entries(spendByVendor).sort((a, b) => b[1] - a[1]).map(([vid, amt]) => {
+              const max = Math.max(...Object.values(spendByVendor));
+              return <div key={vid} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 3 }}><b>{vName[vid] || "No vendor"}</b><span className="fig">{money(amt)}</span></div>
+                <div className="bar"><span style={{ width: (max ? amt / max * 100 : 0) + "%" }} /></div>
+              </div>;
+            })}
+          </div>}
+
+      <div className="secthead">Reports</div>
+      {reports.map(([key, label, body]) => (
+        <div className="panel" key={key}>
+          <div className="panel-h" onClick={() => setOpen(open === key ? "" : key)}>
+            <span>{label}</span><span style={{ color: "#71757E" }}>{open === key ? "▾" : "▸"}</span>
+          </div>
+          {open === key && <div className="panel-b">{body}</div>}
+        </div>
+      ))}
     </div>
   );
+}
+
+function OnHandReport({ products, onhand }) {
+  const rows = products.slice().sort((a, b) => a.name.localeCompare(b.name));
+  return (
+    <table className="tbl" style={{ border: "none" }}><thead><tr><th>Item</th><th>In stock</th><th>Where</th></tr></thead>
+      <tbody>{rows.map((p) => {
+        const oh = onhand[p.product_id];
+        const where = oh ? Object.entries(oh.byLoc).filter(([, q]) => q > 0) : [];
+        return (<tr key={p.product_id}>
+          <td>{p.name}<div className="stat">{p.count_unit}</div></td>
+          <td className="fig" style={{ fontWeight: 700 }}>{oh?.total ?? 0}</td>
+          <td>{where.length ? where.map(([n, q]) => <span className="bchip" key={n}>{n}: <b className="fig" style={{ marginLeft: 4 }}>{q}</b></span>) : <span className="stat">not counted yet</span>}</td>
+        </tr>);
+      })}</tbody></table>
+  );
+}
+
+function ValueReport({ valByCat, total }) {
+  const rows = Object.entries(valByCat).sort((a, b) => b[1] - a[1]);
+  if (!rows.length) return <div className="note">Inventory value appears once items have been counted — it's on-hand count × your cost per count unit.</div>;
+  const max = Math.max(...rows.map((r) => r[1]));
+  return (<div>
+    <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 22, marginBottom: 10 }}>{money(total)} <span style={{ fontSize: 13, color: "#71757E" }}>on hand at cost</span></div>
+    {rows.map(([cat, amt]) => <div key={cat} style={{ marginBottom: 9 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 3 }}><span>{cat}</span><span className="fig">{money(amt)}</span></div>
+      <div className="bar"><span style={{ width: amt / max * 100 + "%" }} /></div>
+    </div>)}
+  </div>);
+}
+
+function SpendReport({ recs, vName, days, setDays }) {
+  const since = Date.now() - days * 864e5;
+  const inWin = recs.filter((r) => new Date(r.received_date).getTime() >= since);
+  const byV = {}; let total = 0;
+  for (const r of inWin) { const c = (r.receipt_line || []).reduce((a, l) => a + lineCost(l), 0); total += c; byV[r.vendor_id ?? "none"] = (byV[r.vendor_id ?? "none"] || 0) + c; }
+  return (<div>
+    <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+      {[7, 30, 90].map((d) => <button key={d} className="mini" style={{ background: days === d ? "#191B1F" : "#fff", color: days === d ? "#fff" : "#191B1F" }} onClick={() => setDays(d)}>{d} days</button>)}
+    </div>
+    {inWin.length === 0 ? <div className="note">No receipts in the last {days} days yet.</div> : (<div>
+      <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 22, marginBottom: 10 }}>{money(total)} <span style={{ fontSize: 13, color: "#71757E" }}>spent · {inWin.length} receipt{inWin.length === 1 ? "" : "s"}</span></div>
+      <table className="tbl" style={{ border: "none" }}><thead><tr><th>Vendor</th><th>Spend</th></tr></thead>
+        <tbody>{Object.entries(byV).sort((a, b) => b[1] - a[1]).map(([vid, amt]) => <tr key={vid}><td>{vName[vid] || "No vendor"}</td><td className="fig">{money(amt)}</td></tr>)}</tbody></table>
+    </div>)}
+  </div>);
+}
+
+function UsageReport({ usage }) {
+  if (!usage.rows.length) return <div className="note">Weekly food cost activates once items have <b>two counts</b> logged (it's prior count + received − current count, valued at your cost). Keep counting and this fills in automatically.</div>;
+  const [a, b] = usage.interval || [];
+  return (<div>
+    <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 22, marginBottom: 4 }}>{money(usage.totalCost)} <span style={{ fontSize: 13, color: "#71757E" }}>cost of goods used</span></div>
+    <div className="stat" style={{ marginBottom: 10 }}>between {a} and {b}, most recent count interval</div>
+    <table className="tbl" style={{ border: "none" }}><thead><tr><th>Item</th><th>Used</th><th>Cost</th></tr></thead>
+      <tbody>{usage.rows.slice(0, 40).map((r) => <tr key={r.id}><td>{r.name}</td><td className="fig">{r.used} {r.unit}</td><td className="fig">{r.cost != null ? money(r.cost) : "—"}</td></tr>)}</tbody></table>
+  </div>);
+}
+
+function CompletenessReport({ products }) {
+  const noPrice = products.filter((p) => !(p.vendors || []).some((v) => v.price != null));
+  const noCat = products.filter((p) => !p.category);
+  const noVendor = products.filter((p) => !(p.vendors || []).length);
+  const needsCount = products.filter((p) => p.count_unit === "each" && (p.count_per_case == p.pack));
+  const block = (title, list) => (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}><b>{title}</b><span className="fig" style={{ color: list.length ? "#E0392B" : "#0E7C6B" }}>{list.length}</span></div>
+      {list.length > 0 && <div className="stat" style={{ marginTop: 3 }}>{list.slice(0, 12).map((p) => p.name).join(", ")}{list.length > 12 ? `, +${list.length - 12} more` : ""}</div>}
+    </div>
+  );
+  return (<div>
+    <div className="stat" style={{ marginBottom: 12 }}>Items that still need a detail filled in before the numbers are fully reliable.</div>
+    {block("No vendor price", noPrice)}
+    {block("No category", noCat)}
+    {block("No vendor linked", noVendor)}
+    {block("Count conversion still default", needsCount)}
+  </div>);
+}
+
+function MenuReport({ products }) {
+  const groups = { everyday: [], events: [], other: [] };
+  for (const p of products) (groups[p.menu === "everyday" ? "everyday" : p.menu === "events" ? "events" : "other"]).push(p);
+  const col = (title, list) => (
+    <div className="vgroup" style={{ flex: 1, minWidth: 220 }}>
+      <div className="vgroup-h"><span className="vname">{title}</span><span className="stat">{list.length}</span></div>
+      <div style={{ padding: "8px 0", fontSize: 13 }}>{list.slice(0, 30).map((p) => <div key={p.product_id} style={{ padding: "2px 0" }}>{p.name}{p.menu !== "everyday" && p.menu !== "events" ? <span className="bchip" style={{ marginLeft: 6 }}>{p.menu}</span> : null}</div>)}{list.length > 30 ? <div className="stat">+{list.length - 30} more</div> : null}</div>
+    </div>
+  );
+  return <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>{col("Everyday", groups.everyday)}{col("Events", groups.events)}{groups.other.length ? col("Special / Vending", groups.other) : null}</div>;
 }
