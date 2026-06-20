@@ -171,7 +171,33 @@ export async function postReceipt(header, lines) {
   return r.receipt_id;
 }
 
-// ---- Reports ----
+// ---- Reports / dashboard ----
+export async function getReceipts(days = 120) {
+  const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+  const { data, error } = await supabase.from("receipt")
+    .select("receipt_id, vendor_id, received_date, vendor(name)," +
+      " receipt_line(product_id, purchase_qty, unit_cost, qty_count_units)")
+    .gte("received_date", since).order("received_date", { ascending: false });
+  if (error) throw error;
+  return data ?? [];
+}
+export async function getCounts(days = 120) {
+  const since = new Date(Date.now() - days * 864e5).toISOString();
+  const { data, error } = await supabase.from("stock_count")
+    .select("product_id, location_id, qty, counted_at").gte("counted_at", since)
+    .order("counted_at", { ascending: true });
+  if (error) throw error;
+  return data ?? [];
+}
+export async function shoppingCounts(domain = "fnb") {
+  const listId = await ensureOpenList(domain);
+  const { data } = await supabase.from("shopping_line")
+    .select("status").eq("shopping_list_id", listId).neq("status", "received");
+  const open = (data ?? []).filter((l) => l.status === "open").length;
+  const purchased = (data ?? []).filter((l) => l.status === "purchased").length;
+  return { open, purchased };
+}
+
 export async function onHandByLocation() {
   const { data, error } = await supabase.from("v_on_hand_by_location")
     .select("product_id, location_id, qty, counted_at");
