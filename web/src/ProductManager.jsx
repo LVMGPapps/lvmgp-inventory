@@ -549,9 +549,8 @@ function computeSuggestions(products, counts, receipts) {
   }
   const out = [];
   for (const p of products) {
-    const it = byItem[p.product_id]; if (!it) continue;
+    const it = byItem[p.product_id]; if (!it) continue;        // need at least one count to know on-hand
     const weeks = Object.keys(it).sort();
-    if (weeks.length < 2) continue;
     const total = (w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
     const usages = [];
     for (let i = 1; i < weeks.length; i++) {
@@ -559,13 +558,16 @@ function computeSuggestions(products, counts, receipts) {
       let u = total(weeks[i - 1]) + recd - total(weeks[i]); if (u < 0) u = 0;
       usages.push(u);
     }
-    const last = usages[usages.length - 1];
-    const avg = usages.reduce((a, x) => a + x, 0) / usages.length;
-    const forecast = 0.6 * last + 0.4 * avg;
-    const onhand = total(weeks[weeks.length - 1]);
+    const last = usages.length ? usages[usages.length - 1] : 0;
+    const avg = usages.length ? usages.reduce((a, x) => a + x, 0) / usages.length : 0;
+    const forecast = 0.6 * last + 0.4 * avg;                   // count units used per week
     const cpc = p.count_per_case || 1;
-    const cases = Math.ceil((forecast - onhand) / cpc - 1e-9);
-    if (cases >= 1) out.push({ product: p, cases, forecast: Math.round(forecast), onhand });
+    const onhandCases = total(weeks[weeks.length - 1]) / cpc;
+    const usageCases = forecast / cpc;
+    const parCases = Number(p.par_level) || 0;
+    const target = Math.max(parCases, usageCases);             // build up to par, or a week's usage if higher
+    const cases = Math.ceil(target - onhandCases - 1e-9);
+    if (cases >= 1) out.push({ product: p, cases, target: +target.toFixed(1), usageCases: +usageCases.toFixed(1), onhandCases: +onhandCases.toFixed(1) });
   }
   out.sort((a, b) => b.cases - a.cases);
   return out;
@@ -633,7 +635,7 @@ function Shopping({ products, vendors }) {
         <button className="btn btn-ghost" disabled={!suggestions.length} onClick={buildFromUsage}>🧮 Build from usage{suggestions.length ? ` (${suggestions.length})` : ""}</button>
       </div>
       {note && <div className="ok">{note}</div>}
-      <div className="note" style={{ marginBottom: 14 }}>Add items by hand, or tap <b>Build from usage</b> to suggest order quantities from your counts (60% last week + 40% average usage, minus what's on hand, rounded up to whole cases). Then mark items <b>Purchased</b> — one at a time or a whole vendor at once — and they move to the <b>Receive</b> tab.</div>
+      <div className="note" style={{ marginBottom: 14 }}>Add items by hand, or tap <b>Build from usage</b> to fill the order up to each item's <b>par</b> (or a week's usage if that's higher), minus what's on hand, rounded up to whole cases. Then mark items <b>Purchased</b> — one at a time or a whole vendor at once — and they move to the <b>Receive</b> tab.</div>
       {lines.length === 0 ? <div className="empty">Add items to build your order.</div> : order.map((k) => {
         const g = groups[k];
         const openCount = g.filter((l) => l.status === "open").length;
