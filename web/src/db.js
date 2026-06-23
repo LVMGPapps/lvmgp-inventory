@@ -13,7 +13,8 @@ export async function getCatalog(domain = "fnb") {
     .from("product")
     .select(
       "*, product_vendor(vendor_id, current_price, is_primary, vendor(name))," +
-      " product_location(location_id, is_primary, location(name)), product_barcode(code)",
+      " product_location(location_id, is_primary, storage_unit_id, location(name), storage_unit(code, sort_order))," +
+      " product_barcode(code)",
     )
     .eq("domain", domain)
     .eq("active", true)
@@ -28,6 +29,7 @@ export async function getCatalog(domain = "fnb") {
     })),
     locations: (p.product_location ?? []).map((l) => ({
       location_id: l.location_id, name: l.location?.name, primary: l.is_primary,
+      unit_id: l.storage_unit_id, unit_code: l.storage_unit?.code ?? null, unit_sort: l.storage_unit?.sort_order ?? null,
     })),
     barcodes: (p.product_barcode ?? []).map((b) => b.code),
   }));
@@ -50,7 +52,7 @@ export async function createProduct(p) {
     })));
   if (p.locations?.length)
     await supabase.from("product_location").insert(p.locations.map((l) => ({
-      product_id: id, location_id: l.location_id, is_primary: l.primary,
+      product_id: id, location_id: l.location_id, is_primary: l.primary, storage_unit_id: l.unit_id ?? null,
     })));
   return id;
 }
@@ -76,9 +78,23 @@ export async function updateProduct(p) {
     })));
   if (p.locations?.length)
     await supabase.from("product_location").insert(p.locations.map((l) => ({
-      product_id: id, location_id: l.location_id, is_primary: l.primary,
+      product_id: id, location_id: l.location_id, is_primary: l.primary, storage_unit_id: l.unit_id ?? null,
     })));
   return id;
+}
+
+// ---- Storage units (shelves/bins inside a location) ----
+export async function listStorageUnits() {
+  const { data, error } = await supabase.from("storage_unit")
+    .select("storage_unit_id, location_id, code, sort_order").order("location_id").order("sort_order");
+  if (error) throw error;
+  return data ?? [];
+}
+export async function addStorageUnit(location_id, code, sort_order = 999) {
+  const { data, error } = await supabase.from("storage_unit")
+    .insert({ location_id, code, sort_order }).select("storage_unit_id").single();
+  if (error) throw error;
+  return data.storage_unit_id;
 }
 
 export async function deleteProduct(id) {
@@ -114,6 +130,25 @@ export async function postCounts(entries) {
   const { error } = await supabase.from("stock_count").insert(rows);
   if (error) throw error;
   return rows.length;
+}
+
+// ---- Edit / fix individual counts ----
+export async function getItemCounts(productId, days = 200) {
+  const since = new Date(Date.now() - days * 864e5).toISOString();
+  const { data, error } = await supabase.from("stock_count")
+    .select("stock_count_id, location_id, counted_at, cases, loose, qty, location(name)")
+    .eq("product_id", productId).gte("counted_at", since)
+    .order("counted_at", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((r) => ({ ...r, location_name: r.location?.name }));
+}
+export async function updateCount(id, fields) {
+  const { error } = await supabase.from("stock_count").update(fields).eq("stock_count_id", id);
+  if (error) throw error;
+}
+export async function deleteCount(id) {
+  const { error } = await supabase.from("stock_count").delete().eq("stock_count_id", id);
+  if (error) throw error;
 }
 
 // ---- Scan lookup / barcode learning ----
