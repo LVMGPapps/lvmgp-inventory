@@ -149,7 +149,7 @@ export default function App() {
         {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} reload={reload} />}
         {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
-        {tab === "shopping" && <Shopping products={products} vendors={vendors} />}
+        {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} />}
         {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} reload={reload} />}
       </div>
     </div>
@@ -572,7 +572,7 @@ function computeSuggestions(products, counts, receipts) {
   return out;
 }
 
-function Shopping({ products, vendors }) {
+function Shopping({ products, vendors, onhand }) {
   const [listId, setListId] = useState(null);
   const [lines, setLines] = useState(null);
   const [counts, setCounts] = useState([]);
@@ -654,7 +654,7 @@ function Shopping({ products, vendors }) {
               const done = l.status === "purchased";
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 130px 70px 130px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
-                  <div><b>{p.name}</b><div className="stat">{p.count_unit} · {p.purchase_unit}</div></div>
+                  <div><b>{p.name}</b><div className="stat">{p.count_unit} · {p.purchase_unit} · <b style={{ color: "#191B1F" }}>on hand {onhand?.[p.product_id]?.total ?? 0}</b> {p.count_unit}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
@@ -685,49 +685,61 @@ function Finder({ products, onClose, onFound }) {
   const [matches, setMatches] = useState(null);
   const [linkCode, setLinkCode] = useState(null);
   const videoRef = useRef(null);
-  const readerRef = useRef(null);
-  const controlsRef = useRef(null);
+  const streamRef = useRef(null);
+  const rafRef = useRef(null);
+  const stoppedRef = useRef(false);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
 
   function stopCam() {
-    try { controlsRef.current?.stop?.(); } catch {}
-    try { readerRef.current?.reset?.(); } catch {}
+    stoppedRef.current = true;
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    const s = streamRef.current; if (s) { try { s.getTracks().forEach((t) => t.stop()); } catch {} }
+    streamRef.current = null;
   }
 
   async function handleCode(code) {
+    stopCam();
     setStatus(`Looking up ${code}…`);
     try {
       const hit = await db.lookupBarcode(code);
-      if (hit) { stopCam(); onFound(byId[hit.product_id] || hit); }
+      if (hit) { onFound(byId[hit.product_id] || hit); }
       else { setLinkCode(code); setStatus(`No item is linked to ${code} yet — pick the product it belongs to:`); }
     } catch (e) { setStatus("Lookup failed: " + (e.message || e)); }
   }
 
   useEffect(() => {
     if (mode !== "barcode" || linkCode) return;
-    let stopped = false;
+    stoppedRef.current = false;
+    if (!("BarcodeDetector" in window)) {
+      setStatus("Live barcode scanning isn't supported in this browser. Use “Photo of product,” or search by name below.");
+      return;
+    }
     setStatus("Starting camera…");
+    let detector;
+    try { detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "itf", "codabar"] }); }
+    catch { detector = new window.BarcodeDetector(); }
     (async () => {
-      let BrowserMultiFormatReader;
       try {
-        const mod = await import(/* @vite-ignore */ "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm");
-        BrowserMultiFormatReader = mod.BrowserMultiFormatReader;
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        if (stoppedRef.current) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        setStatus("Point the camera at a barcode…");
+        const tick = async () => {
+          if (stoppedRef.current) return;
+          try {
+            const codes = await detector.detect(videoRef.current);
+            if (codes && codes[0]) { handleCode(codes[0].rawValue); return; }
+          } catch {}
+          rafRef.current = requestAnimationFrame(tick);
+        };
+        rafRef.current = requestAnimationFrame(tick);
       } catch {
-        setStatus("Couldn't load the scanner. Use “Photo of product,” or search by name."); return;
+        setStatus("Couldn't open the camera. Check camera permissions, or use “Photo of product.”");
       }
-      if (stopped) return;
-      const reader = new BrowserMultiFormatReader();
-      readerRef.current = reader;
-      setStatus("Point the camera at a barcode…");
-      reader.decodeFromVideoDevice(undefined, videoRef.current, (result, err, controls) => {
-        if (controls) controlsRef.current = controls;
-        if (stopped || !result) return;
-        stopped = true;
-        handleCode(result.getText());
-      }).then((c) => { if (c) controlsRef.current = c; })
-        .catch(() => setStatus("Couldn't open the camera. Use “Photo of product,” or check camera permissions."));
     })();
-    return () => { stopped = true; stopCam(); };
+    return () => { stopCam(); };
   }, [mode, linkCode]);
 
   async function onPhoto(e) {
