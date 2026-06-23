@@ -531,9 +531,52 @@ function Receive({ products, vendors, reload }) {
   );
 }
 
+function computeSuggestions(products, counts, receipts) {
+  const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
+  const byItem = {};
+  for (const c of counts) {
+    const w = wkk(c.counted_at);
+    const it = (byItem[c.product_id] ||= {});
+    const wo = (it[w] ||= {});
+    const t = new Date(c.counted_at).getTime();
+    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t };
+  }
+  const recByItem = {};
+  for (const r of receipts) for (const l of (r.receipt_line || [])) {
+    const w = wkk(r.received_date);
+    (recByItem[l.product_id] ||= {});
+    recByItem[l.product_id][w] = (recByItem[l.product_id][w] || 0) + (Number(l.qty_count_units) || (Number(l.purchase_qty) || 0));
+  }
+  const out = [];
+  for (const p of products) {
+    const it = byItem[p.product_id]; if (!it) continue;
+    const weeks = Object.keys(it).sort();
+    if (weeks.length < 2) continue;
+    const total = (w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
+    const usages = [];
+    for (let i = 1; i < weeks.length; i++) {
+      const recd = (recByItem[p.product_id] || {})[weeks[i]] || 0;
+      let u = total(weeks[i - 1]) + recd - total(weeks[i]); if (u < 0) u = 0;
+      usages.push(u);
+    }
+    const last = usages[usages.length - 1];
+    const avg = usages.reduce((a, x) => a + x, 0) / usages.length;
+    const forecast = 0.6 * last + 0.4 * avg;
+    const onhand = total(weeks[weeks.length - 1]);
+    const cpc = p.count_per_case || 1;
+    const cases = Math.ceil((forecast - onhand) / cpc - 1e-9);
+    if (cases >= 1) out.push({ product: p, cases, forecast: Math.round(forecast), onhand });
+  }
+  out.sort((a, b) => b.cases - a.cases);
+  return out;
+}
+
 function Shopping({ products, vendors }) {
   const [listId, setListId] = useState(null);
   const [lines, setLines] = useState(null);
+  const [counts, setCounts] = useState([]);
+  const [receipts, setReceipts] = useState([]);
+  const [note, setNote] = useState("");
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
 
@@ -542,7 +585,12 @@ function Shopping({ products, vendors }) {
     catch { setLines([]); }
   }
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    db.getCounts(120).then(setCounts).catch(() => {});
+    db.getReceipts(120).then(setReceipts).catch(() => {});
+  }, []);
   if (lines === null) return <div className="empty">Loading…</div>;
+  const suggestions = computeSuggestions(products, counts, receipts);
 
   async function add(p) {
     const v = p.vendors.find((x) => x.primary) || p.vendors[0];
@@ -561,6 +609,18 @@ function Shopping({ products, vendors }) {
   async function purchase(line, on) { await db.updateShoppingLine(line.shopping_line_id, { status: on ? "purchased" : "open" }); load(); }
   async function purchaseVendor(vid, on) { await db.setVendorStatus(listId, vid, on ? "purchased" : "open", on ? "open" : "purchased"); load(); }
   async function remove(line) { await db.removeShoppingLine(line.shopping_line_id); load(); }
+  async function buildFromUsage() {
+    const have = new Set(lines.map((l) => l.product_id));
+    let added = 0;
+    for (const s of suggestions) {
+      if (have.has(s.product.product_id)) continue;
+      const v = s.product.vendors.find((x) => x.primary) || s.product.vendors[0];
+      await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null });
+      added++;
+    }
+    setNote(added ? `Added ${added} item${added === 1 ? "" : "s"} from last week's usage. Review the quantities, then mark Purchased.` : "Everything suggested is already on your list.");
+    load();
+  }
 
   const groups = {};
   for (const l of lines) { const k = l.vendor_id ?? "none"; (groups[k] ||= []).push(l); }
@@ -570,8 +630,10 @@ function Shopping({ products, vendors }) {
     <div>
       <div className="toolbar">
         <Picker products={products} exclude={lines.map((l) => l.product_id)} onPick={add} />
+        <button className="btn btn-ghost" disabled={!suggestions.length} onClick={buildFromUsage}>🧮 Build from usage{suggestions.length ? ` (${suggestions.length})` : ""}</button>
       </div>
-      <div className="note" style={{ marginBottom: 14 }}>Build the order, then mark items <b>Purchased</b> — one at a time, or a whole vendor at once. Purchased items move to the <b>Receive</b> tab. Automatic "build from usage" suggestions arrive once you've logged a few weeks of counts.</div>
+      {note && <div className="ok">{note}</div>}
+      <div className="note" style={{ marginBottom: 14 }}>Add items by hand, or tap <b>Build from usage</b> to suggest order quantities from your counts (60% last week + 40% average usage, minus what's on hand, rounded up to whole cases). Then mark items <b>Purchased</b> — one at a time or a whole vendor at once — and they move to the <b>Receive</b> tab.</div>
       {lines.length === 0 ? <div className="empty">Add items to build your order.</div> : order.map((k) => {
         const g = groups[k];
         const openCount = g.filter((l) => l.status === "open").length;
