@@ -677,133 +677,124 @@ function Shopping({ products, vendors, onhand }) {
   );
 }
 
-function tabBtn(active) { return { background: active ? "#191B1F" : "#fff", color: active ? "#fff" : "#191B1F" }; }
-
 function Finder({ products, onClose, onFound }) {
-  const [mode, setMode] = useState("barcode");
-  const [status, setStatus] = useState("Point the camera at a barcode…");
-  const [matches, setMatches] = useState(null);
+  const [q, setQ] = useState("");
+  const [status, setStatus] = useState("");
+  const [photoHits, setPhotoHits] = useState(null);
   const [linkCode, setLinkCode] = useState(null);
+  const [camOn, setCamOn] = useState(false);
+  const inputRef = useRef(null);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(null);
   const stoppedRef = useRef(false);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+  const camSupported = typeof window !== "undefined" && "BarcodeDetector" in window;
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const term = q.trim().toLowerCase();
+  const nameHits = term
+    ? products.filter((p) => p.name.toLowerCase().includes(term) || (p.brand || "").toLowerCase().includes(term)
+        || (p.barcodes || []).some((b) => String(b).includes(q.trim())) || String(p.supc || "").includes(q.trim())).slice(0, 12)
+    : [];
 
   function stopCam() {
     stoppedRef.current = true;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     const s = streamRef.current; if (s) { try { s.getTracks().forEach((t) => t.stop()); } catch {} }
-    streamRef.current = null;
+    streamRef.current = null; setCamOn(false);
   }
+  function finish(p) { stopCam(); onFound(p); }
 
-  async function handleCode(code) {
-    stopCam();
-    setStatus(`Looking up ${code}…`);
+  async function lookupCode(raw) {
+    const code = String(raw ?? q).trim(); if (!code) return;
+    setStatus(`Looking up ${code}…`); setPhotoHits(null);
     try {
       const hit = await db.lookupBarcode(code);
-      if (hit) { onFound(byId[hit.product_id] || hit); }
-      else { setLinkCode(code); setStatus(`No item is linked to ${code} yet — pick the product it belongs to:`); }
+      if (hit) { finish(byId[hit.product_id] || hit); return; }
+      setLinkCode(code); setStatus(`No item is linked to “${code}.” Pick the product below to link it.`);
     } catch (e) { setStatus("Lookup failed: " + (e.message || e)); }
   }
 
-  useEffect(() => {
-    if (mode !== "barcode" || linkCode) return;
-    stoppedRef.current = false;
-    if (!("BarcodeDetector" in window)) {
-      setStatus("Live barcode scanning isn't supported in this browser. Use “Photo of product,” or search by name below.");
-      return;
-    }
+  function onEnter() {
+    const code = q.trim(); if (!code) return;
+    if (/^\d{6,}$/.test(code)) lookupCode(code);     // looks like a barcode / SUPC
+    else if (nameHits[0]) finish(nameHits[0]);        // otherwise jump to best name match
+    else lookupCode(code);
+  }
+
+  async function startCam() {
+    if (!camSupported) { setStatus("This browser can't scan with the camera. Type the barcode above, or use a handheld scanner."); return; }
+    setLinkCode(null); setPhotoHits(null); setCamOn(true); stoppedRef.current = false;
     setStatus("Starting camera…");
     let detector;
     try { detector = new window.BarcodeDetector({ formats: ["ean_13", "ean_8", "upc_a", "upc_e", "code_128", "code_39", "itf", "codabar"] }); }
     catch { detector = new window.BarcodeDetector(); }
-    (async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-        if (stoppedRef.current) { stream.getTracks().forEach((t) => t.stop()); return; }
-        streamRef.current = stream;
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-        setStatus("Point the camera at a barcode…");
-        const tick = async () => {
-          if (stoppedRef.current) return;
-          try {
-            const codes = await detector.detect(videoRef.current);
-            if (codes && codes[0]) { handleCode(codes[0].rawValue); return; }
-          } catch {}
-          rafRef.current = requestAnimationFrame(tick);
-        };
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (stoppedRef.current) { stream.getTracks().forEach((t) => t.stop()); return; }
+      streamRef.current = stream; videoRef.current.srcObject = stream; await videoRef.current.play();
+      setStatus("Point the camera at a barcode…");
+      const tick = async () => {
+        if (stoppedRef.current) return;
+        try { const codes = await detector.detect(videoRef.current); if (codes && codes[0]) { setQ(codes[0].rawValue); lookupCode(codes[0].rawValue); return; } } catch {}
         rafRef.current = requestAnimationFrame(tick);
-      } catch {
-        setStatus("Couldn't open the camera. Check camera permissions, or use “Photo of product.”");
-      }
-    })();
-    return () => { stopCam(); };
-  }, [mode, linkCode]);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    } catch { setCamOn(false); setStatus("Couldn't open the camera. Check permissions, or type the barcode above."); }
+  }
 
   async function onPhoto(e) {
     const f = e.target.files?.[0]; if (!f) return;
-    setStatus("Identifying…"); setMatches(null);
+    setStatus("Identifying…"); setPhotoHits(null); setLinkCode(null);
     try {
       const d = await db.scanReceipt(f, "product");
-      const guess = (d.name || d.brand || "").toLowerCase();
+      if (d?.barcode && /^\d{6,}$/.test(String(d.barcode))) { await lookupCode(String(d.barcode)); e.target.value = ""; return; }
+      const guess = String(d?.name || d?.brand || "").toLowerCase();
       const key = guess.slice(0, 5);
-      const found = key ? products.filter((p) => p.name.toLowerCase().includes(key) || guess.includes(p.name.toLowerCase().slice(0, 5))).slice(0, 6) : [];
-      setMatches(found);
-      setStatus(found.length ? `Closest matches${d.name ? ` for “${d.name}”` : ""} — tap the right one:` : "No match — search by name below, or try the barcode.");
-    } catch { setStatus("Couldn't identify that photo. Try the barcode, or search by name below."); }
+      const found = key ? products.filter((p) => p.name.toLowerCase().includes(key) || guess.includes(p.name.toLowerCase().slice(0, 5))).slice(0, 8) : [];
+      setPhotoHits(found);
+      setStatus(found.length ? `Closest matches${d?.name ? ` for “${d.name}”` : ""} — tap the right one:` : "Couldn't match that photo. Type the name or barcode above.");
+    } catch { setStatus("Photo identify isn't set up right now. Type the name or barcode above."); }
     e.target.value = "";
   }
 
-  async function linkTo(p) { try { await db.linkBarcode(p.product_id, linkCode); } catch {} stopCam(); onFound(p); }
+  async function pick(p) {
+    if (linkCode) { try { await db.linkBarcode(p.product_id, linkCode); } catch {} }
+    finish(p);
+  }
+
+  const list = linkCode ? nameHits : (photoHits != null ? photoHits : nameHits);
 
   return (
     <div className="overlay" onClick={() => { stopCam(); onClose(); }}>
       <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(480px,100%)" }}>
         <h2>Find an item</h2>
-        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-          <button className="mini" style={tabBtn(mode === "barcode")} onClick={() => { setMatches(null); setLinkCode(null); setMode("barcode"); }}>Scan barcode</button>
-          <button className="mini" style={tabBtn(mode === "photo")} onClick={() => { stopCam(); setLinkCode(null); setMode("photo"); }}>Photo of product</button>
+        <div className="stat" style={{ marginBottom: 8 }}>Type or scan a barcode/SUPC, or search by name. Press Enter to jump to the best match.</div>
+        <input ref={inputRef} style={{ width: "100%", marginBottom: 8 }} placeholder="Scan / type barcode, or search by name…"
+          value={q} onChange={(e) => { setQ(e.target.value); setLinkCode(null); setPhotoHits(null); }}
+          onKeyDown={(e) => { if (e.key === "Enter") onEnter(); }} />
+        <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+          <button className="mini" onClick={onEnter}>Find</button>
+          {camSupported && <button className="mini" onClick={() => (camOn ? stopCam() : startCam())}>{camOn ? "Stop camera" : "📷 Scan with camera"}</button>}
+          <label className="mini" style={{ cursor: "pointer" }}>🖼 Photo of product<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onPhoto} /></label>
         </div>
 
-        {mode === "barcode" && !linkCode && (
-          <div>
-            <video ref={videoRef} style={{ width: "100%", borderRadius: 10, background: "#000", aspectRatio: "4 / 3", objectFit: "cover" }} muted playsInline />
-            <p className="stat" style={{ marginTop: 8 }}>{status}</p>
-          </div>
-        )}
+        {camOn && <video ref={videoRef} style={{ width: "100%", borderRadius: 10, background: "#000", aspectRatio: "4 / 3", objectFit: "cover", marginBottom: 8 }} muted playsInline />}
+        {status && <p className="stat" style={{ marginTop: 0 }}>{status}</p>}
+        {linkCode && <div className="group-t">Link “{linkCode}” to:</div>}
 
-        {mode === "photo" && (
-          <div>
-            <label className="btn btn-primary">📷 Take or choose a photo<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onPhoto} /></label>
-            <p className="stat" style={{ marginTop: 8 }}>{status}</p>
-          </div>
-        )}
-
-        {(linkCode || (matches && matches.length >= 0)) && (
-          <div className="group" style={{ marginTop: 8 }}>
-            {linkCode && <div className="group-t">Link barcode {linkCode}</div>}
-            <FinderPicker products={products} suggestions={matches || []} onPick={(p) => (linkCode ? linkTo(p) : (stopCam(), onFound(p)))} />
-          </div>
-        )}
+        <div style={{ maxHeight: 260, overflowY: "auto" }}>
+          {list.map((p) => (
+            <button key={p.product_id} className="mini" style={{ display: "block", width: "100%", textAlign: "left", marginBottom: 4 }} onClick={() => pick(p)}>
+              {p.name}<span className="stat"> · {(p.locations || []).map((l) => l.name + (l.unit_code ? ` ${l.unit_code}` : "")).join(", ") || "no location"}</span>
+            </button>
+          ))}
+          {list.length === 0 && term && <div className="stat">No matches — check spelling, or scan/type the barcode.</div>}
+        </div>
 
         <button className="btn btn-ghost" style={{ marginTop: 14 }} onClick={() => { stopCam(); onClose(); }}>Close</button>
-      </div>
-    </div>
-  );
-}
-
-function FinderPicker({ products, onPick, suggestions }) {
-  const [q, setQ] = useState("");
-  const hits = q ? products.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())).slice(0, 8) : (suggestions || []).slice(0, 8);
-  return (
-    <div>
-      {suggestions && suggestions.length > 0 && !q && <div className="stat" style={{ marginBottom: 6 }}>Suggested:</div>}
-      <input style={{ width: "100%", marginBottom: 6 }} placeholder="Search a product…" value={q} onChange={(e) => setQ(e.target.value)} />
-      <div style={{ maxHeight: 220, overflowY: "auto" }}>
-        {hits.map((p) => <button key={p.product_id} className="mini" style={{ display: "block", width: "100%", textAlign: "left", marginBottom: 4 }} onClick={() => onPick(p)}>{p.name}</button>)}
-        {hits.length === 0 && <div className="stat">Type to search…</div>}
       </div>
     </div>
   );
