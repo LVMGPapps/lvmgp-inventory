@@ -153,11 +153,13 @@ export async function deleteCount(id) {
 
 // ---- Scan lookup / barcode learning ----
 export async function lookupBarcode(code) {
-  const byCode = await supabase.from("product_barcode")
-    .select("product:product_id(product_id,name,count_unit)").eq("code", code).maybeSingle();
-  if (byCode.data?.product) return byCode.data.product;
-  const bySupc = await supabase.from("product")
-    .select("product_id,name,count_unit").eq("supc", code).maybeSingle();
+  const c = String(code).trim();
+  const bc = await supabase.from("product_barcode").select("product_id").eq("code", c).limit(1).maybeSingle();
+  if (bc.data?.product_id) {
+    const p = await supabase.from("product").select("product_id,name,count_unit").eq("product_id", bc.data.product_id).maybeSingle();
+    if (p.data) return p.data;
+  }
+  const bySupc = await supabase.from("product").select("product_id,name,count_unit").eq("supc", c).limit(1).maybeSingle();
   return bySupc.data ?? null;
 }
 export async function linkBarcode(productId, code) {
