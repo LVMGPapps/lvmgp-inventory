@@ -551,6 +551,43 @@ function Receive({ products, vendors, reload }) {
   );
 }
 
+function computeItemStats(products, counts, receipts) {
+  const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
+  const byItem = {};
+  for (const c of counts) {
+    const w = wkk(c.counted_at);
+    const it = (byItem[c.product_id] ||= {}); const wo = (it[w] ||= {});
+    const t = new Date(c.counted_at).getTime();
+    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t };
+  }
+  const recByItem = {};
+  for (const r of receipts) for (const l of (r.receipt_line || [])) {
+    const w = wkk(r.received_date); (recByItem[l.product_id] ||= {});
+    recByItem[l.product_id][w] = (recByItem[l.product_id][w] || 0) + (Number(l.qty_count_units) || Number(l.purchase_qty) || 0);
+  }
+  const stats = {};
+  for (const p of products) {
+    const cpc = p.count_per_case || 1;
+    const it = byItem[p.product_id];
+    if (!it) { stats[p.product_id] = { onhandUnits: 0, usedUnits: 0, suggestCases: 0 }; continue; }
+    const weeks = Object.keys(it).sort();
+    const total = (w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
+    const usages = [];
+    for (let i = 1; i < weeks.length; i++) {
+      const recd = (recByItem[p.product_id] || {})[weeks[i]] || 0;
+      let u = total(weeks[i - 1]) + recd - total(weeks[i]); if (u < 0) u = 0; usages.push(u);
+    }
+    const last = usages.length ? usages[usages.length - 1] : 0;
+    const avg = usages.length ? usages.reduce((a, x) => a + x, 0) / usages.length : 0;
+    const forecast = 0.6 * last + 0.4 * avg;
+    const onhandUnits = total(weeks[weeks.length - 1]);
+    const target = Math.max(Number(p.par_level) || 0, forecast / cpc);
+    const suggestCases = Math.max(0, Math.ceil(target - onhandUnits / cpc - 1e-9));
+    stats[p.product_id] = { onhandUnits, usedUnits: last, suggestCases };
+  }
+  return stats;
+}
+
 function computeSuggestions(products, counts, receipts) {
   const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
   const byItem = {};
@@ -613,6 +650,8 @@ function Shopping({ products, vendors, onhand }) {
   }, []);
   if (lines === null) return <div className="empty">Loading…</div>;
   const suggestions = computeSuggestions(products, counts, receipts);
+  const stats = computeItemStats(products, counts, receipts);
+  const r1 = (n) => Math.round(n * 10) / 10;
 
   async function add(p) {
     const v = p.vendors.find((x) => x.primary) || p.vendors[0];
@@ -675,7 +714,7 @@ function Shopping({ products, vendors, onhand }) {
               const done = l.status === "purchased";
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 130px 70px 130px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
-                  <div><b>{p.name}</b><div className="stat">{p.count_unit} · {p.purchase_unit} · <b style={{ color: "#191B1F" }}>on hand {onhand?.[p.product_id]?.total ?? 0}</b> {p.count_unit}</div></div>
+                  <div><b>{p.name}</b><div className="stat">on hand <b style={{ color: "#191B1F" }}>{r1(onhand?.[p.product_id]?.total ?? 0)}</b> {p.count_unit} · used last wk <b style={{ color: "#191B1F" }}>{r1(stats[p.product_id]?.usedUnits ?? 0)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
