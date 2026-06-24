@@ -40,7 +40,7 @@ export async function createProduct(p) {
     domain: p.domain ?? "fnb", name: p.name, category: p.category, brand: p.brand, supc: p.supc,
     purchase_unit: p.purchase_unit, pack: p.pack, size: p.size, size_unit: p.size_unit,
     count_unit: p.count_unit, count_per_case: p.count_per_case,
-    use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level,
+    use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
   }).select("product_id").single();
   if (error) throw error;
   const id = data.product_id;
@@ -63,7 +63,7 @@ export async function updateProduct(p) {
     name: p.name, category: p.category, brand: p.brand, supc: p.supc,
     purchase_unit: p.purchase_unit, pack: p.pack, size: p.size, size_unit: p.size_unit,
     count_unit: p.count_unit, count_per_case: p.count_per_case,
-    use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level,
+    use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
     updated_at: new Date().toISOString(),
   }).eq("product_id", id);
   if (error) throw error;
@@ -81,6 +81,17 @@ export async function updateProduct(p) {
       product_id: id, location_id: l.location_id, is_primary: l.primary, storage_unit_id: l.unit_id ?? null,
     })));
   return id;
+}
+
+// ---- Product photos (Supabase Storage) ----
+export async function uploadProductImage(file, productId) {
+  const ext = (String(file.name || "").split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+  const path = `${productId || "new"}/${Date.now()}.${ext}`;
+  const { error } = await supabase.storage.from("product-photos")
+    .upload(path, file, { upsert: true, contentType: file.type || "image/jpeg" });
+  if (error) throw error;
+  const { data } = supabase.storage.from("product-photos").getPublicUrl(path);
+  return data.publicUrl;
 }
 
 // ---- Storage units (shelves/bins inside a location) ----
