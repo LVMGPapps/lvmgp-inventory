@@ -159,7 +159,7 @@ export default function App() {
 function blankProduct() {
   return { product_id: null, name: "", category: "", brand: "", supc: "",
     purchase_unit: "Case", pack: 1, size: null, size_unit: "",
-    count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null,
+    count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null, image_url: null,
     barcodes: [], vendors: [], locations: [] };
 }
 
@@ -180,6 +180,7 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
         <div className="grid">
           {list.map((p) => (
             <div className="card" key={p.product_id}>
+              {p.image_url && <img src={p.image_url} alt="" style={{ width: "100%", height: 120, objectFit: "cover", borderRadius: 8, marginBottom: 8 }} />}
               <div className="tag">{p.category || "Uncategorized"}</div>
               <div className="card-name">{p.name}</div>
               {p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}
@@ -219,6 +220,14 @@ function Editor({ product, vendors, locations, units, onClose, onSaved }) {
     if (l) setP((s) => ({ ...s, locations: [...s.locations, { location_id: l.location_id, name: l.name, primary: s.locations.length === 0 }] }));
   }
 
+  async function uploadPhoto(e) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setBusy(true);
+    try { const url = await db.uploadProductImage(f, p.product_id); setP((s) => ({ ...s, image_url: url })); }
+    catch (err) { alert("Photo upload failed: " + (err.message || err)); }
+    finally { setBusy(false); e.target.value = ""; }
+  }
+
   async function save() {
     setBusy(true);
     try {
@@ -231,6 +240,18 @@ function Editor({ product, vendors, locations, units, onClose, onSaved }) {
     <div className="overlay" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
         <h2>{isNew ? "New product" : p.name}</h2>
+        <div className="group">
+          <div className="group-t">Photo</div>
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            {p.image_url
+              ? <img src={p.image_url} alt="" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 8 }} />
+              : <div style={{ width: 84, height: 84, borderRadius: 8, background: "#F0F1F3", display: "flex", alignItems: "center", justifyContent: "center", color: "#B7BBC4", fontSize: 28 }}>📷</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <label className="mini" style={{ cursor: "pointer" }}>{busy ? "Working…" : (p.image_url ? "Change photo" : "Add photo")}<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={uploadPhoto} /></label>
+              {p.image_url && <button className="mini mini-danger" onClick={() => set("image_url", null)}>Remove</button>}
+            </div>
+          </div>
+        </div>
         <div className="group">
           <div className="group-t">Identity</div>
           <div className="frow"><div className="field"><label>Name</label><input value={p.name} onChange={(e) => set("name", e.target.value)} /></div></div>
