@@ -93,14 +93,17 @@ export default function App() {
   const [vendors, setVendors] = useState([]);
   const [units, setUnits] = useState([]);
   const [onhand, setOnhand] = useState({});
+  const [counts, setCounts] = useState([]);
+  const [receipts, setReceipts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   async function reload() {
     setError("");
     try {
-      const [p, l, v, u, oh] = await Promise.all([
+      const [p, l, v, u, oh, cts, rcs] = await Promise.all([
         db.getCatalog(), db.listLocations(), db.listVendors(), db.listStorageUnits(), db.onHandByLocation(),
+        db.getCounts(160), db.getReceipts(160),
       ]);
       const locName = Object.fromEntries(l.map((x) => [x.location_id, x.name]));
       const latest = {};
@@ -115,7 +118,7 @@ export default function App() {
         m.byLoc[locName[r.location_id] || "?"] = r.qty;
         m.total += r.qty;
       }
-      setProducts(p); setLocations(l); setVendors(v); setUnits(u); setOnhand(map);
+      setProducts(p); setLocations(l); setVendors(v); setUnits(u); setOnhand(map); setCounts(cts); setReceipts(rcs);
     } catch (e) {
       setError("Couldn't load data: " + (e.message || e));
     } finally {
@@ -149,8 +152,8 @@ export default function App() {
         {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} reload={reload} />}
         {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
-        {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} />}
-        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} reload={reload} />}
+        {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} />}
+        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} counts={counts} receipts={receipts} reload={reload} />}
       </div>
     </div>
   );
@@ -366,8 +369,12 @@ function Count({ products, locations, onhand, reload }) {
       const p = products.find((x) => x.product_id === pid);
       return { product_id: pid, location_id: loc.location_id, cases: e.cases, loose: e.loose, count_per_case: p.count_per_case };
     });
-    await db.postCounts(entries);
-    setNote(entries.length); setDraft({}); reload();
+    try {
+      await db.postCounts(entries);
+      setNote(entries.length); setDraft({}); reload();
+    } catch (err) {
+      alert("Couldn't save the count: " + (err.message || err));
+    }
   }
 
   function onFound(p) {
@@ -630,11 +637,9 @@ function computeSuggestions(products, counts, receipts) {
   return out;
 }
 
-function Shopping({ products, vendors, onhand }) {
+function Shopping({ products, vendors, onhand, counts, receipts }) {
   const [listId, setListId] = useState(null);
   const [lines, setLines] = useState(null);
-  const [counts, setCounts] = useState([]);
-  const [receipts, setReceipts] = useState([]);
   const [note, setNote] = useState("");
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
@@ -644,13 +649,9 @@ function Shopping({ products, vendors, onhand }) {
     catch { setLines([]); }
   }
   useEffect(() => { load(); }, []);
-  useEffect(() => {
-    db.getCounts(120).then(setCounts).catch(() => {});
-    db.getReceipts(120).then(setReceipts).catch(() => {});
-  }, []);
   if (lines === null) return <div className="empty">Loading…</div>;
-  const suggestions = computeSuggestions(products, counts, receipts);
-  const stats = computeItemStats(products, counts, receipts);
+  const suggestions = computeSuggestions(products, counts || [], receipts || []);
+  const stats = computeItemStats(products, counts || [], receipts || []);
   const r1 = (n) => Math.round(n * 10) / 10;
 
   async function add(p) {
@@ -938,19 +939,13 @@ function computeUsage(products, counts, receipts) {
   return { rows, totalCost, interval };
 }
 
-function Dashboard({ products, onhand, vendors, reload }) {
-  const [receipts, setReceipts] = useState(null);
-  const [counts, setCounts] = useState([]);
+function Dashboard({ products, onhand, vendors, counts, receipts, reload }) {
   const [ship, setShip] = useState({ open: 0, purchased: 0 });
   const [open, setOpen] = useState("review");
   const [spendDays, setSpendDays] = useState(7);
   const [detail, setDetail] = useState(null);   // product whose count history is open
 
-  useEffect(() => {
-    db.getReceipts(120).then(setReceipts).catch(() => setReceipts([]));
-    db.getCounts(120).then(setCounts).catch(() => setCounts([]));
-    db.shoppingCounts().then(setShip).catch(() => {});
-  }, []);
+  useEffect(() => { db.shoppingCounts().then(setShip).catch(() => {}); }, []);
 
   const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
   const recs = receipts || [];
@@ -1039,7 +1034,7 @@ function Dashboard({ products, onhand, vendors, reload }) {
           {open === key && <div className="panel-b">{body}</div>}
         </div>
       ))}
-      {detail && <ItemHistory product={detail} onClose={() => setDetail(null)} onChanged={() => { db.getCounts(120).then(setCounts).catch(() => {}); reload && reload(); }} />}
+      {detail && <ItemHistory product={detail} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
     </div>
   );
 }
