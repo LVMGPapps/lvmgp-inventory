@@ -516,6 +516,7 @@ function Receive({ products, vendors, reload }) {
       vendor_id: r.vendor_id ? Number(r.vendor_id) : null,
       qty: num(r.qty), unit_cost: (r.case_cost !== "" && r.case_cost != null) ? num(r.case_cost) : null,
       count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
+      order_unit: r.order_unit || "case",
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
     setBusy(true);
@@ -557,11 +558,11 @@ function Receive({ products, vendors, reload }) {
               </span>
             </div>
             <table className="tbl" style={{ border: "none" }}>
-              <thead><tr><th>Item</th><th>Qty (cases)</th><th>Case $</th><th></th></tr></thead>
+              <thead><tr><th>Item</th><th>Qty</th><th>Unit $</th><th></th></tr></thead>
               <tbody>{g.map((r) => (
                 <tr key={r.shopping_line_id}>
-                  <td>{r.product_name}{r.scanned && <span className="bchip" style={{ marginLeft: 6, background: "#E6F4F0", borderColor: "#0E7C6B" }}>from receipt</span>}<div className="stat">1 case = {r.count_per_case} {r.count_unit}</div></td>
-                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /></td>
+                  <td>{r.product_name}{r.scanned && <span className="bchip" style={{ marginLeft: 6, background: "#E6F4F0", borderColor: "#0E7C6B" }}>from receipt</span>}<div className="stat">{r.order_unit === "each" ? `by the ${r.count_unit || "each"}` : `by the case · 1 case = ${r.count_per_case} ${r.count_unit}`}</div></td>
+                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /> <span className="stat">{r.order_unit === "each" ? (r.count_unit || "each") : "cases"}</span></td>
                   <td><input className="fig" style={{ width: 80 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => setRow(r.shopping_line_id, { case_cost: e.target.value })} /></td>
                   <td><button className="mini" onClick={() => receive([r])}>Receive</button></td>
                 </tr>
@@ -701,6 +702,10 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
     setLines((ls) => ls.map((l) => l.shopping_line_id === line.shopping_line_id ? { ...l, qty } : l));
     await db.updateShoppingLine(line.shopping_line_id, { qty: num(qty) || 0 });
   }
+  async function setUnit(line, order_unit) {
+    setLines((ls) => ls.map((l) => l.shopping_line_id === line.shopping_line_id ? { ...l, order_unit } : l));
+    await db.updateShoppingLine(line.shopping_line_id, { order_unit });
+  }
   async function setVendor(line, vendor_id) {
     const price = byId[line.product_id]?.vendors.find((v) => v.vendor_id === vendor_id)?.price ?? null;
     await db.updateShoppingLine(line.shopping_line_id, { vendor_id, unit_cost: price });
@@ -752,12 +757,16 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
               const p = byId[l.product_id]; if (!p) return null;
               const done = l.status === "purchased";
               return (
-                <div className="crow" style={{ gridTemplateColumns: "1fr 130px 70px 130px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
+                <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
                   <div><b>{p.name}</b><div className="stat">on hand <b style={{ color: "#191B1F" }}>{r1(onhand?.[p.product_id]?.total ?? 0)}</b> {p.count_unit} · used last wk <b style={{ color: "#191B1F" }}>{r1(stats[p.product_id]?.usedUnits ?? 0)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
                   <input className="fig" type="number" min="0" value={l.qty} onChange={(e) => setQty(l, e.target.value)} disabled={done} />
+                  <select value={l.order_unit || "case"} onChange={(e) => setUnit(l, e.target.value)} disabled={done} title="Order by the case or by the each">
+                    <option value="case">{(l.qty == 1 ? "case" : "cases")}</option>
+                    <option value="each">{p.count_unit || "each"}</option>
+                  </select>
                   <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                     {done
                       ? <button className="mini" style={{ background: "#E6F4F0", borderColor: "#0E7C6B", color: "#0a5c50" }} onClick={() => purchase(l, false)}>✓ Purchased</button>
