@@ -16,9 +16,15 @@ export default function AuthGate({ children }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const hash = window.location.hash || "";
-    if (/type=(recovery|invite|signup)/.test(hash)) setSetPw(true); // arrived from an invite or reset link
-    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const isRecovery = /type=(recovery|invite|signup)/.test(window.location.hash || "");
+    if (isRecovery) setSetPw(true); // arrived from an invite or reset link
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      if (isRecovery) {
+        // remove the leftover #...type=recovery so a refresh doesn't reopen this screen
+        try { history.replaceState(null, "", window.location.pathname + window.location.search); } catch {}
+      }
+    });
     const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
       if (event === "PASSWORD_RECOVERY") setSetPw(true);
       setSession(s);
