@@ -170,7 +170,25 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
   const [q, setQ] = useState("");
   const [edit, setEdit] = useState(null);
   const [finding, setFinding] = useState(false);
-  const list = products.filter((p) => !q || p.name.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()));
+  const [locFilter, setLocFilter] = useState("");
+  const [venFilter, setVenFilter] = useState("");
+  const [sortBy, setSortBy] = useState("az");
+
+  let list = products.filter((p) => {
+    if (q && !(p.name.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
+    if (locFilter && !(p.locations || []).some((l) => String(l.location_id) === locFilter)) return false;
+    if (venFilter && !(p.vendors || []).some((v) => String(v.vendor_id) === venFilter)) return false;
+    return true;
+  });
+  const oh = (p) => onhand[p.product_id]?.total ?? 0;
+  const sorters = {
+    az: (a, b) => a.name.localeCompare(b.name),
+    za: (a, b) => b.name.localeCompare(a.name),
+    cat: (a, b) => (a.category || "~").localeCompare(b.category || "~") || a.name.localeCompare(b.name),
+    ohhi: (a, b) => oh(b) - oh(a) || a.name.localeCompare(b.name),
+    ohlo: (a, b) => oh(a) - oh(b) || a.name.localeCompare(b.name),
+  };
+  list = [...list].sort(sorters[sortBy] || sorters.az);
 
   return (
     <div>
@@ -179,7 +197,26 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
         <button className="mini" onClick={() => setFinding(true)}>📷 Scan</button>
         <button className="btn btn-primary" onClick={() => setEdit(blankProduct())}>+ Add product</button>
       </div>
-      {list.length === 0 ? <div className="empty">No items yet. Add your first product.</div> : (
+      <div className="toolbar" style={{ marginTop: 8 }}>
+        <select value={locFilter} onChange={(e) => setLocFilter(e.target.value)}>
+          <option value="">All locations</option>
+          {locations.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
+        </select>
+        <select value={venFilter} onChange={(e) => setVenFilter(e.target.value)}>
+          <option value="">All vendors</option>
+          {vendors.map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>)}
+        </select>
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
+          <option value="az">Sort: A→Z</option>
+          <option value="za">Sort: Z→A</option>
+          <option value="cat">Sort: Category</option>
+          <option value="ohhi">Sort: On hand (high→low)</option>
+          <option value="ohlo">Sort: On hand (low→high)</option>
+        </select>
+        <span className="stat" style={{ alignSelf: "center" }}>{list.length} item{list.length === 1 ? "" : "s"}</span>
+        {(locFilter || venFilter || q) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); }}>Clear</button>}
+      </div>
+      {list.length === 0 ? <div className="empty">No items match. Try clearing the filters.</div> : (
         <div className="grid">
           {list.map((p) => (
             <div className="card" key={p.product_id}>
