@@ -1,69 +1,95 @@
-// Supabase Edge Function: receipt / product-label OCR.
-// Holds ANTHROPIC_API_KEY server-side; the browser never sees it.
-// Deploy:  supabase functions deploy ocr
-// Secret:  supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+// Secure admin endpoint for in-app user management.
+// Holds the service-role key server-side (never in the browser) and only lets
+// signed-in admins create users, set passwords, invite, or remove people.
+//
+// Deploy:  supabase functions deploy admin-users
+// Lock down (optional but recommended): set the admins who may manage users:
+//   supabase secrets set ADMIN_EMAILS="jen@lvmgp.com,other@lvmgp.com"
+// If ADMIN_EMAILS is not set, any signed-in user may manage users.
+// (SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY are provided automatically.)
+
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
+const json = (obj: unknown, status = 200) =>
+  new Response(JSON.stringify(obj), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
-const MODEL = "claude-sonnet-4-6";
-
-const RECEIPT_PROMPT =
-  'Read this supplier receipt or invoice. Return ONLY JSON, no markdown: ' +
-  '{"vendor":string,"date":"YYYY-MM-DD" or "",' +
-  '"lines":[{"name":string,"qty":number,"unit_price":number or null}]}';
-
-const PRODUCT_PROMPT =
-  'Identify the single food-service product shown. Return ONLY JSON, no markdown: ' +
-  '{"name":string,"brand":string,"supc":string,' +
-  '"barcode":string (digits if clearly readable else ""),"category":string,' +
-  '"pack":number,"size":number,"size_unit":string,"unit_price":number or null}';
-
-serve(async (req) => {
+Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
-    const { image, media_type = "image/jpeg", kind = "receipt" } = await req.json();
-    if (!image) return json({ error: "missing image" }, 400);
+    const url = Deno.env.get("SUPABASE_URL") || Deno.env.get("SB_URL") || "";
+    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SB_SERVICE_ROLE_KEY") || "";
+    const adminEmails = (Deno.env.get("ADMIN_EMAILS") || "")
+      .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+    if (!url || !serviceKey) {
+      return json({ error: "Server not configured: set the SB_SERVICE_ROLE_KEY secret (your project's service_role key)." }, 500);
+    }
 
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": Deno.env.get("ANTHROPIC_API_KEY") ?? "",
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: 1500,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "image", source: { type: "base64", media_type, data: image } },
-            { type: "text", text: kind === "product" ? PRODUCT_PROMPT : RECEIPT_PROMPT },
-          ],
-        }],
-      }),
-    });
+    const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+    if (!token) return json({ error: "Not signed in (no token reached the function)." }, 401);
 
-    const data = await resp.json();
-    const text = (data.content ?? [])
-      .filter((b: { type: string }) => b.type === "text")
-      .map((b: { text: string }) => b.text)
-      .join("\n");
-    const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
-    return json(parsed, 200);
+    const admin = createClient(url, serviceKey);
+
+    // Identify the caller by verifying their token explicitly.
+    const { data: { user }, error: uErr } = await admin.auth.getUser(token);
+    if (uErr || !user) return json({ error: "Not signed in (token not valid). Sign out and back in, then retry." }, 401);
+
+    const email = (user.email || "").toLowerCase();
+    const isAdmin = adminEmails.length === 0 ? true : adminEmails.includes(email);
+    if (!isAdmin) return json({ error: "You're not an admin. Ask an admin to manage users." }, 403);
+
+    const body = await req.json().catch(() => ({}));
+    const action = body.action;
+
+    if (action === "list") {
+      const { data, error } = await admin.auth.admin.listUsers({ perPage: 200 });
+      if (error) throw error;
+      const users = (data.users || []).map((u) => ({
+        id: u.id, email: u.email, created_at: u.created_at,
+        last_sign_in_at: u.last_sign_in_at, confirmed: !!u.email_confirmed_at,
+      }));
+      return json({ users });
+    }
+
+    if (action === "create") {
+      const { email: e, password } = body;
+      if (!e || !password) return json({ error: "Email and password are required." }, 400);
+      const { data, error } = await admin.auth.admin.createUser({ email: e, password, email_confirm: true });
+      if (error) throw error;
+      return json({ user: { id: data.user.id, email: data.user.email } });
+    }
+
+    if (action === "invite") {
+      const { email: e, redirectTo } = body;
+      if (!e) return json({ error: "Email is required." }, 400);
+      const { data, error } = await admin.auth.admin.inviteUserByEmail(e, redirectTo ? { redirectTo } : undefined);
+      if (error) throw error;
+      return json({ user: { id: data.user.id, email: data.user.email } });
+    }
+
+    if (action === "password") {
+      const { user_id, password } = body;
+      if (!user_id || !password) return json({ error: "user_id and password are required." }, 400);
+      const { error } = await admin.auth.admin.updateUserById(user_id, { password });
+      if (error) throw error;
+      return json({ ok: true });
+    }
+
+    if (action === "delete") {
+      const { user_id } = body;
+      if (!user_id) return json({ error: "user_id is required." }, 400);
+      if (user_id === user.id) return json({ error: "You can't delete your own account." }, 400);
+      const { error } = await admin.auth.admin.deleteUser(user_id);
+      if (error) throw error;
+      return json({ ok: true });
+    }
+
+    return json({ error: "Unknown action." }, 400);
   } catch (e) {
-    return json({ error: String(e) }, 500);
+    return json({ error: String((e as Error)?.message || e) }, 500);
   }
 });
-
-function json(body: unknown, status: number) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...cors, "content-type": "application/json" },
-  });
-}
