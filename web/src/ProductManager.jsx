@@ -922,36 +922,27 @@ function Users() {
     catch (e) { setErr(e.message || String(e)); }
     finally { setBusy(false); }
   }
-  async function invite() {
-    setErr(""); setMsg("");
-    if (!email.trim()) { setErr("Enter an email to invite."); return; }
-    setBusy(true);
-    try { await db.inviteUser(email.trim()); setMsg(`Invite sent to ${email.trim()} (requires email/SMTP to be configured).`); setEmail(""); await load(); }
-    catch (e) { setErr(e.message || String(e)); }
-    finally { setBusy(false); }
-  }
   async function resetPw(u) {
     const pw = prompt(`New password for ${u.email} (at least 6 characters):`);
     if (pw == null) return;
     if (pw.length < 6) { alert("Password must be at least 6 characters."); return; }
-    try { await db.setUserPassword(u.id, pw); alert(`Password updated for ${u.email}.`); }
+    try { await db.setUserPassword(u.email, pw); alert(`Password updated for ${u.email}.`); }
     catch (e) { alert("Failed: " + (e.message || e)); }
   }
   async function remove(u) {
     if (!confirm(`Remove ${u.email}? They'll lose access.`)) return;
-    try { await db.deleteUser(u.id); await load(); }
+    try { await db.deleteUser(u.email); await load(); }
     catch (e) { alert("Failed: " + (e.message || e)); }
   }
 
   return (
     <div>
       <div className="secthead">Add a user</div>
-      <div className="note" style={{ marginBottom: 12 }}>Create a login with a password you pick — works immediately, no email needed. Or send an email invite if your email is set up. Managing users is admin-only.</div>
+      <div className="note" style={{ marginBottom: 12 }}>Create a login with a password you pick — it works immediately. Share the email + password with the person; they can change it later via “Forgot password” if email is set up.</div>
       <div className="toolbar">
         <input className="grow" type="email" placeholder="name@lvmgp.com" value={email} onChange={(e) => setEmail(e.target.value)} />
         <input type="password" placeholder="Password (min 6)" value={password} onChange={(e) => setPassword(e.target.value)} />
         <button className="btn btn-primary" disabled={busy} onClick={add}>Add user</button>
-        <button className="mini" disabled={busy} onClick={invite}>Email invite</button>
       </div>
       {err && <div className="err" style={{ marginTop: 10 }}>{err}</div>}
       {msg && <div className="ok" style={{ marginTop: 10 }}>{msg}</div>}
