@@ -41,6 +41,7 @@ export async function createProduct(p) {
     purchase_unit: p.purchase_unit, pack: p.pack, size: p.size, size_unit: p.size_unit,
     count_unit: p.count_unit, count_per_case: p.count_per_case,
     use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
+    backup_for: p.backup_for ?? null,
   }).select("product_id").single();
   if (error) throw error;
   const id = data.product_id;
@@ -64,6 +65,7 @@ export async function updateProduct(p) {
     purchase_unit: p.purchase_unit, pack: p.pack, size: p.size, size_unit: p.size_unit,
     count_unit: p.count_unit, count_per_case: p.count_per_case,
     use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
+    backup_for: p.backup_for ?? null,
     updated_at: new Date().toISOString(),
   }).eq("product_id", id);
   if (error) throw error;
