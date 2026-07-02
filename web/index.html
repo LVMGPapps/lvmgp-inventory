@@ -1,11 +1,4 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-    <title>LVMGP Inventory</title>
-  </head>
-  <body>// Secure admin endpoint for in-app user management.
+// Secure admin endpoint for in-app user management.
 // Holds the service-role key server-side (never in the browser) and only lets
 // signed-in admins create users, set passwords, invite, or remove people.
 //
@@ -98,7 +91,3 @@ Deno.serve(async (req) => {
     return json({ error: String((e as Error)?.message || e) }, 500);
   }
 });
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-  </body>
-</html>
