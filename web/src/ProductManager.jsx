@@ -515,6 +515,7 @@ function Receive({ products, vendors, reload }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [recent, setRecent] = useState([]);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
 
   async function load() {
@@ -522,6 +523,7 @@ function Receive({ products, vendors, reload }) {
       const r = await db.getReceivables();
       setRows(r.map((x) => ({ ...x, case_cost: x.unit_cost ?? "", scanned: false })));
     } catch (e) { setErr("Couldn't load purchased items: " + (e.message || e)); setRows([]); }
+    db.listRecentReceipts(90).then(setRecent).catch(() => {});
   }
   useEffect(() => { load(); }, []);
   if (rows === null) return <div className="empty">Loading…</div>;
@@ -635,6 +637,32 @@ function Receive({ products, vendors, reload }) {
                 <td><input className="fig" style={{ width: 70 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => setExtra(i, { case_cost: e.target.value })} /></td>
                 <td><select value={r.vendor_id} onChange={(e) => setExtra(i, { vendor_id: e.target.value })}>{vendors.map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>)}</select></td>
                 <td><button className="mini" onClick={() => receiveExtras([i])}>Receive</button></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+      )}
+      {recent.length > 0 && (
+        <div className="vgroup">
+          <div className="vgroup-h"><span className="vname">Recent deliveries</span><span className="stat">edit the date or remove a delivery</span></div>
+          <table className="tbl" style={{ border: "none" }}>
+            <thead><tr><th>Date</th><th>Vendor</th><th>Items</th><th className="fig">Total</th><th></th></tr></thead>
+            <tbody>{recent.map((d) => (
+              <tr key={d.receipt_id}>
+                <td><input type="date" value={d.received_date} max={new Date().toISOString().slice(0, 10)}
+                  onChange={async (e) => {
+                    const nd = e.target.value; if (!nd) return;
+                    try { await db.updateReceiptDate(d.receipt_id, nd); setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, received_date: nd } : x)); reload(); }
+                    catch (er) { setErr("Couldn't update date: " + (er.message || er)); }
+                  }} /></td>
+                <td>{d.vendor_name || "No vendor"}</td>
+                <td className="stat" style={{ maxWidth: 260 }}>{d.lines.map((l) => `${l.product_name} ×${l.purchase_qty}`).join(", ")}</td>
+                <td className="fig">{d.total ? money(d.total) : "—"}</td>
+                <td><button className="mini mini-danger" onClick={async () => {
+                  if (!confirm("Delete this delivery? Its received amounts will be removed from usage.")) return;
+                  try { await db.deleteReceipt(d.receipt_id); setRecent((rs) => rs.filter((x) => x.receipt_id !== d.receipt_id)); reload(); }
+                  catch (er) { setErr("Couldn't delete: " + (er.message || er)); }
+                }}>Delete</button></td>
               </tr>
             ))}</tbody>
           </table>
