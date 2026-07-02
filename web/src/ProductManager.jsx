@@ -644,25 +644,27 @@ function Receive({ products, vendors, reload }) {
       )}
       {recent.length > 0 && (
         <div className="vgroup">
-          <div className="vgroup-h"><span className="vname">Recent deliveries</span><span className="stat">edit the date or remove a delivery</span></div>
+          <div className="vgroup-h"><span className="vname">Recent deliveries</span><span className="stat">change a date, then Save</span></div>
           <table className="tbl" style={{ border: "none" }}>
             <thead><tr><th>Date</th><th>Vendor</th><th>Items</th><th className="fig">Total</th><th></th></tr></thead>
             <tbody>{recent.map((d) => (
               <tr key={d.receipt_id}>
                 <td><input type="date" value={d.received_date} max={new Date().toISOString().slice(0, 10)}
-                  onChange={async (e) => {
-                    const nd = e.target.value; if (!nd) return;
-                    try { await db.updateReceiptDate(d.receipt_id, nd); setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, received_date: nd } : x)); reload(); }
-                    catch (er) { setErr("Couldn't update date: " + (er.message || er)); }
-                  }} /></td>
+                  onChange={(e) => setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, received_date: e.target.value, dirty: true } : x))} /></td>
                 <td>{d.vendor_name || "No vendor"}</td>
-                <td className="stat" style={{ maxWidth: 260 }}>{d.lines.map((l) => `${l.product_name} ×${l.purchase_qty}`).join(", ")}</td>
+                <td className="stat" style={{ maxWidth: 240 }}>{d.lines.map((l) => `${l.product_name} ×${l.purchase_qty}`).join(", ")}</td>
                 <td className="fig">{d.total ? money(d.total) : "—"}</td>
-                <td><button className="mini mini-danger" onClick={async () => {
-                  if (!confirm("Delete this delivery? Its received amounts will be removed from usage.")) return;
-                  try { await db.deleteReceipt(d.receipt_id); setRecent((rs) => rs.filter((x) => x.receipt_id !== d.receipt_id)); reload(); }
-                  catch (er) { setErr("Couldn't delete: " + (er.message || er)); }
-                }}>Delete</button></td>
+                <td style={{ whiteSpace: "nowrap" }}>
+                  <button className="mini" disabled={!d.dirty} style={d.dirty ? { background: "#E0392B", color: "#fff" } : undefined} onClick={async () => {
+                    try { await db.updateReceiptDate(d.receipt_id, d.received_date); setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, dirty: false } : x)); setErr(""); setMsg(`Saved delivery date: ${new Date(d.received_date + "T00:00:00").toLocaleDateString()}.`); reload(); }
+                    catch (er) { setErr("Couldn't save date: " + (er.message || er)); }
+                  }}>{d.dirty ? "Save" : "Saved"}</button>{" "}
+                  <button className="mini mini-danger" onClick={async () => {
+                    if (!confirm("Delete this delivery? Its received amounts will be removed from usage.")) return;
+                    try { await db.deleteReceipt(d.receipt_id); setRecent((rs) => rs.filter((x) => x.receipt_id !== d.receipt_id)); reload(); }
+                    catch (er) { setErr("Couldn't delete: " + (er.message || er)); }
+                  }}>Delete</button>
+                </td>
               </tr>
             ))}</tbody>
           </table>
