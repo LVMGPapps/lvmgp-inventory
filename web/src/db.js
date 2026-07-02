@@ -353,6 +353,30 @@ export async function getReceivables(domain = "fnb") {
   });
 }
 
+// Recent deliveries — list, re-date, delete.
+export async function listRecentReceipts(days = 60) {
+  const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+  const { data, error } = await supabase.from("receipt")
+    .select("receipt_id, received_date, vendor_id, vendor(name), receipt_line(product_id, purchase_qty, qty_count_units, unit_cost, product(name))")
+    .gte("received_date", since)
+    .order("received_date", { ascending: false }).order("receipt_id", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((r) => ({
+    receipt_id: r.receipt_id, received_date: r.received_date, vendor_name: r.vendor?.name,
+    lines: (r.receipt_line || []).map((l) => ({ product_name: l.product?.name, purchase_qty: l.purchase_qty, qty_count_units: l.qty_count_units, unit_cost: l.unit_cost })),
+    total: (r.receipt_line || []).reduce((a, l) => a + (Number(l.unit_cost) || 0) * (Number(l.purchase_qty) || 0), 0),
+  }));
+}
+export async function updateReceiptDate(receipt_id, received_date) {
+  const { error } = await supabase.from("receipt").update({ received_date }).eq("receipt_id", receipt_id);
+  if (error) throw error;
+}
+export async function deleteReceipt(receipt_id) {
+  await supabase.from("receipt_line").delete().eq("receipt_id", receipt_id);
+  const { error } = await supabase.from("receipt").delete().eq("receipt_id", receipt_id);
+  if (error) throw error;
+}
+
 // Receive a set of rows: writes a receipt per vendor, updates price, marks lines received.
 // rows: [{shopping_line_id?, product_id, vendor_id, qty, unit_cost, count_per_case}]
 export async function receiveRows(rows, received_date) {
