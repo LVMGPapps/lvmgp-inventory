@@ -298,7 +298,7 @@ export async function ensureOpenList(domain = "fnb") {
 export async function getShopping(domain = "fnb") {
   const listId = await ensureOpenList(domain);
   const { data, error } = await supabase.from("shopping_line")
-    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status")
+    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status, order_unit")
     .eq("shopping_list_id", listId).neq("status", "received")
     .order("shopping_line_id");
   if (error) throw error;
@@ -308,7 +308,7 @@ export async function getShopping(domain = "fnb") {
 export async function addShoppingLine(listId, line) {
   const { data, error } = await supabase.from("shopping_line").insert({
     shopping_list_id: listId, product_id: line.product_id, vendor_id: line.vendor_id ?? null,
-    qty: line.qty ?? 1, unit_cost: line.unit_cost ?? null, status: "open",
+    qty: line.qty ?? 1, unit_cost: line.unit_cost ?? null, order_unit: line.order_unit ?? "case", status: "open",
   }).select("shopping_line_id").single();
   if (error) throw error;
   return data.shopping_line_id;
@@ -334,7 +334,7 @@ export async function setVendorStatus(listId, vendorId, toStatus, fromStatus) {
 export async function getReceivables(domain = "fnb") {
   const listId = await ensureOpenList(domain);
   const { data, error } = await supabase.from("shopping_line")
-    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status," +
+    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status, order_unit," +
       " product(name, count_per_case, count_unit, purchase_unit, product_vendor(vendor_id, current_price))," +
       " vendor(name)")
     .eq("shopping_list_id", listId).eq("status", "purchased").order("shopping_line_id");
@@ -343,7 +343,7 @@ export async function getReceivables(domain = "fnb") {
     const pv = (l.product?.product_vendor ?? []).find((v) => v.vendor_id === l.vendor_id);
     return {
       shopping_line_id: l.shopping_line_id, product_id: l.product_id, vendor_id: l.vendor_id,
-      qty: l.qty, unit_cost: l.unit_cost ?? pv?.current_price ?? null,
+      qty: l.qty, unit_cost: l.unit_cost ?? pv?.current_price ?? null, order_unit: l.order_unit || "case",
       product_name: l.product?.name, count_per_case: l.product?.count_per_case,
       count_unit: l.product?.count_unit, purchase_unit: l.product?.purchase_unit,
       vendor_name: l.vendor?.name,
@@ -366,17 +366,20 @@ export async function receiveRows(rows, received_date) {
     }).select("receipt_id").single();
     if (error) throw error;
     for (const ln of group) {
-      const qcu = (Number(ln.qty) || 0) * (Number(ln.count_per_case) || 1);
+      const pack = Number(ln.count_per_case) || 1;
+      const byEach = ln.order_unit === "each";
+      const qcu = (Number(ln.qty) || 0) * (byEach ? 1 : pack);            // count units received
+      const casePrice = ln.unit_cost != null ? (byEach ? Number(ln.unit_cost) * pack : Number(ln.unit_cost)) : null;
       await supabase.from("receipt_line").insert({
         receipt_id: rec.receipt_id, product_id: ln.product_id, location_id: null,
         purchase_qty: ln.qty, unit_cost: ln.unit_cost, qty_count_units: qcu,
       });
-      if (ln.unit_cost != null && vendor_id != null) {
+      if (casePrice != null && vendor_id != null) {
         await supabase.from("product_vendor").upsert(
-          { product_id: ln.product_id, vendor_id, current_price: ln.unit_cost },
+          { product_id: ln.product_id, vendor_id, current_price: casePrice },
           { onConflict: "product_id,vendor_id" });
         await supabase.from("price_history").insert({
-          product_id: ln.product_id, vendor_id, price: ln.unit_cost, source: "receipt" });
+          product_id: ln.product_id, vendor_id, price: casePrice, source: "receipt" });
       }
       if (ln.shopping_line_id) {
         await supabase.from("shopping_line")
