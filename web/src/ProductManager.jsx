@@ -163,7 +163,7 @@ export default function App() {
 function blankProduct() {
   return { product_id: null, name: "", category: "", brand: "", supc: "",
     purchase_unit: "Case", pack: 1, size: null, size_unit: "",
-    count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null, image_url: null,
+    count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null, image_url: null, backup_for: null,
     barcodes: [], vendors: [], locations: [] };
 }
 
@@ -224,6 +224,7 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
               {p.image_url && <img src={p.image_url} alt="" style={{ width: "100%", height: 120, objectFit: "cover", borderRadius: 8, marginBottom: 8 }} />}
               <div className="tag">{p.category || "Uncategorized"}</div>
               <div className="card-name">{p.name}</div>
+              {p.backup_for && <div className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00", marginBottom: 4 }}>✳ Alternate for {products.find((x) => x.product_id === p.backup_for)?.name || "another item"}</div>}
               {p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}
               <div className="stat">📍 {(p.locations || []).map((l) => l.name + (l.unit_code ? ` ${l.unit_code}` : "")).join(" · ") || "No location"} · on hand {onhand[p.product_id]?.total ?? 0} {p.count_unit}</div>
               <div className="units">
@@ -239,16 +240,17 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
           ))}
         </div>
       )}
-      {edit && <Editor product={edit} vendors={vendors} locations={locations} units={units} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
+      {edit && <Editor product={edit} products={products} vendors={vendors} locations={locations} units={units} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
       {finding && <Finder products={products} onClose={() => setFinding(false)} onFound={(p) => { setQ(p.name); setFinding(false); }} />}
     </div>
   );
 }
 
-function Editor({ product, vendors, locations, units, onClose, onSaved }) {
+function Editor({ product, products, vendors, locations, units, onClose, onSaved }) {
   const [p, setP] = useState(product);
   const [busy, setBusy] = useState(false);
   const [bc, setBc] = useState("");
+  const [isBackup, setIsBackup] = useState(!!product.backup_for);
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const isNew = !p.product_id;
 
@@ -332,6 +334,23 @@ function Editor({ product, vendors, locations, units, onClose, onSaved }) {
         </div>
 
         <div className="group">
+          <div className="group-t">Backup / alternate</div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+            <input type="checkbox" checked={isBackup} onChange={(e) => { setIsBackup(e.target.checked); if (!e.target.checked) set("backup_for", null); }} />
+            This item is a backup / alternate for another item
+          </label>
+          {isBackup && (
+            <select style={{ marginTop: 8, width: "100%" }} value={p.backup_for ?? ""} onChange={(e) => set("backup_for", e.target.value ? Number(e.target.value) : null)}>
+              <option value="">— choose the item it backs up —</option>
+              {(products || []).filter((x) => x.product_id !== p.product_id && !x.backup_for)
+                .slice().sort((a, b) => a.name.localeCompare(b.name))
+                .map((x) => <option key={x.product_id} value={x.product_id}>{x.name}</option>)}
+            </select>
+          )}
+          {isBackup && <div className="stat" style={{ marginTop: 6 }}>Counted together with its main item, and shown as “Alternate for …” on the order list.</div>}
+        </div>
+
+        <div className="group">
           <div className="group-t">Storage locations</div>
           {p.locations.map((l, i) => {
             const locUnits = (units || []).filter((u) => u.location_id === l.location_id);
@@ -386,11 +405,22 @@ function Count({ products, locations, onhand, reload }) {
 
   const loc = locations.find((l) => String(l.location_id) === String(locId));
   const unitFor = (p) => (p.locations || []).find((l) => l.location_id === loc?.location_id);
-  let list = loc ? products.filter((p) => (p.locations || []).some((l) => l.location_id === loc.location_id)) : products;
-  if (q) list = list.filter((p) => p.name.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()) || (p.barcodes || []).includes(q));
+  const inLoc = (p) => (p.locations || []).some((l) => l.location_id === loc?.location_id);
+  const backupsBy = {};
+  for (const p of products) if (p.backup_for) (backupsBy[p.backup_for] ||= []).push(p);
+
+  // Heads = non-backup items in this location (or whose alternate is in this location).
+  let heads = loc
+    ? products.filter((p) => !p.backup_for && (inLoc(p) || (backupsBy[p.product_id] || []).some(inLoc)))
+    : products.filter((p) => !p.backup_for);
+  if (q) {
+    const t = q.toLowerCase();
+    const match = (p) => p.name.toLowerCase().includes(t) || (p.brand || "").toLowerCase().includes(t) || (p.barcodes || []).includes(q);
+    heads = heads.filter((p) => match(p) || (backupsBy[p.product_id] || []).some(match));
+  }
 
   const groups = {};
-  for (const p of list) {
+  for (const p of heads) {
     let gname, gsort;
     if (loc) { const u = unitFor(p); gname = u?.unit_code || "Unassigned shelf"; gsort = u?.unit_sort ?? 9e9; }
     else { gname = (p.locations || []).find((l) => l.primary)?.name || (p.locations || [])[0]?.name || "Unassigned"; gsort = 0; }
@@ -425,6 +455,24 @@ function Count({ products, locations, onhand, reload }) {
     setQ(p.name); setFocusId(p.product_id);
   }
 
+  function renderRow(p, alt) {
+    const key = String(p.product_id);
+    const e = draft[key] || {};
+    const here = (loc ? onhand[p.product_id]?.byLoc?.[loc.name] : onhand[p.product_id]?.total) ?? 0;
+    const counted = (e.cases !== undefined && e.cases !== "") || (e.loose !== undefined && e.loose !== "");
+    const partial = (num(e.cases) || 0) * (p.count_per_case || 1) + (num(e.loose) || 0);
+    const hot = focusId === p.product_id;
+    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}) };
+    return (
+      <div className="crow" key={p.product_id} style={style}>
+        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}<b>{p.name}</b><div className="stat">1 case = {p.count_per_case} {p.count_unit} · here {here} · total {onhand[p.product_id]?.total ?? 0}</div></div>
+        <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>
+        <label>Loose {p.count_unit}<input className="fig" type="number" min="0" value={e.loose ?? ""} onChange={(ev) => setRow(key, "loose", ev.target.value)} /></label>
+        <div className="ctotal" style={{ color: counted ? "#191B1F" : "#B7BBC4" }}>= {counted ? partial : here}</div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <div className="toolbar">
@@ -443,19 +491,13 @@ function Count({ products, locations, onhand, reload }) {
       {orderedGroups.map(([g, grp]) => (
         <div className="vgroup" key={g}>
           <div className="vgroup-h"><span className="vname">{loc ? "▸ " + g : "📍 " + g}</span><span className="stat">{grp.items.length} items</span></div>
-          {grp.items.map((p) => {
-            const key = String(p.product_id);
-            const e = draft[key] || {};
-            const here = (loc ? onhand[p.product_id]?.byLoc?.[loc.name] : onhand[p.product_id]?.total) ?? 0;
-            const counted = (e.cases !== undefined && e.cases !== "") || (e.loose !== undefined && e.loose !== "");
-            const partial = (num(e.cases) || 0) * (p.count_per_case || 1) + (num(e.loose) || 0);
-            const hot = focusId === p.product_id;
+          {grp.items.map((head) => {
+            const backups = backupsBy[head.product_id] || [];
+            if (!backups.length) return renderRow(head, false);
             return (
-              <div className="crow" key={p.product_id} style={hot ? { background: "#FFF8E1", borderRadius: 8 } : undefined}>
-                <div><b>{p.name}</b><div className="stat">1 case = {p.count_per_case} {p.count_unit} · here {here} · total {onhand[p.product_id]?.total ?? 0}</div></div>
-                <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>
-                <label>Loose {p.count_unit}<input className="fig" type="number" min="0" value={e.loose ?? ""} onChange={(ev) => setRow(key, "loose", ev.target.value)} /></label>
-                <div className="ctotal" style={{ color: counted ? "#191B1F" : "#B7BBC4" }}>= {counted ? partial : here}</div>
+              <div key={"h" + head.product_id} style={{ border: "1px solid #ECEEF1", borderRadius: 10, marginBottom: 6 }}>
+                {renderRow(head, false)}
+                {backups.map((b) => renderRow(b, true))}
               </div>
             );
           })}
@@ -604,29 +646,30 @@ function computeItemStats(products, counts, receipts) {
     const w = wkk(c.counted_at);
     const it = (byItem[c.product_id] ||= {}); const wo = (it[w] ||= {});
     const t = new Date(c.counted_at).getTime();
-    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t };
+    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
   }
   const recByItem = {};
   for (const r of receipts) for (const l of (r.receipt_line || [])) {
-    const w = wkk(r.received_date); (recByItem[l.product_id] ||= {});
-    recByItem[l.product_id][w] = (recByItem[l.product_id][w] || 0) + (Number(l.qty_count_units) || Number(l.purchase_qty) || 0);
+    (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || Number(l.purchase_qty) || 0 });
   }
+  const wtotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
+  const wdate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;
+  const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d > d0) && x.d <= d1) ? x.units : 0), 0);
   const stats = {};
   for (const p of products) {
     const cpc = p.count_per_case || 1;
     const it = byItem[p.product_id];
     if (!it) { stats[p.product_id] = { onhandUnits: 0, usedUnits: 0, suggestCases: 0 }; continue; }
     const weeks = Object.keys(it).sort();
-    const total = (w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
     const usages = [];
     for (let i = 1; i < weeks.length; i++) {
-      const recd = (recByItem[p.product_id] || {})[weeks[i]] || 0;
-      let u = total(weeks[i - 1]) + recd - total(weeks[i]); if (u < 0) u = 0; usages.push(u);
+      const recd = between(recByItem[p.product_id] || [], wdate(it, weeks[i - 1]), wdate(it, weeks[i]));
+      let u = wtotal(it, weeks[i - 1]) + recd - wtotal(it, weeks[i]); if (u < 0) u = 0; usages.push(u);
     }
     const last = usages.length ? usages[usages.length - 1] : 0;
     const avg = usages.length ? usages.reduce((a, x) => a + x, 0) / usages.length : 0;
     const forecast = 0.6 * last + 0.4 * avg;
-    const onhandUnits = total(weeks[weeks.length - 1]);
+    const onhandUnits = wtotal(it, weeks[weeks.length - 1]);
     const target = Math.max(Number(p.par_level) || 0, forecast / cpc);
     const suggestCases = Math.max(0, Math.ceil(target - onhandUnits / cpc - 1e-9));
     stats[p.product_id] = { onhandUnits, usedUnits: last, suggestCases };
@@ -642,30 +685,31 @@ function computeSuggestions(products, counts, receipts) {
     const it = (byItem[c.product_id] ||= {});
     const wo = (it[w] ||= {});
     const t = new Date(c.counted_at).getTime();
-    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t };
+    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
   }
   const recByItem = {};
   for (const r of receipts) for (const l of (r.receipt_line || [])) {
-    const w = wkk(r.received_date);
-    (recByItem[l.product_id] ||= {});
-    recByItem[l.product_id][w] = (recByItem[l.product_id][w] || 0) + (Number(l.qty_count_units) || (Number(l.purchase_qty) || 0));
+    (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || (Number(l.purchase_qty) || 0) });
   }
+  const wtotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
+  const wdate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;
+  const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d > d0) && x.d <= d1) ? x.units : 0), 0);
   const out = [];
   for (const p of products) {
+    if (p.backup_for) continue;                                // alternates are ordered via their main item
     const it = byItem[p.product_id]; if (!it) continue;        // need at least one count to know on-hand
     const weeks = Object.keys(it).sort();
-    const total = (w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
     const usages = [];
     for (let i = 1; i < weeks.length; i++) {
-      const recd = (recByItem[p.product_id] || {})[weeks[i]] || 0;
-      let u = total(weeks[i - 1]) + recd - total(weeks[i]); if (u < 0) u = 0;
+      const recd = between(recByItem[p.product_id] || [], wdate(it, weeks[i - 1]), wdate(it, weeks[i]));
+      let u = wtotal(it, weeks[i - 1]) + recd - wtotal(it, weeks[i]); if (u < 0) u = 0;
       usages.push(u);
     }
     const last = usages.length ? usages[usages.length - 1] : 0;
     const avg = usages.length ? usages.reduce((a, x) => a + x, 0) / usages.length : 0;
     const forecast = 0.6 * last + 0.4 * avg;                   // count units used per week
     const cpc = p.count_per_case || 1;
-    const onhandCases = total(weeks[weeks.length - 1]) / cpc;
+    const onhandCases = wtotal(it, weeks[weeks.length - 1]) / cpc;
     const usageCases = forecast / cpc;
     const parCases = Number(p.par_level) || 0;
     const target = Math.max(parCases, usageCases);             // build up to par, or a week's usage if higher
@@ -758,7 +802,7 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
               const done = l.status === "purchased";
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
-                  <div><b>{p.name}</b><div className="stat">on hand <b style={{ color: "#191B1F" }}>{r1(onhand?.[p.product_id]?.total ?? 0)}</b> {p.count_unit} · used last wk <b style={{ color: "#191B1F" }}>{r1(stats[p.product_id]?.usedUnits ?? 0)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
+                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{r1(onhand?.[p.product_id]?.total ?? 0)}</b> {p.count_unit} · used last wk <b style={{ color: "#191B1F" }}>{r1(stats[p.product_id]?.usedUnits ?? 0)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
@@ -1221,28 +1265,32 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen }) {
     const w = wkk(c.counted_at); weekset.add(w);
     const it = (byItem[c.product_id] ||= {}); const wo = (it[w] ||= {});
     const t = new Date(c.counted_at).getTime();
-    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t };
+    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
   }
   const weeks = [...weekset].sort();
   if (!weeks.length) return <div className="note">No counts logged yet. Once you count two weeks in a row, last vs this vs used shows here.</div>;
   const thisW = weeks[weeks.length - 1];
   const lastW = weeks.length > 1 ? weeks[weeks.length - 2] : null;
-  const recv = {};
-  for (const r of receipts) {
-    if (wkk(r.received_date) !== thisW) continue;
-    for (const l of (r.receipt_line || [])) recv[l.product_id] = (recv[l.product_id] || 0) + (Number(l.qty_count_units) || Number(l.purchase_qty) || 0);
+  const recByItem = {};
+  for (const r of receipts) for (const l of (r.receipt_line || [])) {
+    (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || Number(l.purchase_qty) || 0 });
   }
   const total = (it, w) => (w && it[w]) ? Object.values(it[w]).reduce((a, x) => a + x.qty, 0) : null;
+  const dateOf = (it, w) => (w && it[w]) ? Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d : null;
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const rows = Object.keys(byItem).map((pid) => {
-    const it = byItem[pid]; const last = total(it, lastW); const cur = total(it, thisW); const rec = recv[pid] || 0;
+    const it = byItem[pid];
+    const last = total(it, lastW); const cur = total(it, thisW);
+    const d0 = dateOf(it, lastW); const d1 = dateOf(it, thisW);
+    // received strictly after the last count date, up to and including this count date
+    const rec = (recByItem[pid] || []).reduce((a, x) => a + (((d0 == null || x.d > d0) && d1 != null && x.d <= d1) ? x.units : 0), 0);
     const used = (last != null && cur != null) ? last + rec - cur : null;
     return { pid, p: byId[pid], last, rec, cur, used };
   }).filter((r) => r.p && (r.last != null || r.cur != null)).sort((a, b) => a.p.name.localeCompare(b.p.name));
   const label = (w) => w ? new Date(w + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
   return (
     <div>
-      <div className="stat" style={{ marginBottom: 8 }}>Tap any row to see and fix that item's individual counts. Used = last count + received − this count.{lastW ? "" : " Count a second week to show the change."} A red Used (negative) usually means a delivery wasn't logged in Receive, or a miscount.</div>
+      <div className="stat" style={{ marginBottom: 8 }}>Used = last count + what was received <b>between the two counts</b> − this count. A delivery logged <b>after</b> this week's count rolls into next week's usage, not this one. A red Used (negative) usually means a delivery wasn't logged, or a miscount.</div>
       <div style={{ overflowX: "auto" }}>
         <table className="tbl" style={{ border: "none", minWidth: 440 }}>
           <thead><tr>
