@@ -89,10 +89,20 @@ export async function currentUser() {
   return data.user ?? null;
 }
 async function adminUsers(action, payload = {}) {
-  const { data, error } = await supabase.functions.invoke("admin-users", { body: { action, ...payload } });
+  const { data: { session } } = await supabase.auth.getSession();
+  const headers = session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : undefined;
+  const { data, error } = await supabase.functions.invoke("admin-users", { body: { action, ...payload }, headers });
   if (error) {
     let msg = error.message || "Request failed";
-    try { const ctx = await error.context?.json?.(); if (ctx?.error) msg = ctx.error; } catch {}
+    try {
+      const ctx = error.context;
+      if (ctx && typeof ctx.text === "function") {
+        const t = await ctx.text();
+        try { msg = JSON.parse(t).error || t || msg; } catch { msg = t || msg; }
+      } else if (ctx && typeof ctx.json === "function") {
+        const j = await ctx.json(); msg = j.error || msg;
+      }
+    } catch {}
     throw new Error(msg);
   }
   if (data?.error) throw new Error(data.error);
