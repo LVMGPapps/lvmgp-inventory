@@ -1,12 +1,4 @@
-// Secure admin endpoint for in-app user management.
-// Holds the service-role key server-side (never in the browser) and only lets
-// signed-in admins create users, set passwords, invite, or remove people.
-//
-// Deploy:  supabase functions deploy admin-users
-// Lock down (optional but recommended): set the admins who may manage users:
-//   supabase secrets set ADMIN_EMAILS="jen@lvmgp.com,other@lvmgp.com"
-// If ADMIN_EMAILS is not set, any signed-in user may manage users.
-// (SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY are provided automatically.)
+
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
