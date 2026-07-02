@@ -83,36 +83,28 @@ export async function updateProduct(p) {
   return id;
 }
 
-// ---- Current user + in-app user management (via admin-users edge function) ----
+// ---- Current user + in-app user management (direct DB functions, no edge function) ----
 export async function currentUser() {
   const { data } = await supabase.auth.getUser();
   return data.user ?? null;
 }
-async function adminUsers(action, payload = {}) {
-  const { data: { session } } = await supabase.auth.getSession();
-  const headers = session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : undefined;
-  const { data, error } = await supabase.functions.invoke("admin-users", { body: { action, ...payload }, headers });
-  if (error) {
-    let msg = error.message || "Request failed";
-    try {
-      const ctx = error.context;
-      if (ctx && typeof ctx.text === "function") {
-        const t = await ctx.text();
-        try { msg = JSON.parse(t).error || t || msg; } catch { msg = t || msg; }
-      } else if (ctx && typeof ctx.json === "function") {
-        const j = await ctx.json(); msg = j.error || msg;
-      }
-    } catch {}
-    throw new Error(msg);
-  }
-  if (data?.error) throw new Error(data.error);
-  return data;
+export async function listUsers() {
+  const { data, error } = await supabase.rpc("admin_list_users");
+  if (error) throw new Error(error.message);
+  return (data || []).map((u) => ({ id: u.id, email: u.email, last_sign_in_at: u.last_sign_in_at, confirmed: true }));
 }
-export const listUsers = () => adminUsers("list").then((d) => d.users || []);
-export const createUser = (email, password) => adminUsers("create", { email, password });
-export const inviteUser = (email) => adminUsers("invite", { email, redirectTo: window.location.origin });
-export const setUserPassword = (user_id, password) => adminUsers("password", { user_id, password });
-export const deleteUser = (user_id) => adminUsers("delete", { user_id });
+export async function createUser(email, password) {
+  const { error } = await supabase.rpc("admin_create_user", { p_email: email, p_password: password });
+  if (error) throw new Error(error.message);
+}
+export async function setUserPassword(email, password) {
+  const { error } = await supabase.rpc("admin_set_password", { p_email: email, p_password: password });
+  if (error) throw new Error(error.message);
+}
+export async function deleteUser(email) {
+  const { error } = await supabase.rpc("admin_delete_user", { p_email: email });
+  if (error) throw new Error(error.message);
+}
 
 // ---- Product photos (Supabase Storage) ----
 export async function uploadProductImage(file, productId) {
