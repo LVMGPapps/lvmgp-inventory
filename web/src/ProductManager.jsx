@@ -689,7 +689,7 @@ function computeItemStats(products, counts, receipts) {
   }
   const wtotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
   const wdate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;
-  const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d > d0) && x.d <= d1) ? x.units : 0), 0);
+  const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d >= d0) && x.d < d1) ? x.units : 0), 0);
   const stats = {};
   for (const p of products) {
     const cpc = p.count_per_case || 1;
@@ -728,7 +728,7 @@ function computeSuggestions(products, counts, receipts) {
   }
   const wtotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
   const wdate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;
-  const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d > d0) && x.d <= d1) ? x.units : 0), 0);
+  const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d >= d0) && x.d < d1) ? x.units : 0), 0);
   const out = [];
   for (const p of products) {
     if (p.backup_for) continue;                                // alternates are ordered via their main item
@@ -1124,7 +1124,7 @@ function computeUsage(products, counts, receipts) {
       for (const e of evs) if (e.d <= day && (!latest[e.loc] || e.t >= latest[e.loc].t)) latest[e.loc] = e;
       return Object.values(latest).reduce((a, e) => a + e.qty, 0);
     };
-    const recd = (recByProd[p.product_id] || []).filter((x) => x.d > d1 && x.d <= d2).reduce((a, x) => a + x.units, 0);
+    const recd = (recByProd[p.product_id] || []).filter((x) => x.d >= d1 && x.d < d2).reduce((a, x) => a + x.units, 0);
     let used = ohAt(d1) + recd - ohAt(d2); if (used < 0) used = 0;
     const cpc = costPerCount(p); const cost = cpc != null ? used * cpc : null;
     if (cost != null) totalCost += cost;
@@ -1318,14 +1318,14 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen }) {
     const last = total(it, lastW); const cur = total(it, thisW);
     const d0 = dateOf(it, lastW); const d1 = dateOf(it, thisW);
     // received strictly after the last count date, up to and including this count date
-    const rec = (recByItem[pid] || []).reduce((a, x) => a + (((d0 == null || x.d > d0) && d1 != null && x.d <= d1) ? x.units : 0), 0);
+    const rec = (recByItem[pid] || []).reduce((a, x) => a + (((d0 == null || x.d >= d0) && d1 != null && x.d < d1) ? x.units : 0), 0);
     const used = (last != null && cur != null) ? last + rec - cur : null;
     return { pid, p: byId[pid], last, rec, cur, used };
   }).filter((r) => r.p && (r.last != null || r.cur != null)).sort((a, b) => a.p.name.localeCompare(b.p.name));
   const label = (w) => w ? new Date(w + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
   return (
     <div>
-      <div className="stat" style={{ marginBottom: 8 }}>Used = last count + what was received <b>between the two counts</b> − this count. A delivery logged <b>after</b> this week's count rolls into next week's usage, not this one. A red Used (negative) usually means a delivery wasn't logged, or a miscount.</div>
+      <div className="stat" style={{ marginBottom: 8 }}>Used = last count + what was received <b>after the last count and before this one</b> − this count. A delivery dated the <b>same day as this week's count (or later)</b> counts toward next week, since counts are taken before deliveries arrive. A red Used usually means a delivery wasn't logged, or a miscount.</div>
       <div style={{ overflowX: "auto" }}>
         <table className="tbl" style={{ border: "none", minWidth: 440 }}>
           <thead><tr>
