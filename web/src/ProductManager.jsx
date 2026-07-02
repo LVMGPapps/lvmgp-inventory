@@ -511,6 +511,7 @@ function Count({ products, locations, onhand, reload }) {
 function Receive({ products, vendors, reload }) {
   const [rows, setRows] = useState(null);   // awaiting (purchased) rows, editable
   const [extras, setExtras] = useState([]); // scanned lines not on the purchased list
+  const [recvDate, setRecvDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -562,7 +563,7 @@ function Receive({ products, vendors, reload }) {
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
     setBusy(true);
-    try { await db.receiveRows(payload); setMsg(`Received ${payload.length} item${payload.length === 1 ? "" : "s"}. Prices updated.`); await load(); reload(); }
+    try { await db.receiveRows(payload, recvDate); setMsg(`Received ${payload.length} item${payload.length === 1 ? "" : "s"} on ${new Date(recvDate + "T00:00:00").toLocaleDateString()}. Prices updated.`); await load(); reload(); }
     catch (e) { setErr("Receive failed: " + (e.message || e)); }
     finally { setBusy(false); }
   }
@@ -578,9 +579,13 @@ function Receive({ products, vendors, reload }) {
   return (
     <div>
       <div className="toolbar">
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "#3A3D44" }}>
+          Received date <input type="date" value={recvDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => setRecvDate(e.target.value)} />
+        </label>
         <label className="btn btn-primary">{busy ? <><span className="spin" /> Working…</> : "📷 Scan a receipt"}<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} disabled={busy} /></label>
         {rows.length > 0 && <button className="btn btn-ghost" onClick={() => receive(rows)}>Receive everything</button>}
       </div>
+      <p className="stat" style={{ margin: "0 2px 10px" }}>Set the date the delivery actually arrived — that's what decides which week's usage it counts toward. Defaults to today; change it to back-date (e.g., yesterday).</p>
       {err && <div className="err">{err}</div>}
       {msg && <div className="ok">{msg}</div>}
 
