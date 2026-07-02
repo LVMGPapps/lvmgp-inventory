@@ -83,6 +83,27 @@ export async function updateProduct(p) {
   return id;
 }
 
+// ---- Current user + in-app user management (via admin-users edge function) ----
+export async function currentUser() {
+  const { data } = await supabase.auth.getUser();
+  return data.user ?? null;
+}
+async function adminUsers(action, payload = {}) {
+  const { data, error } = await supabase.functions.invoke("admin-users", { body: { action, ...payload } });
+  if (error) {
+    let msg = error.message || "Request failed";
+    try { const ctx = await error.context?.json?.(); if (ctx?.error) msg = ctx.error; } catch {}
+    throw new Error(msg);
+  }
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+export const listUsers = () => adminUsers("list").then((d) => d.users || []);
+export const createUser = (email, password) => adminUsers("create", { email, password });
+export const inviteUser = (email) => adminUsers("invite", { email, redirectTo: window.location.origin });
+export const setUserPassword = (user_id, password) => adminUsers("password", { user_id, password });
+export const deleteUser = (user_id) => adminUsers("delete", { user_id });
+
 // ---- Product photos (Supabase Storage) ----
 export async function uploadProductImage(file, productId) {
   const ext = (String(file.name || "").split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
