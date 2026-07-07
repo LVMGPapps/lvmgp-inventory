@@ -353,22 +353,28 @@ export async function getReceivables(domain = "fnb") {
   });
 }
 
-// Recent deliveries — list, re-date, delete.
+// Recent deliveries — list, re-date, edit line qty/cost, delete.
 export async function listRecentReceipts(days = 60) {
   const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
   const { data, error } = await supabase.from("receipt")
-    .select("receipt_id, received_date, vendor_id, vendor(name), receipt_line(product_id, purchase_qty, qty_count_units, unit_cost, product(name))")
+    .select("receipt_id, received_date, vendor_id, vendor(name), receipt_line(receipt_line_id, product_id, purchase_qty, qty_count_units, unit_cost, product(name, count_per_case))")
     .gte("received_date", since)
     .order("received_date", { ascending: false }).order("receipt_id", { ascending: false });
   if (error) throw error;
   return (data ?? []).map((r) => ({
     receipt_id: r.receipt_id, received_date: r.received_date, vendor_name: r.vendor?.name,
-    lines: (r.receipt_line || []).map((l) => ({ product_name: l.product?.name, purchase_qty: l.purchase_qty, qty_count_units: l.qty_count_units, unit_cost: l.unit_cost })),
-    total: (r.receipt_line || []).reduce((a, l) => a + (Number(l.unit_cost) || 0) * (Number(l.purchase_qty) || 0), 0),
+    lines: (r.receipt_line || []).map((l) => ({
+      receipt_line_id: l.receipt_line_id, product_name: l.product?.name, count_per_case: l.product?.count_per_case,
+      purchase_qty: l.purchase_qty, qty_count_units: l.qty_count_units, unit_cost: l.unit_cost,
+    })),
   }));
 }
 export async function updateReceiptDate(receipt_id, received_date) {
   const { error } = await supabase.from("receipt").update({ received_date }).eq("receipt_id", receipt_id);
+  if (error) throw error;
+}
+export async function updateReceiptLine(receipt_line_id, fields) {
+  const { error } = await supabase.from("receipt_line").update(fields).eq("receipt_line_id", receipt_line_id);
   if (error) throw error;
 }
 export async function deleteReceipt(receipt_id) {
