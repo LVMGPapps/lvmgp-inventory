@@ -1436,7 +1436,7 @@ function computeUsage(products, counts, receipts) {
 
 function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload }) {
   const [ship, setShip] = useState({ open: 0, purchased: 0 });
-  const [open, setOpen] = useState("review");
+  const [open, setOpen] = useState("attention");
   const [spendDays, setSpendDays] = useState(7);
   const [detail, setDetail] = useState(null);   // product whose count history is open
 
@@ -1470,8 +1470,26 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   const events = products.filter((p) => p.menu === "events").length;
   const usage = computeUsage(products, counts, recs);
 
-  const tile = (k, v, sub, dark) => <div className={"tile" + (dark ? " dark" : "")}><div className="k">{k}</div><div className="v fig">{v}</div>{sub && <div className="sub">{sub}</div>}</div>;
+  const tile = (k, v, sub, dark, onClick) => <div className={"tile" + (dark ? " dark" : "")} onClick={onClick} style={onClick ? { cursor: "pointer" } : undefined}><div className="k">{k}</div><div className="v fig">{v}</div>{sub && <div className="sub">{sub}</div>}</div>;
+
+  // Needs-attention punch list: flagged, received-not-counted, never-counted
+  const lastCountAt = {}; for (const c of counts) { const t = c.counted_at; if (!lastCountAt[c.product_id] || t > lastCountAt[c.product_id]) lastCountAt[c.product_id] = t; }
+  const lastRecAt = {}; for (const r of recs) for (const l of (r.receipt_line || [])) { const d = r.received_date; if (d && (!lastRecAt[l.product_id] || d > lastRecAt[l.product_id])) lastRecAt[l.product_id] = d; }
+  const attention = [];
+  for (const p of products) {
+    if (p.not_stocked || p.backup_for) continue;
+    const rs = [];
+    if (p.needs_recount) rs.push("flagged");
+    const lc = lastCountAt[p.product_id]; const lr = lastRecAt[p.product_id];
+    if (!lc) rs.push("never counted");
+    else if (lr && lr >= String(lc).slice(0, 10)) rs.push("received, not counted");
+    if (rs.length) attention.push({ p, rs });
+  }
+  const attnRank = { "flagged": 0, "received, not counted": 1, "never counted": 2 };
+  attention.sort((a, b) => (attnRank[a.rs[0]] - attnRank[b.rs[0]]) || a.p.name.localeCompare(b.p.name));
+
   const reports = [
+    ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} />],
     ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} reload={reload} />],
     ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
     ["value", "Inventory value — by category", <ValueReport valByCat={valByCat} total={invValue} />],
@@ -1487,9 +1505,9 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   return (
     <div>
       <div className="tiles">
-        {tile("Items tracked", products.length, `${everyday} everyday · ${events} events`)}
-        {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true)}
-        {tile("Purchases · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`)}
+        {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true, () => setOpen("valitem"))}
+        {tile("Spent · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`, false, () => setOpen("spend"))}
+        {tile("Needs attention", attention.length, attention.length ? "tap to see the list" : "all clear ✓", false, () => setOpen("attention"))}
         {tile("To buy / awaiting", `${ship.open} / ${ship.purchased}`, "open · purchased")}
       </div>
 
@@ -1508,19 +1526,6 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
             })}
           </div>}
 
-      <div className="secthead">Spend by vendor · last {spendDays} days</div>
-      {Object.keys(spendByVendor).length === 0
-        ? <div className="note">No receipts in this window yet. As you receive orders, spend shows up here.</div>
-        : <div style={{ background: "#fff", border: "1.5px solid #E6E1D6", borderRadius: 11, padding: 14 }}>
-            {Object.entries(spendByVendor).sort((a, b) => b[1] - a[1]).map(([vid, amt]) => {
-              const max = Math.max(...Object.values(spendByVendor));
-              return <div key={vid} style={{ marginBottom: 10 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 3 }}><b>{vName[vid] || "No vendor"}</b><span className="fig">{money(amt)}</span></div>
-                <div className="bar"><span style={{ width: (max ? amt / max * 100 : 0) + "%" }} /></div>
-              </div>;
-            })}
-          </div>}
-
       <div className="secthead">Reports</div>
       {reports.map(([key, label, body]) => (
         <div className="panel" key={key}>
@@ -1531,6 +1536,26 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
         </div>
       ))}
       {detail && <ItemHistory product={detail} locations={locations} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+    </div>
+  );
+}
+
+function NeedsAttentionReport({ attention, onOpen }) {
+  if (!attention.length) return <div className="note">Nothing needs attention — no flags, everything counted, and every delivery reconciled. ✓</div>;
+  const chipFor = (r) => {
+    const map = { "flagged": ["🚩 flagged", "#FDECEA", "#E0392B", "#B0271B"], "received, not counted": ["📥 received, not counted", "#FFF6E9", "#E68A00", "#9a5b00"], "never counted": ["• never counted", "#EEF1F4", "#B7BBC4", "#555"] };
+    const [txt, bg, bd, col] = map[r] || [r, "#EEE", "#ccc", "#555"];
+    return <span key={r} className="bchip" style={{ background: bg, borderColor: bd, color: col }}>{txt}</span>;
+  };
+  return (
+    <div>
+      <div className="stat" style={{ marginBottom: 8 }}>Tap an item to open and fix it (recount, clear the flag, or check the delivery).</div>
+      {attention.map(({ p, rs }) => (
+        <div key={p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto", alignItems: "center", cursor: "pointer" }} onClick={() => onOpen && onOpen(p)}>
+          <div><b>{p.name}</b><div className="stat">{p.category || "Uncategorized"}{p.recount_note ? ` · ${p.recount_note}` : ""}</div></div>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>{rs.map(chipFor)}</div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1645,7 +1670,7 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
   const pids = [...new Set([...Object.keys(byItem), ...Object.keys(recByItem)])];
-  const rows = pids.map((pid) => {
+  const raw = pids.map((pid) => {
     const it = byItem[pid] || {};
     const weeks = Object.keys(it).sort();
     const thisW = weeks[weeks.length - 1] || null;             // this week = most recent week counted
@@ -1665,7 +1690,23 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
     const pendDates = [...new Set(pl.map((x) => x.d))].sort();
     const used = (prev != null && cur != null) ? prev + rec - cur : null;
     return { pid, p: byId[pid], dPrev, dCur, prev, cur, rec, recDates, pend, pendDates, used };
-  }).filter((r) => r.p).sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
+  }).filter((r) => r.p);
+  // Merge each alternate into the item it backs up: one combined line, still orderable separately.
+  const byRoot = {};
+  for (const r of raw) { const root = r.p.backup_for || Number(r.pid); (byRoot[root] ||= []).push(r); }
+  const rows = Object.entries(byRoot).map(([rootStr, members]) => {
+    const root = Number(rootStr);
+    const primary = byId[root] || members.find((m) => !m.p.backup_for)?.p || members[0].p;
+    const alts = members.filter((m) => m.p.product_id !== root).map((m) => m.p.name);
+    const anyPrev = members.some((m) => m.prev != null), anyCur = members.some((m) => m.cur != null);
+    const s = (f) => members.reduce((a, m) => a + (m[f] || 0), 0);
+    const prev = anyPrev ? s("prev") : null, cur = anyCur ? s("cur") : null;
+    const rec = s("rec"), pend = s("pend");
+    const pm = members.find((m) => m.p.product_id === root) || members[0];
+    const recDates = [...new Set(members.flatMap((m) => m.recDates || []))].sort();
+    const pendDates = [...new Set(members.flatMap((m) => m.pendDates || []))].sort();
+    return { pid: rootStr, p: primary, alts, prev, cur, rec, pend, recDates, pendDates, dPrev: pm.dPrev, dCur: pm.dCur, used: (prev != null && cur != null) ? prev + rec - cur : null };
+  }).sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
   if (!rows.length) return <div className="note">No counts or deliveries logged yet.</div>;
   let lastCat = null;
   return (
@@ -1687,7 +1728,7 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
             <Fragment key={r.pid}>
               {head && <tr><td colSpan={5} style={{ background: "#F4F1EA", fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", fontSize: 13, padding: "6px 8px" }}>{cat}</td></tr>}
               <tr style={{ cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
-                <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span><div className="stat">{r.p.count_unit}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
+                <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span>{r.alts && r.alts.length ? <span className="bchip" style={{ marginLeft: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>+ {r.alts.join(", ")}</span> : ""}<div className="stat">{r.p.count_unit}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
                 <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : r1(r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
                 <td className="fig" style={{ textAlign: "right" }}>
                   <span style={{ color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}</span>
