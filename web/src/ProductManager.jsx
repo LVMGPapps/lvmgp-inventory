@@ -12,6 +12,7 @@ const usagePerPack = (p) => Number(p.usage_per_package) || 1;                   
 const unitsPerBuy = (p, ou) => { const o = ou || p.buy_by || "case"; return o === "case" ? usagePerCase(p) : o === "package" ? usagePerPack(p) : 1; };
 const measure = (p) => p.usage_measure || p.use_unit || p.count_unit || "each";
 const pkgName = (p, n) => (p.package_unit || "package") + (n === 1 ? "" : "s");
+const wholeOnly = (p) => !!p.count_whole_only || /fountain/i.test(p.category || "");   // count whole units, no partial/each
 const buyLabel = (p, ou, n) => { const o = ou || p.buy_by || "case"; const one = n === 1; return o === "case" ? (one ? "case" : "cases") : o === "package" ? pkgName(p, n) : measure(p); };
 const r1 = (n) => Math.round(n * 10) / 10;
 // Format a usage-unit quantity as "C case, P pkg + L measure"
@@ -405,6 +406,10 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
         <div className="group">
           <div className="group-t">Backup / alternate</div>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
+            <input type="checkbox" checked={!!p.count_whole_only} onChange={(e) => set("count_whole_only", e.target.checked)} />
+            Count whole units only — no partial/each (e.g. fountain BIBs)
+          </label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
             <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => set("not_stocked", e.target.checked)} />
             Not stocked — we don't normally carry this (hidden from counts)
           </label>
@@ -588,17 +593,18 @@ function Count({ products, locations, onhand, reload }) {
     const here = (loc ? onhand[p.product_id]?.byLoc?.[loc.name] : onhand[p.product_id]?.total) ?? 0;
     const uMeas = measure(p);
     const upc = usagePerCase(p), upp = usagePerPack(p);
-    const showCase = (num(p.packages_per_case) || 1) > 1;    // show a Cases box only when a case holds >1 package
+    const whole = wholeOnly(p);
+    const showCase = !whole && (num(p.packages_per_case) || 1) > 1;    // show a Cases box only when a case holds >1 package
     const counted = ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== "");
     const partial = (num(e.cases) || 0) * upc + (num(e.packages) || 0) * upp + (num(e.units) || 0) + (num(e.loose) || 0);
     const hot = focusId === p.product_id;
-    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
+    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: whole ? "1fr 72px 96px" : showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
     return (
       <div className="crow" key={p.product_id} style={style}>
-        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : ""}1 {p.package_unit || "package"} = {upp} {uMeas} · here {fmtQty(p, here)}</div></div>
+        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{whole ? `count whole ${pkgName(p, 2)}` : (showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : "") + `1 ${p.package_unit || "package"} = ${upp} ${uMeas}`} · here {fmtQty(p, here)}</div></div>
         {showCase && <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>}
         <label>{pkgName(p, 2)}<input className="fig" type="number" min="0" value={e.packages ?? ""} onChange={(ev) => setRow(key, "packages", ev.target.value)} /></label>
-        <label>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>
+        {!whole && <label>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>}
         <div className="ctotal" style={{ color: counted ? "#191B1F" : "#B7BBC4", fontSize: 12 }}>{fmtQty(p, counted ? partial : here)}</div>
       </div>
     );
