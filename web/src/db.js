@@ -181,7 +181,7 @@ export async function postCounts(entries) {
 }
 
 // ---- Edit / fix individual counts ----
-export async function getItemCounts(productId, days = 200) {
+export async function getItemCounts(productId, days = 400) {
   const since = new Date(Date.now() - days * 864e5).toISOString();
   const { data, error } = await supabase.from("stock_count")
     .select("stock_count_id, location_id, counted_at, cases, loose, qty, location(name)")
