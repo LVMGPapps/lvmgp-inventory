@@ -1435,47 +1435,96 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen }) {
 
 function ItemHistory({ product, onClose, onChanged }) {
   const [rows, setRows] = useState(null);
+  const [recs, setRecs] = useState(null);
   const [busy, setBusy] = useState(false);
   const cpc = product.count_per_case || 1;
-  async function load() { try { setRows(await db.getItemCounts(product.product_id)); } catch { setRows([]); } }
+  const uMeas = measure(product);
+  const today = new Date().toISOString().slice(0, 10);
+  async function load() {
+    try { setRows(await db.getItemCounts(product.product_id)); } catch { setRows([]); }
+    try { setRecs(await db.getItemReceipts(product.product_id)); } catch { setRecs([]); }
+  }
   useEffect(() => { load(); }, []);
   const setField = (id, f, v) => setRows((rs) => rs.map((r) => r.stock_count_id === id ? { ...r, [f]: v } : r));
-  async function save(r) {
+  const setRec = (id, f, v) => setRecs((rs) => rs.map((r) => r.receipt_line_id === id ? { ...r, [f]: v } : r));
+
+  async function saveCount(r) {
     setBusy(true);
     const cases = Number(r.cases) || 0, loose = Number(r.loose) || 0;
-    try { await db.updateCount(r.stock_count_id, { cases, loose, qty: cases * cpc + loose }); await load(); onChanged && onChanged(); }
+    const fields = { cases, loose, qty: cases * cpc + loose };
+    if (r._date) fields.counted_at = new Date(r._date + "T12:00:00").toISOString();
+    try { await db.updateCount(r.stock_count_id, fields); await load(); onChanged && onChanged(); }
     catch (e) { alert("Save failed: " + (e.message || e)); }
     finally { setBusy(false); }
   }
-  async function del(r) {
+  async function delCount(r) {
     if (!confirm("Delete this count entry?")) return;
     setBusy(true);
     try { await db.deleteCount(r.stock_count_id); await load(); onChanged && onChanged(); }
     catch (e) { alert("Delete failed: " + (e.message || e)); }
     finally { setBusy(false); }
   }
+  async function saveRec(r) {
+    setBusy(true);
+    try {
+      const pq = Number(r.purchase_qty) || 0;
+      await db.updateReceiptLine(r.receipt_line_id, { purchase_qty: pq, unit_cost: (r.unit_cost === "" || r.unit_cost == null) ? null : Number(r.unit_cost), qty_count_units: pq * (r.factor || 1) });
+      if (r._date) await db.updateReceiptDate(r.receipt_id, r._date);
+      await load(); onChanged && onChanged();
+    } catch (e) { alert("Save failed: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+  async function delRec(r) {
+    if (!confirm("Delete this delivery?")) return;
+    setBusy(true);
+    try { await db.deleteReceipt(r.receipt_id); await load(); onChanged && onChanged(); }
+    catch (e) { alert("Delete failed: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+
   return (
     <div className="overlay" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px,100%)" }}>
         <h2>{product.name}</h2>
-        <div className="stat" style={{ marginBottom: 10 }}>1 case = {cpc} {product.count_unit}. Fix a wrong count by editing cases / loose, or delete the entry. The total recalculates automatically and on-hand updates.</div>
-        {rows === null ? <div className="empty">Loading…</div> : rows.length === 0 ? <div className="note">No counts recorded for this item yet.</div> : (
+        <div className="stat" style={{ marginBottom: 10 }}>Edit the <b>date</b>, cases/loose, or delete any entry. Deliveries for this item are below — fix their date, qty, or cost here too. Everything recalculates on-hand and usage.</div>
+
+        <div className="secthead">Counts</div>
+        {rows === null ? <div className="empty">Loading…</div> : rows.length === 0 ? <div className="note">No counts recorded yet.</div> : (
           <div>
             {rows.map((r) => (
-              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "1fr 64px 64px 56px auto" }}>
-                <div><b>{new Date(r.counted_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</b><div className="stat">{r.location_name || "?"}</div></div>
+              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "128px 58px 58px 1fr auto", alignItems: "center" }}>
+                <div><input type="date" value={r._date ?? (r.counted_at ? r.counted_at.slice(0, 10) : "")} max={today} onChange={(e) => setField(r.stock_count_id, "_date", e.target.value)} /><div className="stat">{r.location_name || "?"}</div></div>
                 <label>Cases<input className="fig" type="number" value={r.cases} onChange={(e) => setField(r.stock_count_id, "cases", e.target.value)} /></label>
                 <label>Loose<input className="fig" type="number" value={r.loose} onChange={(e) => setField(r.stock_count_id, "loose", e.target.value)} /></label>
-                <div className="ctotal">= {(Number(r.cases) || 0) * cpc + (Number(r.loose) || 0)}</div>
+                <div className="stat">= {r1((Number(r.cases) || 0) * cpc + (Number(r.loose) || 0))} {uMeas}</div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <button className="mini" disabled={busy} onClick={() => save(r)}>Save</button>
-                  <button className="mini mini-danger" disabled={busy} onClick={() => del(r)}>✕</button>
+                  <button className="mini" disabled={busy} onClick={() => saveCount(r)}>Save</button>
+                  <button className="mini mini-danger" disabled={busy} onClick={() => delCount(r)}>✕</button>
                 </div>
               </div>
             ))}
           </div>
         )}
-        <button className="btn btn-ghost" style={{ marginTop: 14 }} onClick={onClose}>Close</button>
+
+        <div className="secthead" style={{ marginTop: 18 }}>Deliveries received</div>
+        {recs === null ? <div className="empty">Loading…</div> : recs.length === 0 ? <div className="note">No deliveries recorded for this item yet.</div> : (
+          <div>
+            {recs.map((r) => (
+              <div className="crow" key={r.receipt_line_id} style={{ gridTemplateColumns: "128px 60px 76px 1fr auto", alignItems: "center" }}>
+                <div><input type="date" value={r._date ?? (r.received_date || "")} max={today} onChange={(e) => setRec(r.receipt_line_id, "_date", e.target.value)} /><div className="stat">{r.vendor_name || "—"}</div></div>
+                <label>Qty<input className="fig" type="number" step="0.001" value={r.purchase_qty} onChange={(e) => setRec(r.receipt_line_id, "purchase_qty", e.target.value)} /></label>
+                <label>Unit $<input className="fig" type="number" step="0.01" value={r.unit_cost ?? ""} onChange={(e) => setRec(r.receipt_line_id, "unit_cost", e.target.value)} /></label>
+                <div className="stat">{money((Number(r.unit_cost) || 0) * (Number(r.purchase_qty) || 0))}</div>
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <button className="mini" disabled={busy} onClick={() => saveRec(r)}>Save</button>
+                  <button className="mini mini-danger" disabled={busy} onClick={() => delRec(r)}>✕</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button className="btn btn-ghost" style={{ marginTop: 16 }} onClick={onClose}>Close</button>
       </div>
     </div>
   );
