@@ -194,20 +194,22 @@ export async function updateCount(id, fields) {
   const { error } = await supabase.from("stock_count").update(fields).eq("stock_count_id", id);
   if (error) throw error;
 }
-export async function getItemReceipts(productId, days = 200) {
+export async function getItemReceipts(productId, days = 400) {
   const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
   const { data, error } = await supabase.from("receipt_line")
-    .select("receipt_line_id, receipt_id, purchase_qty, qty_count_units, unit_cost, receipt(received_date, vendor(name))")
+    .select("receipt_line_id, receipt_id, purchase_qty, qty_count_units, unit_cost, receipt:receipt_id(received_date, vendor:vendor_id(name))")
     .eq("product_id", productId);
   if (error) throw error;
-  return (data ?? [])
-    .filter((l) => l.receipt?.received_date >= since)
-    .map((l) => ({
+  return (data ?? []).map((l) => {
+    const rc = Array.isArray(l.receipt) ? l.receipt[0] : l.receipt;
+    const vn = rc && (Array.isArray(rc.vendor) ? rc.vendor[0] : rc.vendor);
+    return {
       receipt_line_id: l.receipt_line_id, receipt_id: l.receipt_id,
-      received_date: l.receipt?.received_date, vendor_name: l.receipt?.vendor?.name,
+      received_date: rc?.received_date, vendor_name: vn?.name,
       purchase_qty: l.purchase_qty, qty_count_units: l.qty_count_units, unit_cost: l.unit_cost,
       factor: (l.qty_count_units && l.purchase_qty) ? l.qty_count_units / l.purchase_qty : 1,
-    }))
+    };
+  }).filter((r) => !r.received_date || r.received_date >= since)
     .sort((a, b) => (b.received_date || "").localeCompare(a.received_date || ""));
 }
 export async function deleteCount(id) {
