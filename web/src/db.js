@@ -194,6 +194,12 @@ export async function updateCount(id, fields) {
   const { error } = await supabase.from("stock_count").update(fields).eq("stock_count_id", id);
   if (error) throw error;
 }
+export async function setRecountFlag(productId, needs, note) {
+  const patch = { needs_recount: !!needs };
+  if (note !== undefined) patch.recount_note = note || null;
+  const { error } = await supabase.from("product").update(patch).eq("product_id", productId);
+  if (error) throw error;
+}
 export async function getItemReceipts(productId, days = 400) {
   const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
   const { data, error } = await supabase.from("receipt_line")
