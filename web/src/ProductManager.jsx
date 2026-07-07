@@ -1226,6 +1226,7 @@ function Dashboard({ products, onhand, vendors, counts, receipts, reload }) {
     ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} />],
     ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
     ["value", "Inventory value — by category", <ValueReport valByCat={valByCat} total={invValue} />],
+    ["valitem", "Inventory value — by item", <ValueByItemReport products={products} onhand={onhand} />],
     ["spend", "Purchasing — by vendor", <SpendReport recs={recs} vName={vName} days={spendDays} setDays={setSpendDays} />],
     ["foodcost", "Weekly food cost & usage", <UsageReport usage={usage} />],
     ["counts", "Counts by week", <CountsByWeekReport counts={counts} products={products} onOpen={setDetail} />],
@@ -1298,6 +1299,37 @@ function OnHandReport({ products, onhand }) {
           <td>{where.length ? where.map(([n, q]) => <span className="bchip" key={n}>{n}: <b className="fig" style={{ marginLeft: 4 }}>{q}</b></span>) : <span className="stat">not counted yet</span>}</td>
         </tr>);
       })}</tbody></table>
+  );
+}
+
+function ValueByItemReport({ products, onhand }) {
+  const rows = products.map((p) => {
+    const oh = onhand[p.product_id]?.total || 0;
+    const cpc = costPerCount(p);
+    return { p, oh, cpc, val: cpc != null ? cpc * oh : 0 };
+  }).filter((r) => r.val > 0).sort((a, b) => b.val - a.val);
+  const total = rows.reduce((a, r) => a + r.val, 0);
+  if (!rows.length) return <div className="note">No valued stock yet — count items and set vendor prices to populate this.</div>;
+  return (
+    <div>
+      <div className="stat" style={{ marginBottom: 8 }}>On-hand × per-unit cost, highest value first. If the total looks too high, the culprit is near the top — usually a wrong case price (fix it in Catalog or Receive → Recent deliveries) or a mis-set package/usage size.</div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="tbl" style={{ border: "none", minWidth: 460 }}>
+          <thead><tr><th>Item</th><th style={{ textAlign: "right" }}>On hand</th><th style={{ textAlign: "right" }}>$ / {"unit"}</th><th style={{ textAlign: "right" }}>Value</th></tr></thead>
+          <tbody>
+            <tr><td style={{ fontWeight: 700 }}>Total</td><td></td><td></td><td className="fig" style={{ textAlign: "right", fontWeight: 700 }}>{fmtUSD(total)}</td></tr>
+            {rows.map((r) => (
+              <tr key={r.p.product_id}>
+                <td>{r.p.name}</td>
+                <td className="fig" style={{ textAlign: "right" }}>{fmtQty(r.p, r.oh)}</td>
+                <td className="fig" style={{ textAlign: "right" }}>{r.cpc != null ? "$" + r.cpc.toFixed(3) + "/" + measure(r.p) : "—"}</td>
+                <td className="fig" style={{ textAlign: "right", fontWeight: 600 }}>{fmtUSD(r.val)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
