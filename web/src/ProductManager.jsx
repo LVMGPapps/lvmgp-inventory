@@ -523,7 +523,9 @@ function Receive({ products, vendors, reload }) {
       const r = await db.getReceivables();
       setRows(r.map((x) => ({ ...x, case_cost: x.unit_cost ?? "", scanned: false })));
     } catch (e) { setErr("Couldn't load purchased items: " + (e.message || e)); setRows([]); }
-    db.listRecentReceipts(90).then(setRecent).catch(() => {});
+    db.listRecentReceipts(90).then((rr) => setRecent(rr.map((d) => ({
+      ...d, lines: d.lines.map((l) => ({ ...l, factor: (l.qty_count_units && l.purchase_qty) ? l.qty_count_units / l.purchase_qty : (l.count_per_case || 1) })),
+    })))).catch(() => {});
   }
   useEffect(() => { load(); }, []);
   if (rows === null) return <div className="empty">Loading…</div>;
@@ -644,30 +646,44 @@ function Receive({ products, vendors, reload }) {
       )}
       {recent.length > 0 && (
         <div className="vgroup">
-          <div className="vgroup-h"><span className="vname">Recent deliveries</span><span className="stat">change a date, then Save</span></div>
-          <table className="tbl" style={{ border: "none" }}>
-            <thead><tr><th>Date</th><th>Vendor</th><th>Items</th><th className="fig">Total</th><th></th></tr></thead>
-            <tbody>{recent.map((d) => (
-              <tr key={d.receipt_id}>
-                <td><input type="date" value={d.received_date} max={new Date().toISOString().slice(0, 10)}
-                  onChange={(e) => setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, received_date: e.target.value, dirty: true } : x))} /></td>
-                <td>{d.vendor_name || "No vendor"}</td>
-                <td className="stat" style={{ maxWidth: 240 }}>{d.lines.map((l) => `${l.product_name} ×${l.purchase_qty}`).join(", ")}</td>
-                <td className="fig">{d.total ? money(d.total) : "—"}</td>
-                <td style={{ whiteSpace: "nowrap" }}>
-                  <button className="mini" disabled={!d.dirty} style={d.dirty ? { background: "#E0392B", color: "#fff" } : undefined} onClick={async () => {
-                    try { await db.updateReceiptDate(d.receipt_id, d.received_date); setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, dirty: false } : x)); setErr(""); setMsg(`Saved delivery date: ${new Date(d.received_date + "T00:00:00").toLocaleDateString()}.`); reload(); }
-                    catch (er) { setErr("Couldn't save date: " + (er.message || er)); }
-                  }}>{d.dirty ? "Save" : "Saved"}</button>{" "}
-                  <button className="mini mini-danger" onClick={async () => {
-                    if (!confirm("Delete this delivery? Its received amounts will be removed from usage.")) return;
-                    try { await db.deleteReceipt(d.receipt_id); setRecent((rs) => rs.filter((x) => x.receipt_id !== d.receipt_id)); reload(); }
-                    catch (er) { setErr("Couldn't delete: " + (er.message || er)); }
-                  }}>Delete</button>
-                </td>
-              </tr>
-            ))}</tbody>
-          </table>
+          <div className="vgroup-h"><span className="vname">Recent deliveries</span><span className="stat">edit date, qty, or case $ to match your receipt — then Save</span></div>
+          <div style={{ overflowX: "auto" }}>
+            <table className="tbl" style={{ border: "none", minWidth: 560 }}>
+              <thead><tr><th>Date</th><th>Item</th><th className="fig">Qty</th><th className="fig">Case $</th><th className="fig">Total</th><th></th></tr></thead>
+              <tbody>{recent.flatMap((d) => d.lines.map((l) => {
+                const editLine = (patch) => setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, lines: x.lines.map((ll) => ll.receipt_line_id === l.receipt_line_id ? { ...ll, ...patch, dirty: true } : ll) } : x));
+                const setDate = (nd) => setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, received_date: nd, dirtyDate: true } : x));
+                const total = (Number(l.unit_cost) || 0) * (Number(l.purchase_qty) || 0);
+                const dirty = d.dirtyDate || l.dirty;
+                return (
+                  <tr key={l.receipt_line_id}>
+                    <td><input type="date" value={d.received_date} max={new Date().toISOString().slice(0, 10)} onChange={(e) => e.target.value && setDate(e.target.value)} /></td>
+                    <td>{l.product_name}</td>
+                    <td className="fig"><input className="fig" style={{ width: 66 }} type="number" step="0.001" min="0" value={l.purchase_qty} onChange={(e) => editLine({ purchase_qty: e.target.value })} /></td>
+                    <td className="fig"><input className="fig" style={{ width: 82 }} type="number" step="0.01" min="0" value={l.unit_cost ?? ""} onChange={(e) => editLine({ unit_cost: e.target.value })} /></td>
+                    <td className="fig">{total ? money(total) : "—"}</td>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <button className="mini" disabled={!dirty} style={dirty ? { background: "#E0392B", color: "#fff" } : undefined} onClick={async () => {
+                        try {
+                          const pq = Number(l.purchase_qty) || 0;
+                          const qcu = pq * (l.factor || 1);
+                          await db.updateReceiptLine(l.receipt_line_id, { purchase_qty: pq, unit_cost: (l.unit_cost === "" || l.unit_cost == null) ? null : Number(l.unit_cost), qty_count_units: qcu });
+                          if (d.dirtyDate) await db.updateReceiptDate(d.receipt_id, d.received_date);
+                          setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, dirtyDate: false, lines: x.lines.map((ll) => ll.receipt_line_id === l.receipt_line_id ? { ...ll, dirty: false, qty_count_units: qcu } : ll) } : x));
+                          setErr(""); setMsg(`Saved ${l.product_name}.`); reload();
+                        } catch (er) { setErr("Couldn't save: " + (er.message || er)); }
+                      }}>{dirty ? "Save" : "Saved"}</button>{" "}
+                      <button className="mini mini-danger" onClick={async () => {
+                        if (!confirm("Delete this whole delivery?")) return;
+                        try { await db.deleteReceipt(d.receipt_id); setRecent((rs) => rs.filter((x) => x.receipt_id !== d.receipt_id)); reload(); }
+                        catch (er) { setErr("Couldn't delete: " + (er.message || er)); }
+                      }}>Delete</button>
+                    </td>
+                  </tr>
+                );
+              }))}</tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
@@ -1294,53 +1310,54 @@ function UsageReport({ usage }) {
 
 function WeeklyReviewReport({ counts, receipts, products, onOpen }) {
   const r1 = (n) => Math.round(n * 10) / 10;
-  const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
-  const byItem = {}; const weekset = new Set();
+  // per item: counts grouped by actual count DATE (latest per location that day)
+  const byItem = {};
   for (const c of counts) {
-    const w = wkk(c.counted_at); weekset.add(w);
-    const it = (byItem[c.product_id] ||= {}); const wo = (it[w] ||= {});
+    const d = c.counted_at.slice(0, 10);
+    const it = (byItem[c.product_id] ||= {}); const day = (it[d] ||= {});
     const t = new Date(c.counted_at).getTime();
-    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
+    if (!day[c.location_id] || t >= day[c.location_id].t) day[c.location_id] = { qty: Number(c.qty), t };
   }
-  const weeks = [...weekset].sort();
-  if (!weeks.length) return <div className="note">No counts logged yet. Once you count two weeks in a row, last vs this vs used shows here.</div>;
-  const thisW = weeks[weeks.length - 1];
-  const lastW = weeks.length > 1 ? weeks[weeks.length - 2] : null;
   const recByItem = {};
   for (const r of receipts) for (const l of (r.receipt_line || [])) {
     (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || Number(l.purchase_qty) || 0 });
   }
-  const total = (it, w) => (w && it[w]) ? Object.values(it[w]).reduce((a, x) => a + x.qty, 0) : null;
-  const dateOf = (it, w) => (w && it[w]) ? Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d : null;
+  const dayTotal = (it, d) => Object.values(it[d]).reduce((a, x) => a + x.qty, 0);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+  const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
   const rows = Object.keys(byItem).map((pid) => {
     const it = byItem[pid];
-    const last = total(it, lastW); const cur = total(it, thisW);
-    const d0 = dateOf(it, lastW); const d1 = dateOf(it, thisW);
-    // received strictly after the last count date, up to and including this count date
-    const rec = (recByItem[pid] || []).reduce((a, x) => a + (((d0 == null || x.d >= d0) && d1 != null && x.d < d1) ? x.units : 0), 0);
-    const used = (last != null && cur != null) ? last + rec - cur : null;
-    return { pid, p: byId[pid], last, rec, cur, used };
-  }).filter((r) => r.p && (r.last != null || r.cur != null)).sort((a, b) => a.p.name.localeCompare(b.p.name));
-  const label = (w) => w ? new Date(w + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
+    const days = Object.keys(it).sort();                       // this item's actual count dates
+    const dCur = days[days.length - 1];
+    const dPrev = days.length > 1 ? days[days.length - 2] : null;
+    const cur = dayTotal(it, dCur);
+    const prev = dPrev ? dayTotal(it, dPrev) : null;
+    // deliveries on/after the previous count date and strictly before this count date
+    const rl = (recByItem[pid] || []).filter((x) => (dPrev == null || x.d >= dPrev) && x.d < dCur);
+    const rec = rl.reduce((a, x) => a + x.units, 0);
+    const recDates = [...new Set(rl.map((x) => x.d))].sort();
+    const used = prev != null ? prev + rec - cur : null;
+    return { pid, p: byId[pid], dPrev, dCur, prev, cur, rec, recDates, used };
+  }).filter((r) => r.p).sort((a, b) => a.p.name.localeCompare(b.p.name));
+  if (!rows.length) return <div className="note">No counts logged yet. Count an item on two different days and its last-vs-this usage shows here.</div>;
   return (
     <div>
-      <div className="stat" style={{ marginBottom: 8 }}>Used = last count + what was received <b>after the last count and before this one</b> − this count. A delivery dated the <b>same day as this week's count (or later)</b> counts toward next week, since counts are taken before deliveries arrive. A red Used usually means a delivery wasn't logged, or a miscount.</div>
+      <div className="stat" style={{ marginBottom: 8 }}>Each row compares that item's <b>two most recent counts</b> (dates shown). Used = last count + deliveries dated <b>on/after the last count and before this count</b> − this count. A delivery dated the <b>same day as the latest count</b> is treated as arriving after it, so it waits for next week. The small date under “Received” is when that delivery is dated — if it looks wrong, fix it in Receive → Recent deliveries.</div>
       <div style={{ overflowX: "auto" }}>
-        <table className="tbl" style={{ border: "none", minWidth: 440 }}>
+        <table className="tbl" style={{ border: "none", minWidth: 500 }}>
           <thead><tr>
             <th>Item</th>
-            <th style={{ textAlign: "right" }}>Last · {label(lastW)}</th>
-            <th style={{ textAlign: "right" }}>+ Recv</th>
-            <th style={{ textAlign: "right" }}>This · {label(thisW)}</th>
+            <th style={{ textAlign: "right" }}>Last count</th>
+            <th style={{ textAlign: "right" }}>+ Received</th>
+            <th style={{ textAlign: "right" }}>This count</th>
             <th style={{ textAlign: "right" }}>= Used</th>
           </tr></thead>
           <tbody>{rows.map((r) => (
             <tr key={r.pid} style={{ cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
               <td><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span><div className="stat">{r.p.count_unit}</div></td>
-              <td className="fig" style={{ textAlign: "right" }}>{r.last == null ? "—" : r1(r.last)}</td>
-              <td className="fig" style={{ textAlign: "right", color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}</td>
-              <td className="fig" style={{ textAlign: "right" }}>{r.cur == null ? "—" : r1(r.cur)}</td>
+              <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : r1(r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
+              <td className="fig" style={{ textAlign: "right", color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}<div className="stat">{r.recDates.map(label).join(", ")}</div></td>
+              <td className="fig" style={{ textAlign: "right" }}>{r1(r.cur)}<div className="stat">{label(r.dCur)}</div></td>
               <td className="fig" style={{ textAlign: "right", fontWeight: 600, color: r.used == null ? "#B7BBC4" : r.used < 0 ? "#E0392B" : "#191B1F" }}>{r.used == null ? "—" : r1(r.used)}</td>
             </tr>
           ))}</tbody>
