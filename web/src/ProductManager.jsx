@@ -1199,6 +1199,12 @@ function Organize({ products, locations, reload }) {
     return id;
   }
   async function dropToBay(pid, L) { setBusy(true); try { const uid = await ensureBayUnit(L); await db.setProductShelf(pid, aId, uid); reload && reload(); } catch (e) { alert(e.message || e); } finally { setBusy(false); setDrag(null); setOver(null); } }
+  async function unlink(pid) {
+    setBusy(true);
+    try { await db.removeProductFromLocation(pid, aId); reload && reload(); }
+    catch (e) { alert("Couldn't remove: " + (e.message || e)); }
+    finally { setBusy(false); setDrag(null); setOver(null); setSel(null); }
+  }
   async function generate() {
     setBusy(true);
     try {
@@ -1237,6 +1243,19 @@ function Organize({ products, locations, reload }) {
     </div>
   );
 
+  const removeCol = (key) => {
+    const props = dz(key, unlink);
+    return (
+      <div key={key} style={{ width: 220, flex: "0 0 auto" }}>
+        <div style={{ marginBottom: 4 }}><b style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 17, color: "#B0271B" }}>✕ Not stored here</b></div>
+        <div className="stat" style={{ marginBottom: 4 }}>take it out of {area(locations, aId)}</div>
+        <div {...props} style={{ ...props.style, borderColor: "#E0392B", background: over === key ? "#FDECEA" : "#FFF6F5" }}>
+          <div className="stat" style={{ padding: 6 }}>{sel != null ? "tap to remove from this area" : "drop an item here to remove it from this area"}</div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div>
       <div className="toolbar">
@@ -1269,12 +1288,14 @@ function Organize({ products, locations, reload }) {
                 col(L, cellsIn(L).length ? `shelves ${cellsIn(L).map((c) => c.code).join(", ")}` : "", inArea.filter((p) => bayOfP(p) === L), "bay-" + L, (pid) => dropToBay(pid, L), () => setBay(L)))}
               {!hasLetters && flatUnits.map((u) =>
                 col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "u-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id)))}
+              {removeCol("remove-bay")}
             </div>
           ) : (
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", paddingBottom: 8 }}>
               {col("In " + bay + " · no shelf", "", inArea.filter((p) => bayOfP(p) === bay && !/\d/.test(unitCodeOfP(p) || "")), "baynoshelf", (pid) => dropToBay(pid, bay))}
               {cellsIn(bay).map((u) =>
                 col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "cell-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id)))}
+              {removeCol("remove-shelf")}
               {cellsIn(bay).length === 0 && <div className="note">No numbered shelves under {bay} yet. Add them on the Generate step, or they’ll be created A1–A{levels}.</div>}
             </div>
           )}
