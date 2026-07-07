@@ -1426,41 +1426,52 @@ function UsageReport({ usage }) {
 function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
   const flag = async (p) => { try { await db.setRecountFlag(p.product_id, !p.needs_recount); reload && reload(); } catch (e) { alert("Couldn't flag: " + (e.message || e)); } };
   const r1 = (n) => Math.round(n * 10) / 10;
-  // per item: counts grouped by actual count DATE (latest per location that day)
+  // per item: counts grouped by ISO week; the LATEST count within a week IS that week's number
+  // (so recounting the same item daily just updates the number — it never adds).
+  const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
   const byItem = {};
   for (const c of counts) {
-    const d = c.counted_at.slice(0, 10);
-    const it = (byItem[c.product_id] ||= {}); const day = (it[d] ||= {});
+    const w = wkk(c.counted_at);
+    const it = (byItem[c.product_id] ||= {}); const wo = (it[w] ||= {});
     const t = new Date(c.counted_at).getTime();
-    if (!day[c.location_id] || t >= day[c.location_id].t) day[c.location_id] = { qty: Number(c.qty), t };
+    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
   }
   const recByItem = {};
   for (const r of receipts) for (const l of (r.receipt_line || [])) {
     (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || Number(l.purchase_qty) || 0 });
   }
-  const dayTotal = (it, d) => Object.values(it[d]).reduce((a, x) => a + x.qty, 0);
+  const wkTotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
+  const wkDate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;   // the week's representative (latest) count date
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
-  const rows = Object.keys(byItem).map((pid) => {
-    const it = byItem[pid];
-    const days = Object.keys(it).sort();                       // this item's actual count dates
-    const dCur = days[days.length - 1];
-    const dPrev = days.length > 1 ? days[days.length - 2] : null;
-    const cur = dayTotal(it, dCur);
-    const prev = dPrev ? dayTotal(it, dPrev) : null;
-    // deliveries on/after the previous count date and strictly before this count date
-    const rl = (recByItem[pid] || []).filter((x) => (dPrev == null || x.d >= dPrev) && x.d < dCur);
+  const pids = [...new Set([...Object.keys(byItem), ...Object.keys(recByItem)])];
+  const rows = pids.map((pid) => {
+    const it = byItem[pid] || {};
+    const weeks = Object.keys(it).sort();
+    const thisW = weeks[weeks.length - 1] || null;             // this week = most recent week counted
+    const lastW = weeks.length > 1 ? weeks[weeks.length - 2] : null;   // last week = previous week counted
+    const cur = thisW ? wkTotal(it, thisW) : null;
+    const prev = lastW ? wkTotal(it, lastW) : null;
+    const dCur = thisW ? wkDate(it, thisW) : null;
+    const dPrev = lastW ? wkDate(it, lastW) : null;
+    const all = recByItem[pid] || [];
+    // everything received during the week: on/after last count, before this count
+    const rl = all.filter((x) => (dPrev == null || x.d >= dPrev) && (dCur == null || x.d < dCur));
     const rec = rl.reduce((a, x) => a + x.units, 0);
     const recDates = [...new Set(rl.map((x) => x.d))].sort();
-    const used = prev != null ? prev + rec - cur : null;
-    return { pid, p: byId[pid], dPrev, dCur, prev, cur, rec, recDates, used };
+    // received on/after this week's count — not yet reconciled by a newer count
+    const pl = dCur ? all.filter((x) => x.d >= dCur) : (weeks.length ? [] : all);
+    const pend = pl.reduce((a, x) => a + x.units, 0);
+    const pendDates = [...new Set(pl.map((x) => x.d))].sort();
+    const used = (prev != null && cur != null) ? prev + rec - cur : null;
+    return { pid, p: byId[pid], dPrev, dCur, prev, cur, rec, recDates, pend, pendDates, used };
   }).filter((r) => r.p).sort((a, b) => a.p.name.localeCompare(b.p.name));
-  if (!rows.length) return <div className="note">No counts logged yet. Count an item on two different days and its last-vs-this usage shows here.</div>;
+  if (!rows.length) return <div className="note">No counts or deliveries logged yet.</div>;
   return (
     <div>
-      <div className="stat" style={{ marginBottom: 8 }}>Each row compares that item's <b>two most recent counts</b> (dates shown). Used = last count + deliveries dated <b>on/after the last count and before this count</b> − this count. A delivery dated the <b>same day as the latest count</b> is treated as arriving after it, so it waits for next week. The small date under “Received” is when that delivery is dated — if it looks wrong, fix it in Receive → Recent deliveries.</div>
+      <div className="stat" style={{ marginBottom: 8 }}>Each row compares that item's <b>two most recent counts</b>. Used = last + received-between − this. An <b style={{ color: "#B26A00" }}>orange “+N awaiting count”</b> means a delivery arrived after the last count — you received it but haven't recounted, so it isn't in Used yet. Recount that item to reconcile.</div>
       <div style={{ overflowX: "auto" }}>
-        <table className="tbl" style={{ border: "none", minWidth: 500 }}>
+        <table className="tbl" style={{ border: "none", minWidth: 520 }}>
           <thead><tr>
             <th>Item</th>
             <th style={{ textAlign: "right" }}>Last count</th>
@@ -1472,8 +1483,11 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
             <tr key={r.pid} style={{ cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
               <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span><div className="stat">{r.p.count_unit}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
               <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : r1(r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
-              <td className="fig" style={{ textAlign: "right", color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}<div className="stat">{r.recDates.map(label).join(", ")}</div></td>
-              <td className="fig" style={{ textAlign: "right" }}>{r1(r.cur)}<div className="stat">{label(r.dCur)}</div></td>
+              <td className="fig" style={{ textAlign: "right" }}>
+                <span style={{ color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}</span>
+                {r.pend ? <div style={{ color: "#B26A00", fontWeight: 600 }} title={"received " + r.pendDates.map(label).join(", ") + " — awaiting count"}>+{r1(r.pend)} awaiting count</div> : <div className="stat">{r.recDates.map(label).join(", ")}</div>}
+              </td>
+              <td className="fig" style={{ textAlign: "right" }}>{r.cur == null ? "—" : r1(r.cur)}<div className="stat">{r.cur == null ? "not counted" : label(r.dCur)}</div></td>
               <td className="fig" style={{ textAlign: "right", fontWeight: 600, color: r.used == null ? "#B7BBC4" : r.used < 0 ? "#E0392B" : "#191B1F" }}>{r.used == null ? "—" : r1(r.used)}</td>
             </tr>
           ))}</tbody>
