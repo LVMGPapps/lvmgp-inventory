@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import * as db from "./db";
 import { signOut } from "./AuthGate";
 
@@ -1665,8 +1665,9 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
     const pendDates = [...new Set(pl.map((x) => x.d))].sort();
     const used = (prev != null && cur != null) ? prev + rec - cur : null;
     return { pid, p: byId[pid], dPrev, dCur, prev, cur, rec, recDates, pend, pendDates, used };
-  }).filter((r) => r.p).sort((a, b) => a.p.name.localeCompare(b.p.name));
+  }).filter((r) => r.p).sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
   if (!rows.length) return <div className="note">No counts or deliveries logged yet.</div>;
+  let lastCat = null;
   return (
     <div>
       <div className="stat" style={{ marginBottom: 8 }}>Each row compares that item's <b>two most recent counts</b>. Used = last + received-between − this. An <b style={{ color: "#B26A00" }}>orange “+N awaiting count”</b> means a delivery arrived after the last count — you received it but haven't recounted, so it isn't in Used yet. Recount that item to reconcile.</div>
@@ -1679,18 +1680,24 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
             <th style={{ textAlign: "right" }}>This count</th>
             <th style={{ textAlign: "right" }}>= Used</th>
           </tr></thead>
-          <tbody>{rows.map((r) => (
-            <tr key={r.pid} style={{ cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
-              <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span><div className="stat">{r.p.count_unit}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
-              <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : r1(r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
-              <td className="fig" style={{ textAlign: "right" }}>
-                <span style={{ color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}</span>
-                {r.pend ? <div style={{ color: "#B26A00", fontWeight: 600 }} title={"received " + r.pendDates.map(label).join(", ") + " — awaiting count"}>+{r1(r.pend)} awaiting count</div> : <div className="stat">{r.recDates.map(label).join(", ")}</div>}
-              </td>
-              <td className="fig" style={{ textAlign: "right" }}>{r.cur == null ? "—" : r1(r.cur)}<div className="stat">{r.cur == null ? "not counted" : label(r.dCur)}</div></td>
-              <td className="fig" style={{ textAlign: "right", fontWeight: 600, color: r.used == null ? "#B7BBC4" : r.used < 0 ? "#E0392B" : "#191B1F" }}>{r.used == null ? "—" : r1(r.used)}</td>
-            </tr>
-          ))}</tbody>
+          <tbody>{rows.map((r) => {
+            const cat = r.p.category || "Uncategorized";
+            const head = cat !== lastCat; lastCat = cat;
+            return (
+            <Fragment key={r.pid}>
+              {head && <tr><td colSpan={5} style={{ background: "#F4F1EA", fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", fontSize: 13, padding: "6px 8px" }}>{cat}</td></tr>}
+              <tr style={{ cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
+                <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span><div className="stat">{r.p.count_unit}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
+                <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : r1(r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
+                <td className="fig" style={{ textAlign: "right" }}>
+                  <span style={{ color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}</span>
+                  {r.pend ? <div style={{ color: "#B26A00", fontWeight: 600 }} title={"received " + r.pendDates.map(label).join(", ") + " — awaiting count"}>+{r1(r.pend)} awaiting count</div> : <div className="stat">{r.recDates.map(label).join(", ")}</div>}
+                </td>
+                <td className="fig" style={{ textAlign: "right" }}>{r.cur == null ? "—" : r1(r.cur)}<div className="stat">{r.cur == null ? "not counted" : label(r.dCur)}</div></td>
+                <td className="fig" style={{ textAlign: "right", fontWeight: 600, color: r.used == null ? "#B7BBC4" : r.used < 0 ? "#E0392B" : "#191B1F" }}>{r.used == null ? "—" : r1(r.used)}</td>
+              </tr>
+            </Fragment>
+          );})}</tbody>
         </table>
       </div>
     </div>
