@@ -1164,6 +1164,7 @@ function Organize({ products, locations, reload }) {
   const [drag, setDrag] = useState(null);        // product_id being dragged
   const [over, setOver] = useState(null);        // drop target key hovered
   const [busy, setBusy] = useState(false);
+  const [sel, setSel] = useState(null);          // tap-to-move: selected product_id
   const [levels, setLevels] = useState(5);
   const [lettersTo, setLettersTo] = useState("H");
 
@@ -1214,11 +1215,13 @@ function Organize({ products, locations, reload }) {
     onDragOver: (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; if (over !== key) setOver(key); },
     onDragLeave: () => setOver((o) => (o === key ? null : o)),
     onDrop: (e) => { e.preventDefault(); if (drag != null) onDropFn(drag); },
-    style: { border: "2px dashed " + (over === key ? "#E0392B" : "#E6E1D6"), background: over === key ? "#FDECEA" : "#fff", borderRadius: 10, padding: 8, minHeight: 70 },
+    onClick: () => { if (sel != null) { onDropFn(sel); setSel(null); } },
+    style: { border: "2px dashed " + (over === key || (sel != null) ? "#E0392B" : "#E6E1D6"), background: over === key ? "#FDECEA" : "#fff", borderRadius: 10, padding: 8, minHeight: 64, cursor: sel != null ? "copy" : "default" },
   });
   const chip = (p) => (
     <div key={p.product_id} draggable onDragStart={(e) => { setDrag(p.product_id); e.dataTransfer.effectAllowed = "move"; }} onDragEnd={() => { setDrag(null); setOver(null); }}
-      style={{ display: "inline-block", margin: 3, padding: "5px 9px", borderRadius: 8, border: "1px solid #E6E1D6", background: drag === p.product_id ? "#EEE" : "#F8F6F1", cursor: "grab", fontSize: 13, fontWeight: 600 }}>
+      onClick={(e) => { e.stopPropagation(); setSel((s) => (s === p.product_id ? null : p.product_id)); }}
+      style={{ display: "inline-block", margin: 3, padding: "6px 10px", borderRadius: 8, border: "2px solid " + (sel === p.product_id ? "#E0392B" : "#E6E1D6"), background: sel === p.product_id ? "#FDECEA" : "#F8F6F1", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
       {p.name}{unitCodeOfP(p) ? <span className="stat"> · {unitCodeOfP(p)}</span> : ""}
     </div>
   );
@@ -1230,7 +1233,7 @@ function Organize({ products, locations, reload }) {
         <span className="stat">{prods.length}</span>
       </div>
       {sub && <div className="stat" style={{ marginBottom: 4 }}>{sub}</div>}
-      <div {...dz(dropKey, onDropFn)}>{prods.map(chip)}{prods.length === 0 && <div className="stat" style={{ padding: 6 }}>drop here</div>}</div>
+      <div {...dz(dropKey, onDropFn)}>{prods.map(chip)}{prods.length === 0 && <div className="stat" style={{ padding: 6 }}>{sel != null ? "tap to place here" : "empty"}</div>}</div>
     </div>
   );
 
@@ -1257,9 +1260,10 @@ function Organize({ products, locations, reload }) {
               </div>
             </div>
           )}
-          <p className="stat" style={{ margin: "0 2px 10px" }}>Drag an item onto a bay to place it there. Click a bay header (›) to open its shelves and drag items onto A1–A5. “Unassigned” = in this area but not yet placed.</p>
+          <p className="stat" style={{ margin: "0 2px 10px" }}>Tap an item to pick it up, then tap a bay or shelf to drop it (or drag if you prefer). Tap a bay header (›) to open its shelves. “Unassigned” = in this area but not yet placed.</p>
+          {sel != null && <div className="ok" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}><span>Moving <b>{(inArea.find((p) => p.product_id === sel) || {}).name}</b> — tap a bay/shelf to place it.</span><button className="mini" onClick={() => setSel(null)}>Cancel</button></div>}
           {!bay ? (
-            <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 8 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", paddingBottom: 8 }}>
               {col("Unassigned", "no bay yet", inArea.filter((p) => !bayOfP(p)), "unassigned", (pid) => assign(pid, null))}
               {(hasLetters ? bayLetters : []).map((L) =>
                 col(L, cellsIn(L).length ? `shelves ${cellsIn(L).map((c) => c.code).join(", ")}` : "", inArea.filter((p) => bayOfP(p) === L), "bay-" + L, (pid) => dropToBay(pid, L), () => setBay(L)))}
@@ -1267,7 +1271,7 @@ function Organize({ products, locations, reload }) {
                 col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "u-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id)))}
             </div>
           ) : (
-            <div style={{ display: "flex", gap: 10, overflowX: "auto", paddingBottom: 8 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", paddingBottom: 8 }}>
               {col("In " + bay + " · no shelf", "", inArea.filter((p) => bayOfP(p) === bay && !/\d/.test(unitCodeOfP(p) || "")), "baynoshelf", (pid) => dropToBay(pid, bay))}
               {cellsIn(bay).map((u) =>
                 col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "cell-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id)))}
