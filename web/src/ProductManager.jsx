@@ -467,6 +467,54 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
   );
 }
 
+function printCountSheet(products, locations, areaId) {
+  const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const areas = areaId ? locations.filter((l) => String(l.location_id) === String(areaId)) : locations;
+  let body = "";
+  for (const loc of areas) {
+    const items = products.filter((p) => !p.not_stocked && (p.locations || []).some((l) => l.location_id === loc.location_id));
+    if (!items.length) continue;
+    const groups = {};
+    for (const p of items) {
+      const a = (p.locations || []).find((l) => l.location_id === loc.location_id);
+      const code = a?.unit_code || "Unassigned shelf";
+      const sort = a?.unit_sort ?? 9e9;
+      (groups[code] = groups[code] || { sort, items: [] }).items.push(p);
+    }
+    const ordered = Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
+    body += `<div class="area"><h2>${esc(loc.name)}</h2><div class="meta">Counted by ________________________    Date ______________    Page counts on-hand only</div>`;
+    for (const [code, g] of ordered) {
+      g.items.sort((a, b) => a.name.localeCompare(b.name));
+      body += `<h3>${esc(code)}</h3><table><thead><tr><th class="nm">Item</th><th>Cases</th><th>Pkgs</th><th>Loose</th></tr></thead><tbody>`;
+      for (const p of g.items) {
+        const ppc = Number(p.packages_per_case) || 1;
+        const upp = Number(p.usage_per_package) || 1;
+        const meas = p.usage_measure || p.count_unit || "each";
+        const pkg = p.package_unit || "package";
+        const hint = ppc > 1
+          ? `1 case = ${ppc} ${pkg}${ppc === 1 ? "" : "s"}${upp > 1 ? ` · 1 ${pkg} = ${upp} ${meas}` : ""}`
+          : (upp > 1 ? `1 ${pkg} = ${upp} ${meas}` : "");
+        body += `<tr><td class="nm">${esc(p.name)}${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</td><td class="box"></td><td class="box"></td><td class="box">${esc(meas)}</td></tr>`;
+      }
+      body += `</tbody></table>`;
+    }
+    body += `</div>`;
+  }
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>LVMGP Count Sheet</title><style>
+    *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:20px}
+    h1{font-size:18px;margin:0 0 10px} h2{font-size:18px;margin:0 0 2px} .meta{font-size:12px;color:#333;margin:0 0 8px}
+    h3{font-size:13px;background:#eee;padding:4px 8px;margin:12px 0 0;border:1px solid #bbb;border-bottom:none}
+    table{width:100%;border-collapse:collapse;margin:0} th,td{border:1px solid #bbb;padding:6px;font-size:12px;text-align:center}
+    th.nm,td.nm{text-align:left;width:58%} th{background:#f4f4f4} td.box{height:30px} .hint{color:#666;font-size:10px;margin-top:1px}
+    .area{page-break-after:always} .area:last-child{page-break-after:auto}
+    @media print{body{margin:12mm} h3{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+  </style></head><body><h1>LVMGP — Inventory Count Sheet</h1>${body || "<p>No stocked items to print for this selection.</p>"}</body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) { alert("Allow pop-ups for this site to print the count sheet."); return; }
+  w.document.write(html); w.document.close(); w.focus();
+  setTimeout(() => { try { w.print(); } catch {} }, 350);
+}
+
 function Count({ products, locations, onhand, reload }) {
   const [locId, setLocId] = useState("");
   const [draft, setDraft] = useState({});
@@ -564,6 +612,7 @@ function Count({ products, locations, onhand, reload }) {
         </select>
         <input className="grow" placeholder={loc ? "Search this location…" : "Search all items…"} value={q} onChange={(e) => setQ(e.target.value)} />
         {flaggedCount > 0 && <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : { borderColor: "#E0392B", color: "#E0392B" }}>🚩 {flaggedCount}</button>}
+        <button className="mini" title={loc ? `Print a blank count sheet for ${loc.name}` : "Print blank count sheets for all areas"} onClick={() => printCountSheet(products, locations, locId)}>🖨 Print{loc ? "" : " all"}</button>
         <button className="mini" onClick={() => setFinding(true)}>📷 Find</button>
         <button className="btn btn-primary" disabled={!entered.length} onClick={save}>Save {entered.length || ""} count{entered.length === 1 ? "" : "s"}</button>
       </div>
