@@ -199,8 +199,11 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
   const [locFilter, setLocFilter] = useState("");
   const [venFilter, setVenFilter] = useState("");
   const [sortBy, setSortBy] = useState("az");
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const flaggedCount = products.filter((p) => p.needs_recount).length;
 
   let list = products.filter((p) => {
+    if (flaggedOnly && !p.needs_recount) return false;
     if (q && !(p.name.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     if (locFilter && !(p.locations || []).some((l) => String(l.location_id) === locFilter)) return false;
     if (venFilter && !(p.vendors || []).some((v) => String(v.vendor_id) === venFilter)) return false;
@@ -240,7 +243,8 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
           <option value="ohlo">Sort: On hand (low→high)</option>
         </select>
         <span className="stat" style={{ alignSelf: "center" }}>{list.length} item{list.length === 1 ? "" : "s"}</span>
-        {(locFilter || venFilter || q) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); }}>Clear</button>}
+        <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : (flaggedCount ? { borderColor: "#E0392B", color: "#E0392B" } : undefined)}>🚩 Needs recount{flaggedCount ? ` (${flaggedCount})` : ""}</button>
+        {(locFilter || venFilter || q || flaggedOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); setFlaggedOnly(false); }}>Clear</button>}
       </div>
       {list.length === 0 ? <div className="empty">No items match. Try clearing the filters.</div> : (
         <div className="grid">
@@ -249,6 +253,7 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
               {p.image_url && <img src={p.image_url} alt="" style={{ width: "100%", height: 120, objectFit: "cover", borderRadius: 8, marginBottom: 8 }} />}
               <div className="tag">{p.category || "Uncategorized"}</div>
               <div className="card-name">{p.name}</div>
+              {p.needs_recount && <div className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B", marginBottom: 4 }} title={p.recount_note || ""}>🚩 Needs recount{p.recount_note ? ` · ${p.recount_note}` : ""}</div>}
               {p.backup_for && <div className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00", marginBottom: 4 }}>✳ Alternate for {products.find((x) => x.product_id === p.backup_for)?.name || "another item"}</div>}
               {p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}
               <div className="stat">📍 {(p.locations || []).map((l) => l.name + (l.unit_code ? ` ${l.unit_code}` : "")).join(" · ") || "No location"} · on hand {fmtQty(p, onhand[p.product_id]?.total ?? 0)}</div>
@@ -429,6 +434,8 @@ function Count({ products, locations, onhand, reload }) {
   const [q, setQ] = useState("");
   const [finding, setFinding] = useState(false);
   const [focusId, setFocusId] = useState(null);
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const flaggedCount = products.filter((p) => p.needs_recount).length;
   const setRow = (key, f, v) => setDraft((d) => ({ ...d, [key]: { ...(d[key] || {}), [f]: v } }));
 
   const loc = locations.find((l) => String(l.location_id) === String(locId));
@@ -446,6 +453,7 @@ function Count({ products, locations, onhand, reload }) {
     const match = (p) => p.name.toLowerCase().includes(t) || (p.brand || "").toLowerCase().includes(t) || (p.barcodes || []).includes(q);
     heads = heads.filter((p) => match(p) || (backupsBy[p.product_id] || []).some(match));
   }
+  if (flaggedOnly) heads = heads.filter((p) => p.needs_recount || (backupsBy[p.product_id] || []).some((b) => b.needs_recount));
 
   const groups = {};
   for (const p of heads) {
@@ -468,6 +476,7 @@ function Count({ products, locations, onhand, reload }) {
     });
     try {
       await db.postCounts(entries);
+      for (const e of entries) { const p = products.find((x) => x.product_id === e.product_id); if (p?.needs_recount) { try { await db.setRecountFlag(e.product_id, false); } catch {} } }
       setNote(entries.length); setDraft({}); reload();
     } catch (err) {
       alert("Couldn't save the count: " + (err.message || err));
@@ -497,7 +506,7 @@ function Count({ products, locations, onhand, reload }) {
     const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
     return (
       <div className="crow" key={p.product_id} style={style}>
-        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}<b>{p.name}</b><div className="stat">{showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : ""}1 {p.package_unit || "package"} = {upp} {uMeas} · here {fmtQty(p, here)}</div></div>
+        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : ""}1 {p.package_unit || "package"} = {upp} {uMeas} · here {fmtQty(p, here)}</div></div>
         {showCase && <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>}
         <label>{pkgName(p, 2)}<input className="fig" type="number" min="0" value={e.packages ?? ""} onChange={(ev) => setRow(key, "packages", ev.target.value)} /></label>
         <label>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>
@@ -514,6 +523,7 @@ function Count({ products, locations, onhand, reload }) {
           {locations.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
         </select>
         <input className="grow" placeholder={loc ? "Search this location…" : "Search all items…"} value={q} onChange={(e) => setQ(e.target.value)} />
+        {flaggedCount > 0 && <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : { borderColor: "#E0392B", color: "#E0392B" }}>🚩 {flaggedCount}</button>}
         <button className="mini" onClick={() => setFinding(true)}>📷 Find</button>
         <button className="btn btn-primary" disabled={!entered.length} onClick={save}>Save {entered.length || ""} count{entered.length === 1 ? "" : "s"}</button>
       </div>
@@ -1223,7 +1233,7 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
 
   const tile = (k, v, sub, dark) => <div className={"tile" + (dark ? " dark" : "")}><div className="k">{k}</div><div className="v fig">{v}</div>{sub && <div className="sub">{sub}</div>}</div>;
   const reports = [
-    ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} />],
+    ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} reload={reload} />],
     ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
     ["value", "Inventory value — by category", <ValueReport valByCat={valByCat} total={invValue} />],
     ["valitem", "Inventory value — by item", <ValueByItemReport products={products} onhand={onhand} />],
@@ -1374,7 +1384,8 @@ function UsageReport({ usage }) {
   </div>);
 }
 
-function WeeklyReviewReport({ counts, receipts, products, onOpen }) {
+function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
+  const flag = async (p) => { try { await db.setRecountFlag(p.product_id, !p.needs_recount); reload && reload(); } catch (e) { alert("Couldn't flag: " + (e.message || e)); } };
   const r1 = (n) => Math.round(n * 10) / 10;
   // per item: counts grouped by actual count DATE (latest per location that day)
   const byItem = {};
@@ -1420,7 +1431,7 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen }) {
           </tr></thead>
           <tbody>{rows.map((r) => (
             <tr key={r.pid} style={{ cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
-              <td><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span><div className="stat">{r.p.count_unit}</div></td>
+              <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span><div className="stat">{r.p.count_unit}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
               <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : r1(r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
               <td className="fig" style={{ textAlign: "right", color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}<div className="stat">{r.recDates.map(label).join(", ")}</div></td>
               <td className="fig" style={{ textAlign: "right" }}>{r1(r.cur)}<div className="stat">{label(r.dCur)}</div></td>
@@ -1441,6 +1452,14 @@ function ItemHistory({ product, locations, onClose, onChanged }) {
   const uMeas = measure(product);
   const today = new Date().toISOString().slice(0, 10);
   const locs = locations || [];
+  const [flagged, setFlagged] = useState(!!product.needs_recount);
+  const [flagNote, setFlagNote] = useState(product.recount_note || "");
+  async function toggleFlag(next) {
+    setBusy(true);
+    try { await db.setRecountFlag(product.product_id, next, flagNote); setFlagged(next); onChanged && onChanged(); }
+    catch (e) { alert("Couldn't update flag: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
   async function load() {
     try { setRows(await db.getItemCounts(product.product_id)); } catch { setRows([]); }
     try { setRecs(await db.getItemReceipts(product.product_id)); } catch { setRecs([]); }
@@ -1495,6 +1514,10 @@ function ItemHistory({ product, locations, onClose, onChanged }) {
     <div className="overlay" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px,100%)" }}>
         <h2>{product.name}</h2>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "6px 0 10px" }}>
+          <button className="mini" style={{ borderColor: flagged ? "#E0392B" : undefined, color: flagged ? "#E0392B" : undefined, fontWeight: 600 }} disabled={busy} onClick={() => toggleFlag(!flagged)}>{flagged ? "🚩 Flagged — clear" : "⚑ Flag for recount"}</button>
+          <input placeholder="note (e.g. count looks high)" value={flagNote} onChange={(e) => setFlagNote(e.target.value)} onBlur={() => { if (flagged) toggleFlag(true); }} style={{ flex: 1, minWidth: 160 }} />
+        </div>
         <div className="stat" style={{ marginBottom: 10 }}>Edit the <b>date</b>, cases/loose, or delete any entry. Deliveries for this item are below — fix their date, qty, or cost here too. Everything recalculates on-hand and usage.</div>
 
         <div className="secthead">Counts</div>
