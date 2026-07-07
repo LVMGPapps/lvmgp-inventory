@@ -555,13 +555,14 @@ function Count({ products, locations, onhand, reload }) {
   const entered = Object.entries(draft).filter(([k, e]) => ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== ""));
 
   async function save() {
-    if (!loc) { alert("Pick a location first so each count is recorded to the right spot."); return; }
     const entries = entered.map(([k, e]) => {
       const pid = Number(k);
       const p = products.find((x) => x.product_id === pid);
+      const locId2 = loc ? loc.location_id : ((p.locations || []).find((l) => l.primary)?.location_id ?? (p.locations || [])[0]?.location_id ?? null);
       const units = (num(e.cases) || 0) * usagePerCase(p) + (num(e.packages) || 0) * usagePerPack(p) + (num(e.units) || 0) + (num(e.loose) || 0);
-      return { product_id: pid, location_id: loc.location_id, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * usagePerCase(p), qty: units };
-    });
+      return { product_id: pid, location_id: locId2, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * usagePerCase(p), qty: units };
+    }).filter((e) => e.location_id != null);
+    if (!entries.length) { alert("These items don't have a location set yet — add one in Catalog, or pick a location above."); return; }
     try {
       await db.postCounts(entries);
       for (const e of entries) { const p = products.find((x) => x.product_id === e.product_id); if (p?.needs_recount) { try { await db.setRecountFlag(e.product_id, false); } catch {} } }
@@ -607,7 +608,7 @@ function Count({ products, locations, onhand, reload }) {
     <div>
       <div className="toolbar">
         <select value={locId} onChange={(e) => { setLocId(e.target.value); setDraft({}); setQ(""); setFocusId(null); }}>
-          <option value="">Pick a location to count…</option>
+          <option value="">All locations (count in place)</option>
           {locations.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
         </select>
         <input className="grow" placeholder={loc ? "Search this location…" : "Search all items…"} value={q} onChange={(e) => setQ(e.target.value)} />
