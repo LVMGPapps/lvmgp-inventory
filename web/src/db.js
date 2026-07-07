@@ -36,16 +36,17 @@ export async function getCatalog(domain = "fnb") {
 }
 
 export async function createProduct(p) {
-  const upc = (Number(p.units_per_package) || 1) * (Number(p.packages_per_case) || 1) || 1;
+  const upc = (Number(p.packages_per_case) || 1) * (Number(p.usage_per_package) || 1) || 1;
   const { data, error } = await supabase.from("product").insert({
     domain: p.domain ?? "fnb", name: p.name, category: p.category, brand: p.brand, supc: p.supc,
     purchase_unit: p.purchase_unit, pack: p.pack, size: p.size, size_unit: p.size_unit,
-    count_unit: p.unit_name || p.count_unit, count_per_case: upc,
-    unit_name: p.unit_name || p.count_unit || "unit",
-    units_per_package: Number(p.units_per_package) || 1,
+    count_unit: p.usage_measure || p.count_unit, count_per_case: upc,
+    package_unit: p.package_unit || "package",
     packages_per_case: Number(p.packages_per_case) || 1,
     buy_by: p.buy_by || "case",
-    use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
+    usage_measure: p.usage_measure || p.count_unit || "each",
+    usage_per_package: Number(p.usage_per_package) || 1,
+    use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null,
   }).select("product_id").single();
   if (error) throw error;
@@ -65,16 +66,17 @@ export async function createProduct(p) {
 
 export async function updateProduct(p) {
   const id = p.product_id;
-  const upc = (Number(p.units_per_package) || 1) * (Number(p.packages_per_case) || 1) || 1;
+  const upc = (Number(p.packages_per_case) || 1) * (Number(p.usage_per_package) || 1) || 1;
   const { error } = await supabase.from("product").update({
     name: p.name, category: p.category, brand: p.brand, supc: p.supc,
     purchase_unit: p.purchase_unit, pack: p.pack, size: p.size, size_unit: p.size_unit,
-    count_unit: p.unit_name || p.count_unit, count_per_case: upc,
-    unit_name: p.unit_name || p.count_unit || "unit",
-    units_per_package: Number(p.units_per_package) || 1,
+    count_unit: p.usage_measure || p.count_unit, count_per_case: upc,
+    package_unit: p.package_unit || "package",
     packages_per_case: Number(p.packages_per_case) || 1,
     buy_by: p.buy_by || "case",
-    use_unit: p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
+    usage_measure: p.usage_measure || p.count_unit || "each",
+    usage_per_package: Number(p.usage_per_package) || 1,
+    use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null,
     updated_at: new Date().toISOString(),
   }).eq("product_id", id);
@@ -347,7 +349,7 @@ export async function getReceivables(domain = "fnb") {
   const listId = await ensureOpenList(domain);
   const { data, error } = await supabase.from("shopping_line")
     .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status, order_unit," +
-      " product(name, count_per_case, count_unit, unit_name, units_per_package, packages_per_case, buy_by, purchase_unit, product_vendor(vendor_id, current_price))," +
+      " product(name, count_per_case, count_unit, package_unit, packages_per_case, usage_per_package, usage_measure, buy_by, purchase_unit, product_vendor(vendor_id, current_price))," +
       " vendor(name)")
     .eq("shopping_list_id", listId).eq("status", "purchased").order("shopping_line_id");
   if (error) throw error;
@@ -357,8 +359,8 @@ export async function getReceivables(domain = "fnb") {
       shopping_line_id: l.shopping_line_id, product_id: l.product_id, vendor_id: l.vendor_id,
       qty: l.qty, unit_cost: l.unit_cost ?? pv?.current_price ?? null, order_unit: l.order_unit || l.product?.buy_by || "case",
       product_name: l.product?.name, count_per_case: l.product?.count_per_case,
-      units_per_package: l.product?.units_per_package || 1, packages_per_case: l.product?.packages_per_case || 1,
-      count_unit: l.product?.unit_name || l.product?.count_unit, unit_name: l.product?.unit_name, buy_by: l.product?.buy_by,
+      units_per_package: l.product?.usage_per_package || 1, packages_per_case: l.product?.packages_per_case || 1,
+      count_unit: l.product?.usage_measure || l.product?.count_unit, package_unit: l.product?.package_unit, buy_by: l.product?.buy_by,
       purchase_unit: l.product?.purchase_unit, vendor_name: l.vendor?.name,
     };
   });
