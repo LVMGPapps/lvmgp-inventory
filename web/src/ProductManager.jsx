@@ -1450,8 +1450,8 @@ function ItemHistory({ product, onClose, onChanged }) {
 
   async function saveCount(r) {
     setBusy(true);
-    const cases = Number(r.cases) || 0, loose = Number(r.loose) || 0;
-    const fields = { cases, loose, qty: cases * cpc + loose };
+    const total = r._total != null ? Number(r._total) : Number(r.qty) || 0;   // absolute on-hand in the usage measure
+    const fields = { qty: total, cases: 0, loose: total };
     if (r._date) fields.counted_at = new Date(r._date + "T12:00:00").toISOString();
     try { await db.updateCount(r.stock_count_id, fields); await load(); onChanged && onChanged(); }
     catch (e) { alert("Save failed: " + (e.message || e)); }
@@ -1489,20 +1489,21 @@ function ItemHistory({ product, onClose, onChanged }) {
         <div className="stat" style={{ marginBottom: 10 }}>Edit the <b>date</b>, cases/loose, or delete any entry. Deliveries for this item are below — fix their date, qty, or cost here too. Everything recalculates on-hand and usage.</div>
 
         <div className="secthead">Counts</div>
+        <div className="stat" style={{ marginBottom: 6 }}>Total is the actual on-hand for that day, in {uMeas}. Edit it directly (1 case ≈ {r1(cpc)} {uMeas} now) so old counts stay consistent even if the case size changes.</div>
         {rows === null ? <div className="empty">Loading…</div> : rows.length === 0 ? <div className="note">No counts recorded yet.</div> : (
           <div>
-            {rows.map((r) => (
-              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "128px 58px 58px 1fr auto", alignItems: "center" }}>
+            {rows.map((r) => {
+              const shownTotal = r._total != null ? r._total : (r.qty ?? 0);
+              return (
+              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "132px 1fr auto", alignItems: "center" }}>
                 <div><input type="date" value={r._date ?? (r.counted_at ? r.counted_at.slice(0, 10) : "")} max={today} onChange={(e) => setField(r.stock_count_id, "_date", e.target.value)} /><div className="stat">{r.location_name || "?"}</div></div>
-                <label>Cases<input className="fig" type="number" value={r.cases} onChange={(e) => setField(r.stock_count_id, "cases", e.target.value)} /></label>
-                <label>Loose<input className="fig" type="number" value={r.loose} onChange={(e) => setField(r.stock_count_id, "loose", e.target.value)} /></label>
-                <div className="stat">= {r1((Number(r.cases) || 0) * cpc + (Number(r.loose) || 0))} {uMeas}</div>
+                <label>Total ({uMeas})<input className="fig" type="number" step="0.01" value={shownTotal} onChange={(e) => setField(r.stock_count_id, "_total", e.target.value)} /><span className="stat" style={{ marginLeft: 6 }}>≈ {r1((Number(shownTotal) || 0) / cpc)} case{(Number(shownTotal) || 0) / cpc === 1 ? "" : "s"}</span></label>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <button className="mini" disabled={busy} onClick={() => saveCount(r)}>Save</button>
                   <button className="mini mini-danger" disabled={busy} onClick={() => delCount(r)}>✕</button>
                 </div>
               </div>
-            ))}
+            );})}
           </div>
         )}
 
