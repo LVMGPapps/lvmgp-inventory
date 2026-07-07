@@ -6,11 +6,30 @@ const LOGO_SRC = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9
 
 const num = (v) => { const n = parseFloat(v); return isNaN(n) ? null : n; };
 const money = (n) => (n == null || isNaN(n)) ? "—" : "$" + Number(n).toFixed(2);
-// 3-tier unit helpers (all quantities on-hand/usage are in UNITS)
-const unitsCase = (p) => (Number(p.units_per_package) || 1) * (Number(p.packages_per_case) || 1) || 1;
-const unitsPack = (p) => Number(p.units_per_package) || 1;
-const unitsPerBuy = (p, ou) => { const o = ou || p.buy_by || "case"; return o === "case" ? unitsCase(p) : o === "package" ? unitsPack(p) : 1; };
-const buyLabel = (p, ou, n) => { const o = ou || p.buy_by || "case"; const one = n === 1; return o === "case" ? (one ? "case" : "cases") : o === "package" ? (one ? "package" : "packages") : (p.unit_name || p.count_unit || "unit") + (one ? "" : "s"); };
+// Unit model: buy/count in CASE->PACKAGE; use in a usage measure. Stored qty is in the USAGE MEASURE.
+const usagePerCase = (p) => (Number(p.packages_per_case) || 1) * (Number(p.usage_per_package) || 1) || 1;   // usage units per case
+const usagePerPack = (p) => Number(p.usage_per_package) || 1;                                                // usage units per package
+const unitsPerBuy = (p, ou) => { const o = ou || p.buy_by || "case"; return o === "case" ? usagePerCase(p) : o === "package" ? usagePerPack(p) : 1; };
+const measure = (p) => p.usage_measure || p.use_unit || p.count_unit || "each";
+const pkgName = (p, n) => (p.package_unit || "package") + (n === 1 ? "" : "s");
+const buyLabel = (p, ou, n) => { const o = ou || p.buy_by || "case"; const one = n === 1; return o === "case" ? (one ? "case" : "cases") : o === "package" ? pkgName(p, n) : measure(p); };
+const r1 = (n) => Math.round(n * 10) / 10;
+// Format a usage-unit quantity as "C case, P pkg + L measure"
+function fmtQty(p, units) {
+  units = Number(units) || 0;
+  const upc = usagePerCase(p), upp = usagePerPack(p);
+  const parts = [];
+  let rem = units;
+  const cases = upc > upp ? Math.floor(rem / upc + 1e-9) : 0;
+  rem -= cases * upc;
+  const packs = Math.floor(rem / upp + 1e-9);
+  rem -= packs * upp;
+  const leftover = Math.round(rem * 100) / 100;
+  if (cases) parts.push(`${cases} ${cases === 1 ? "case" : "cases"}`);
+  if (packs) parts.push(`${packs} ${pkgName(p, packs)}`);
+  if (leftover || !parts.length) parts.push(`${r1(leftover)} ${measure(p)}`);
+  return parts.join(", ");
+}
 
 const STYLE = `
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
@@ -169,7 +188,7 @@ function blankProduct() {
   return { product_id: null, name: "", category: "", brand: "", supc: "",
     purchase_unit: "Case", pack: 1, size: null, size_unit: "",
     count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null, image_url: null, backup_for: null,
-    unit_name: "each", units_per_package: 1, packages_per_case: 1, buy_by: "case",
+    package_unit: "each", packages_per_case: 1, buy_by: "case", usage_measure: "each", usage_per_package: 1,
     barcodes: [], vendors: [], locations: [] };
 }
 
@@ -232,7 +251,7 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
               <div className="card-name">{p.name}</div>
               {p.backup_for && <div className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00", marginBottom: 4 }}>✳ Alternate for {products.find((x) => x.product_id === p.backup_for)?.name || "another item"}</div>}
               {p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}
-              <div className="stat">📍 {(p.locations || []).map((l) => l.name + (l.unit_code ? ` ${l.unit_code}` : "")).join(" · ") || "No location"} · on hand {onhand[p.product_id]?.total ?? 0} {p.count_unit}</div>
+              <div className="stat">📍 {(p.locations || []).map((l) => l.name + (l.unit_code ? ` ${l.unit_code}` : "")).join(" · ") || "No location"} · on hand {fmtQty(p, onhand[p.product_id]?.total ?? 0)}</div>
               <div className="units">
                 <div className="ucell"><div className="ulabel">Buy</div><div className="uval fig">{p.purchase_unit}{p.pack > 1 ? ` ${p.pack}×` : " "}{p.size}{p.size_unit ? ` ${p.size_unit}` : ""}</div></div>
                 <div className="ucell"><div className="ulabel">Count</div><div className="uval">{p.count_unit} · {p.count_per_case}/case</div></div>
@@ -322,23 +341,23 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
         <div className="group">
           <div className="group-t">Sizes & buying</div>
           <div className="frow">
-            <div className="field"><label>Unit (what you use/count)</label><input value={p.unit_name || ""} onChange={(e) => set("unit_name", e.target.value)} placeholder="bun, bottle, lb, oz, gallon…" /></div>
+            <div className="field"><label>Package unit (what you count)</label><input value={p.package_unit || ""} onChange={(e) => set("package_unit", e.target.value)} placeholder="bag, chub, jar, each…" /></div>
             <div className="field"><label>Buy by</label>
               <select value={p.buy_by || "case"} onChange={(e) => set("buy_by", e.target.value)}>
-                <option value="case">Case</option><option value="package">Package</option><option value="unit">Unit</option>
+                <option value="case">Case</option><option value="package">Package</option>
               </select>
             </div>
           </div>
           <div className="frow">
-            <div className="field"><label>Units per package</label><input type="number" min="1" step="0.001" value={p.units_per_package ?? ""} onChange={(e) => set("units_per_package", num(e.target.value))} /></div>
             <div className="field"><label>Packages per case</label><input type="number" min="1" step="0.001" value={p.packages_per_case ?? ""} onChange={(e) => set("packages_per_case", num(e.target.value))} /></div>
+            <div className="field"><label>Par (in {p.buy_by === "package" ? "packages" : "cases"})</label><input type="number" step="0.1" value={p.par_level ?? ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
+          </div>
+          <div className="frow">
+            <div className="field"><label>Usage measure</label><input value={p.usage_measure || ""} onChange={(e) => set("usage_measure", e.target.value)} placeholder="each, lb, oz, tbsp, cup…" /></div>
+            <div className="field"><label>Usage per package</label><input type="number" min="0" step="0.001" value={p.usage_per_package ?? ""} onChange={(e) => set("usage_per_package", num(e.target.value))} /></div>
           </div>
           <div className="stat" style={{ marginTop: 2 }}>
-            1 case = {num(p.packages_per_case) || 1} package{(num(p.packages_per_case) || 1) === 1 ? "" : "s"} = <b>{(num(p.units_per_package) || 1) * (num(p.packages_per_case) || 1)} {p.unit_name || "unit"}s</b>. You order &amp; price by the <b>{p.buy_by || "case"}</b>; on-hand, usage and value are in {p.unit_name || "unit"}s.
-          </div>
-          <div className="frow" style={{ marginTop: 8 }}>
-            <div className="field"><label>Vendor/SUPC size (optional)</label><input value={p.size_unit || ""} onChange={(e) => set("size_unit", e.target.value)} placeholder="e.g. 5 LB, 150 CT" /></div>
-            <div className="field"><label>Par (in {p.buy_by || "case"}s)</label><input type="number" step="0.1" value={p.par_level ?? ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
+            1 case = <b>{num(p.packages_per_case) || 1} {(p.package_unit || "package") + ((num(p.packages_per_case) || 1) === 1 ? "" : "s")}</b>; 1 {p.package_unit || "package"} = <b>{num(p.usage_per_package) || 1} {p.usage_measure || "each"}</b>. You count in cases &amp; {(p.package_unit || "package") + "s"}, order by the <b>{p.buy_by || "case"}</b>, and usage/value are in {p.usage_measure || "each"}.
           </div>
         </div>
 
@@ -444,8 +463,8 @@ function Count({ products, locations, onhand, reload }) {
     const entries = entered.map(([k, e]) => {
       const pid = Number(k);
       const p = products.find((x) => x.product_id === pid);
-      const units = (num(e.cases) || 0) * unitsCase(p) + (num(e.packages) || 0) * unitsPack(p) + (num(e.units) || 0) + (num(e.loose) || 0);
-      return { product_id: pid, location_id: loc.location_id, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * unitsCase(p), qty: units };
+      const units = (num(e.cases) || 0) * usagePerCase(p) + (num(e.packages) || 0) * usagePerPack(p) + (num(e.units) || 0) + (num(e.loose) || 0);
+      return { product_id: pid, location_id: loc.location_id, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * usagePerCase(p), qty: units };
     });
     try {
       await db.postCounts(entries);
@@ -469,20 +488,20 @@ function Count({ products, locations, onhand, reload }) {
     const key = String(p.product_id);
     const e = draft[key] || {};
     const here = (loc ? onhand[p.product_id]?.byLoc?.[loc.name] : onhand[p.product_id]?.total) ?? 0;
-    const uName = p.unit_name || p.count_unit || "unit";
-    const uCase = unitsCase(p), uPack = unitsPack(p);
-    const showPkg = uPack !== uCase;                     // only when there's a real package tier
+    const uMeas = measure(p);
+    const upc = usagePerCase(p), upp = usagePerPack(p);
+    const showCase = (num(p.packages_per_case) || 1) > 1;    // show a Cases box only when a case holds >1 package
     const counted = ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== "");
-    const partial = (num(e.cases) || 0) * uCase + (num(e.packages) || 0) * uPack + (num(e.units) || 0) + (num(e.loose) || 0);
+    const partial = (num(e.cases) || 0) * upc + (num(e.packages) || 0) * upp + (num(e.units) || 0) + (num(e.loose) || 0);
     const hot = focusId === p.product_id;
-    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: showPkg ? "1fr 50px 50px 56px 58px" : "1fr 60px 66px 60px" };
+    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
     return (
       <div className="crow" key={p.product_id} style={style}>
-        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}<b>{p.name}</b><div className="stat">1 case = {showPkg ? `${p.packages_per_case} pkg = ` : ""}{uCase} {uName} · here {here} {uName} · total {onhand[p.product_id]?.total ?? 0}</div></div>
-        <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>
-        {showPkg && <label>Pkgs<input className="fig" type="number" min="0" value={e.packages ?? ""} onChange={(ev) => setRow(key, "packages", ev.target.value)} /></label>}
-        <label>{uName}<input className="fig" type="number" min="0" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>
-        <div className="ctotal" style={{ color: counted ? "#191B1F" : "#B7BBC4" }}>= {counted ? partial : here}</div>
+        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}<b>{p.name}</b><div className="stat">{showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : ""}1 {p.package_unit || "package"} = {upp} {uMeas} · here {fmtQty(p, here)}</div></div>
+        {showCase && <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>}
+        <label>{pkgName(p, 2)}<input className="fig" type="number" min="0" value={e.packages ?? ""} onChange={(ev) => setRow(key, "packages", ev.target.value)} /></label>
+        <label>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>
+        <div className="ctotal" style={{ color: counted ? "#191B1F" : "#B7BBC4", fontSize: 12 }}>{fmtQty(p, counted ? partial : here)}</div>
       </div>
     );
   }
@@ -577,7 +596,7 @@ function Receive({ products, vendors, reload }) {
       vendor_id: r.vendor_id ? Number(r.vendor_id) : null,
       qty: num(r.qty), unit_cost: (r.case_cost !== "" && r.case_cost != null) ? num(r.case_cost) : null,
       count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
-      units_per_package: r.units_per_package ?? byId[r.product_id]?.units_per_package ?? 1,
+      units_per_package: r.units_per_package ?? byId[r.product_id]?.usage_per_package ?? 1,
       order_unit: r.order_unit || "case",
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
@@ -868,15 +887,14 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
               const done = l.status === "purchased";
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
-                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{r1(onhand?.[p.product_id]?.total ?? 0)}</b> {p.count_unit} · used last wk <b style={{ color: "#191B1F" }}>{r1(stats[p.product_id]?.usedUnits ?? 0)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
+                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{r1(stats[p.product_id]?.usedUnits ?? 0)} {measure(p)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
                   <input className="fig" type="number" min="0" value={l.qty} onChange={(e) => setQty(l, e.target.value)} disabled={done} />
-                  <select value={l.order_unit || p.buy_by || "case"} onChange={(e) => setUnit(l, e.target.value)} disabled={done} title="Order by case, package, or unit">
+                  <select value={l.order_unit || p.buy_by || "case"} onChange={(e) => setUnit(l, e.target.value)} disabled={done} title="Order by case or package">
                     <option value="case">{l.qty == 1 ? "case" : "cases"}</option>
-                    {unitsPack(p) !== unitsCase(p) && <option value="package">{l.qty == 1 ? "package" : "packages"}</option>}
-                    <option value="unit">{p.unit_name || p.count_unit || "unit"}</option>
+                    {(num(p.packages_per_case) || 1) > 1 && <option value="package">{pkgName(p, l.qty == 1 ? 1 : 2)}</option>}
                   </select>
                   <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                     {done
