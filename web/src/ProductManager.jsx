@@ -6,6 +6,11 @@ const LOGO_SRC = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAALQAAAC0CAYAAAA9
 
 const num = (v) => { const n = parseFloat(v); return isNaN(n) ? null : n; };
 const money = (n) => (n == null || isNaN(n)) ? "—" : "$" + Number(n).toFixed(2);
+// 3-tier unit helpers (all quantities on-hand/usage are in UNITS)
+const unitsCase = (p) => (Number(p.units_per_package) || 1) * (Number(p.packages_per_case) || 1) || 1;
+const unitsPack = (p) => Number(p.units_per_package) || 1;
+const unitsPerBuy = (p, ou) => { const o = ou || p.buy_by || "case"; return o === "case" ? unitsCase(p) : o === "package" ? unitsPack(p) : 1; };
+const buyLabel = (p, ou, n) => { const o = ou || p.buy_by || "case"; const one = n === 1; return o === "case" ? (one ? "case" : "cases") : o === "package" ? (one ? "package" : "packages") : (p.unit_name || p.count_unit || "unit") + (one ? "" : "s"); };
 
 const STYLE = `
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
@@ -164,6 +169,7 @@ function blankProduct() {
   return { product_id: null, name: "", category: "", brand: "", supc: "",
     purchase_unit: "Case", pack: 1, size: null, size_unit: "",
     count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null, image_url: null, backup_for: null,
+    unit_name: "each", units_per_package: 1, packages_per_case: 1, buy_by: "case",
     barcodes: [], vendors: [], locations: [] };
 }
 
@@ -314,22 +320,25 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
         </div>
 
         <div className="group">
-          <div className="group-t">Units</div>
+          <div className="group-t">Sizes & buying</div>
           <div className="frow">
-            <div className="field"><label>Purchase unit</label><input value={p.purchase_unit} onChange={(e) => set("purchase_unit", e.target.value)} /></div>
-            <div className="field"><label>Pack (per case)</label><input type="number" value={p.pack ?? ""} onChange={(e) => set("pack", num(e.target.value))} /></div>
+            <div className="field"><label>Unit (what you use/count)</label><input value={p.unit_name || ""} onChange={(e) => set("unit_name", e.target.value)} placeholder="bun, bottle, lb, oz, gallon…" /></div>
+            <div className="field"><label>Buy by</label>
+              <select value={p.buy_by || "case"} onChange={(e) => set("buy_by", e.target.value)}>
+                <option value="case">Case</option><option value="package">Package</option><option value="unit">Unit</option>
+              </select>
+            </div>
           </div>
           <div className="frow">
-            <div className="field"><label>Size</label><input type="number" value={p.size ?? ""} onChange={(e) => set("size", num(e.target.value))} /></div>
-            <div className="field"><label>Size unit</label><input value={p.size_unit || ""} onChange={(e) => set("size_unit", e.target.value)} placeholder="LB, OZ, CT…" /></div>
+            <div className="field"><label>Units per package</label><input type="number" min="1" step="0.001" value={p.units_per_package ?? ""} onChange={(e) => set("units_per_package", num(e.target.value))} /></div>
+            <div className="field"><label>Packages per case</label><input type="number" min="1" step="0.001" value={p.packages_per_case ?? ""} onChange={(e) => set("packages_per_case", num(e.target.value))} /></div>
           </div>
-          <div className="frow">
-            <div className="field"><label>Count unit</label><input value={p.count_unit} onChange={(e) => set("count_unit", e.target.value)} placeholder="bag, can, each…" /></div>
-            <div className="field"><label>Count units / case</label><input type="number" value={p.count_per_case ?? ""} onChange={(e) => set("count_per_case", num(e.target.value))} /></div>
+          <div className="stat" style={{ marginTop: 2 }}>
+            1 case = {num(p.packages_per_case) || 1} package{(num(p.packages_per_case) || 1) === 1 ? "" : "s"} = <b>{(num(p.units_per_package) || 1) * (num(p.packages_per_case) || 1)} {p.unit_name || "unit"}s</b>. You order &amp; price by the <b>{p.buy_by || "case"}</b>; on-hand, usage and value are in {p.unit_name || "unit"}s.
           </div>
-          <div className="frow">
-            <div className="field"><label>Use unit</label><input value={p.use_unit || ""} onChange={(e) => set("use_unit", e.target.value)} placeholder="oz, cup, each…" /></div>
-            <div className="field"><label>Use / count unit</label><input type="number" value={p.use_per_count ?? ""} onChange={(e) => set("use_per_count", num(e.target.value))} /></div>
+          <div className="frow" style={{ marginTop: 8 }}>
+            <div className="field"><label>Vendor/SUPC size (optional)</label><input value={p.size_unit || ""} onChange={(e) => set("size_unit", e.target.value)} placeholder="e.g. 5 LB, 150 CT" /></div>
+            <div className="field"><label>Par (in {p.buy_by || "case"}s)</label><input type="number" step="0.1" value={p.par_level ?? ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
           </div>
         </div>
 
@@ -428,14 +437,15 @@ function Count({ products, locations, onhand, reload }) {
   }
   for (const g of Object.values(groups)) g.items.sort((a, b) => a.name.localeCompare(b.name));
   const orderedGroups = Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
-  const entered = Object.entries(draft).filter(([k, e]) => (e.cases !== undefined && e.cases !== "") || (e.loose !== undefined && e.loose !== ""));
+  const entered = Object.entries(draft).filter(([k, e]) => ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== ""));
 
   async function save() {
     if (!loc) { alert("Pick a location first so each count is recorded to the right spot."); return; }
     const entries = entered.map(([k, e]) => {
       const pid = Number(k);
       const p = products.find((x) => x.product_id === pid);
-      return { product_id: pid, location_id: loc.location_id, cases: e.cases, loose: e.loose, count_per_case: p.count_per_case };
+      const units = (num(e.cases) || 0) * unitsCase(p) + (num(e.packages) || 0) * unitsPack(p) + (num(e.units) || 0) + (num(e.loose) || 0);
+      return { product_id: pid, location_id: loc.location_id, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * unitsCase(p), qty: units };
     });
     try {
       await db.postCounts(entries);
@@ -459,15 +469,19 @@ function Count({ products, locations, onhand, reload }) {
     const key = String(p.product_id);
     const e = draft[key] || {};
     const here = (loc ? onhand[p.product_id]?.byLoc?.[loc.name] : onhand[p.product_id]?.total) ?? 0;
-    const counted = (e.cases !== undefined && e.cases !== "") || (e.loose !== undefined && e.loose !== "");
-    const partial = (num(e.cases) || 0) * (p.count_per_case || 1) + (num(e.loose) || 0);
+    const uName = p.unit_name || p.count_unit || "unit";
+    const uCase = unitsCase(p), uPack = unitsPack(p);
+    const showPkg = uPack !== uCase;                     // only when there's a real package tier
+    const counted = ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== "");
+    const partial = (num(e.cases) || 0) * uCase + (num(e.packages) || 0) * uPack + (num(e.units) || 0) + (num(e.loose) || 0);
     const hot = focusId === p.product_id;
-    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}) };
+    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: showPkg ? "1fr 50px 50px 56px 58px" : "1fr 60px 66px 60px" };
     return (
       <div className="crow" key={p.product_id} style={style}>
-        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}<b>{p.name}</b><div className="stat">1 case = {p.count_per_case} {p.count_unit} · here {here} · total {onhand[p.product_id]?.total ?? 0}</div></div>
+        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}<b>{p.name}</b><div className="stat">1 case = {showPkg ? `${p.packages_per_case} pkg = ` : ""}{uCase} {uName} · here {here} {uName} · total {onhand[p.product_id]?.total ?? 0}</div></div>
         <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>
-        <label>Loose {p.count_unit}<input className="fig" type="number" min="0" value={e.loose ?? ""} onChange={(ev) => setRow(key, "loose", ev.target.value)} /></label>
+        {showPkg && <label>Pkgs<input className="fig" type="number" min="0" value={e.packages ?? ""} onChange={(ev) => setRow(key, "packages", ev.target.value)} /></label>}
+        <label>{uName}<input className="fig" type="number" min="0" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>
         <div className="ctotal" style={{ color: counted ? "#191B1F" : "#B7BBC4" }}>= {counted ? partial : here}</div>
       </div>
     );
@@ -563,6 +577,7 @@ function Receive({ products, vendors, reload }) {
       vendor_id: r.vendor_id ? Number(r.vendor_id) : null,
       qty: num(r.qty), unit_cost: (r.case_cost !== "" && r.case_cost != null) ? num(r.case_cost) : null,
       count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
+      units_per_package: r.units_per_package ?? byId[r.product_id]?.units_per_package ?? 1,
       order_unit: r.order_unit || "case",
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
@@ -612,8 +627,8 @@ function Receive({ products, vendors, reload }) {
               <thead><tr><th>Item</th><th>Qty</th><th>Unit $</th><th></th></tr></thead>
               <tbody>{g.map((r) => (
                 <tr key={r.shopping_line_id}>
-                  <td>{r.product_name}{r.scanned && <span className="bchip" style={{ marginLeft: 6, background: "#E6F4F0", borderColor: "#0E7C6B" }}>from receipt</span>}<div className="stat">{r.order_unit === "each" ? `by the ${r.count_unit || "each"}` : `by the case · 1 case = ${r.count_per_case} ${r.count_unit}`}</div></td>
-                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /> <span className="stat">{r.order_unit === "each" ? (r.count_unit || "each") : "cases"}</span></td>
+                  <td>{r.product_name}{r.scanned && <span className="bchip" style={{ marginLeft: 6, background: "#E6F4F0", borderColor: "#0E7C6B" }}>from receipt</span>}<div className="stat">by the {r.order_unit} · 1 {r.order_unit} = {r.order_unit === "case" ? r.count_per_case : r.order_unit === "package" ? (r.units_per_package || 1) : 1} {r.count_unit || "unit"}</div></td>
+                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /> <span className="stat">{buyLabel(r, r.order_unit, num(r.qty))}</span></td>
                   <td><input className="fig" style={{ width: 80 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => setRow(r.shopping_line_id, { case_cost: e.target.value })} /></td>
                   <td><button className="mini" onClick={() => receive([r])}>Receive</button></td>
                 </tr>
@@ -790,7 +805,7 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
 
   async function add(p) {
     const v = p.vendors.find((x) => x.primary) || p.vendors[0];
-    await db.addShoppingLine(listId, { product_id: p.product_id, vendor_id: v?.vendor_id ?? null, qty: 1, unit_cost: v?.price ?? null });
+    await db.addShoppingLine(listId, { product_id: p.product_id, vendor_id: v?.vendor_id ?? null, qty: 1, unit_cost: v?.price ?? null, order_unit: p.buy_by || "case" });
     load();
   }
   async function setQty(line, qty) {
@@ -815,7 +830,7 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
     for (const s of suggestions) {
       if (have.has(s.product.product_id)) continue;
       const v = s.product.vendors.find((x) => x.primary) || s.product.vendors[0];
-      await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null });
+      await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null, order_unit: s.product.buy_by || "case" });
       added++;
     }
     setNote(added ? `Added ${added} item${added === 1 ? "" : "s"} from last week's usage. Review the quantities, then mark Purchased.` : "Everything suggested is already on your list.");
@@ -858,9 +873,10 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
                   <input className="fig" type="number" min="0" value={l.qty} onChange={(e) => setQty(l, e.target.value)} disabled={done} />
-                  <select value={l.order_unit || "case"} onChange={(e) => setUnit(l, e.target.value)} disabled={done} title="Order by the case or by the each">
-                    <option value="case">{(l.qty == 1 ? "case" : "cases")}</option>
-                    <option value="each">{p.count_unit || "each"}</option>
+                  <select value={l.order_unit || p.buy_by || "case"} onChange={(e) => setUnit(l, e.target.value)} disabled={done} title="Order by case, package, or unit">
+                    <option value="case">{l.qty == 1 ? "case" : "cases"}</option>
+                    {unitsPack(p) !== unitsCase(p) && <option value="package">{l.qty == 1 ? "package" : "packages"}</option>}
+                    <option value="unit">{p.unit_name || p.count_unit || "unit"}</option>
                   </select>
                   <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
                     {done
