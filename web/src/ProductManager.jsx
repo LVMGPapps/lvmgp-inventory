@@ -173,7 +173,7 @@ export default function App() {
 
       <div className="wrap">
         {error && <div className="err">{error}</div>}
-        {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} reload={reload} />}
+        {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} counts={counts} receipts={receipts} reload={reload} />}
         {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} />}
@@ -188,11 +188,11 @@ function blankProduct() {
   return { product_id: null, name: "", category: "", brand: "", supc: "",
     purchase_unit: "Case", pack: 1, size: null, size_unit: "",
     count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null, image_url: null, backup_for: null,
-    package_unit: "each", packages_per_case: 1, buy_by: "case", usage_measure: "each", usage_per_package: 1,
+    package_unit: "each", packages_per_case: 1, buy_by: "case", usage_measure: "each", usage_per_package: 1, not_stocked: false,
     barcodes: [], vendors: [], locations: [] };
 }
 
-function Catalog({ products, vendors, locations, units, onhand, reload }) {
+function Catalog({ products, vendors, locations, units, onhand, counts, receipts, reload }) {
   const [q, setQ] = useState("");
   const [edit, setEdit] = useState(null);
   const [finding, setFinding] = useState(false);
@@ -200,9 +200,22 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
   const [venFilter, setVenFilter] = useState("");
   const [sortBy, setSortBy] = useState("az");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
+  const [showNotStocked, setShowNotStocked] = useState(false);
+  const locName = Object.fromEntries((locations || []).map((l) => [l.location_id, l.name]));
+  // latest count per item
+  const lastCount = {};
+  for (const c of (counts || [])) { const cur = lastCount[c.product_id]; if (!cur || c.counted_at > cur.counted_at) lastCount[c.product_id] = c; }
+  // latest receipt per item
+  const lastReceipt = {};
+  for (const r of (receipts || [])) for (const l of (r.receipt_line || [])) {
+    const cur = lastReceipt[l.product_id];
+    if (!cur || (r.received_date || "") > (cur.received_date || "")) lastReceipt[l.product_id] = { received_date: r.received_date, qty: l.purchase_qty, units: l.qty_count_units, vendor: r.vendor?.name };
+  }
+  const notStockedCount = products.filter((p) => p.not_stocked).length;
   const flaggedCount = products.filter((p) => p.needs_recount).length;
 
   let list = products.filter((p) => {
+    if (p.not_stocked && !showNotStocked && !flaggedOnly) return false;
     if (flaggedOnly && !p.needs_recount) return false;
     if (q && !(p.name.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     if (locFilter && !(p.locations || []).some((l) => String(l.location_id) === locFilter)) return false;
@@ -244,30 +257,52 @@ function Catalog({ products, vendors, locations, units, onhand, reload }) {
         </select>
         <span className="stat" style={{ alignSelf: "center" }}>{list.length} item{list.length === 1 ? "" : "s"}</span>
         <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : (flaggedCount ? { borderColor: "#E0392B", color: "#E0392B" } : undefined)}>🚩 Needs recount{flaggedCount ? ` (${flaggedCount})` : ""}</button>
+        {notStockedCount > 0 && <button className="mini" onClick={() => setShowNotStocked((v) => !v)} style={showNotStocked ? { background: "#3A3D44", color: "#fff", borderColor: "#3A3D44" } : undefined}>{showNotStocked ? "Hide" : "Show"} not-stocked ({notStockedCount})</button>}
         {(locFilter || venFilter || q || flaggedOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); setFlaggedOnly(false); }}>Clear</button>}
       </div>
       {list.length === 0 ? <div className="empty">No items match. Try clearing the filters.</div> : (
         <div className="grid">
-          {list.map((p) => (
-            <div className="card" key={p.product_id}>
-              {p.image_url && <img src={p.image_url} alt="" style={{ width: "100%", height: 120, objectFit: "cover", borderRadius: 8, marginBottom: 8 }} />}
-              <div className="tag">{p.category || "Uncategorized"}</div>
-              <div className="card-name">{p.name}</div>
-              {p.needs_recount && <div className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B", marginBottom: 4 }} title={p.recount_note || ""}>🚩 Needs recount{p.recount_note ? ` · ${p.recount_note}` : ""}</div>}
-              {p.backup_for && <div className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00", marginBottom: 4 }}>✳ Alternate for {products.find((x) => x.product_id === p.backup_for)?.name || "another item"}</div>}
-              {p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}
-              <div className="stat">📍 {(p.locations || []).map((l) => l.name + (l.unit_code ? ` ${l.unit_code}` : "")).join(" · ") || "No location"} · on hand {fmtQty(p, onhand[p.product_id]?.total ?? 0)}</div>
-              <div className="units">
-                <div className="ucell"><div className="ulabel">Buy</div><div className="uval fig">{p.purchase_unit}{p.pack > 1 ? ` ${p.pack}×` : " "}{p.size}{p.size_unit ? ` ${p.size_unit}` : ""}</div></div>
-                <div className="ucell"><div className="ulabel">Count</div><div className="uval">{p.count_unit} · {p.count_per_case}/case</div></div>
-                <div className="ucell"><div className="ulabel">Use</div><div className="uval">{p.use_unit || "—"}</div></div>
+          {list.map((p) => {
+            const lc = lastCount[p.product_id];
+            const lr = lastReceipt[p.product_id];
+            const primeV = (p.vendors || []).find((v) => v.primary) || (p.vendors || [])[0];
+            const casePrice = primeV?.price;
+            const packStr = (Number(p.packages_per_case) || 1) > 1
+              ? `by the ${p.buy_by || "case"} · ${p.packages_per_case} ${pkgName(p, 2)} of ${r1(usagePerPack(p))} ${measure(p)} = ${r1(usagePerCase(p))} ${measure(p)}`
+              : `by the ${p.buy_by || "case"} · ${r1(usagePerCase(p))} ${measure(p)}`;
+            const dlabel = (d) => d ? new Date(String(d).slice(0, 10) + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+            return (
+            <div className="card" key={p.product_id} style={p.not_stocked ? { opacity: 0.72 } : undefined}>
+              <div style={{ display: "flex", gap: 10 }}>
+                {p.image_url
+                  ? <img src={p.image_url} alt="" style={{ width: 64, height: 64, objectFit: "contain", borderRadius: 8, background: "#F4F1EA", flex: "0 0 auto" }} />
+                  : <div style={{ width: 64, height: 64, borderRadius: 8, background: "#F4F1EA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flex: "0 0 auto" }}>📦</div>}
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="tag">{p.category || "Uncategorized"}</div>
+                  <div className="card-name">{p.name}</div>
+                  {p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}
+                </div>
               </div>
+
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 4, margin: "8px 0 6px" }}>
+                {p.not_stocked && <span className="bchip" style={{ background: "#EEE", borderColor: "#B7BBC4", color: "#555" }}>Not stocked</span>}
+                {p.needs_recount && <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || ""}>🚩 Recount{p.recount_note ? ` · ${p.recount_note}` : ""}</span>}
+                {p.backup_for && <span className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>✳ Alt for {products.find((x) => x.product_id === p.backup_for)?.name || "item"}</span>}
+              </div>
+
+              <div style={{ fontSize: 15, fontWeight: 700, color: "#191B1F" }}>On hand: {fmtQty(p, onhand[p.product_id]?.total ?? 0)}</div>
+              <div className="stat">📍 {(p.locations || []).map((l) => l.name).join(" · ") || "No location"}</div>
+              <div className="stat">🛒 {packStr}{casePrice != null ? ` · ${money(casePrice)}/case` : ""}{primeV?.name ? ` · ${primeV.name}` : ""}{p.supc ? ` · #${p.supc}` : ""}</div>
+              <div className="stat">🧮 Last count: {lc ? `${fmtQty(p, lc.qty)} · ${dlabel(lc.counted_at)}${locName[lc.location_id] ? " · " + locName[lc.location_id] : ""}` : "never"}</div>
+              <div className="stat">📥 Last received: {lr ? `${r1(lr.qty)} · ${dlabel(lr.received_date)}${lr.vendor ? " · " + lr.vendor : ""}` : "none"}</div>
+
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button className="mini" onClick={() => setEdit(JSON.parse(JSON.stringify(p)))}>Edit</button>
+                <button className="mini" style={{ borderColor: p.needs_recount ? "#E0392B" : undefined, color: p.needs_recount ? "#E0392B" : undefined }} onClick={async () => { try { await db.setRecountFlag(p.product_id, !p.needs_recount); reload(); } catch (e) { alert(e.message); } }}>{p.needs_recount ? "🚩 Clear" : "⚑ Flag"}</button>
                 <button className="mini mini-danger" onClick={async () => { if (confirm(`Remove ${p.name}?`)) { await db.deleteProduct(p.product_id); reload(); } }}>Remove</button>
               </div>
             </div>
-          ))}
+          );})}
         </div>
       )}
       {edit && <Editor product={edit} products={products} vendors={vendors} locations={locations} units={units} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
@@ -368,6 +403,10 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
 
         <div className="group">
           <div className="group-t">Backup / alternate</div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
+            <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => set("not_stocked", e.target.checked)} />
+            Not stocked — we don't normally carry this (hidden from counts)
+          </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={isBackup} onChange={(e) => { setIsBackup(e.target.checked); if (!e.target.checked) set("backup_for", null); }} />
             This item is a backup / alternate for another item
@@ -444,10 +483,10 @@ function Count({ products, locations, onhand, reload }) {
   const backupsBy = {};
   for (const p of products) if (p.backup_for) (backupsBy[p.backup_for] ||= []).push(p);
 
-  // Heads = non-backup items in this location (or whose alternate is in this location).
+  // Heads = non-backup, stocked items in this location (or whose alternate is in this location).
   let heads = loc
-    ? products.filter((p) => !p.backup_for && (inLoc(p) || (backupsBy[p.product_id] || []).some(inLoc)))
-    : products.filter((p) => !p.backup_for);
+    ? products.filter((p) => !p.backup_for && !p.not_stocked && (inLoc(p) || (backupsBy[p.product_id] || []).some(inLoc)))
+    : products.filter((p) => !p.backup_for && !p.not_stocked);
   if (q) {
     const t = q.toLowerCase();
     const match = (p) => p.name.toLowerCase().includes(t) || (p.brand || "").toLowerCase().includes(t) || (p.barcodes || []).includes(q);
