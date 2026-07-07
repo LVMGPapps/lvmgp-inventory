@@ -150,6 +150,12 @@ export async function setProductShelf(product_id, location_id, storage_unit_id) 
     .upsert({ product_id, location_id, storage_unit_id: storage_unit_id ?? null }, { onConflict: "product_id,location_id" });
   if (error) throw error;
 }
+// Remove a product from a location entirely (unlink).
+export async function removeProductFromLocation(product_id, location_id) {
+  const { error } = await supabase.from("product_location")
+    .delete().eq("product_id", product_id).eq("location_id", location_id);
+  if (error) throw error;
+}
 // Bulk-create a bay/shelf layout for a location, e.g. letters A–H each with shelves 1..levels.
 export async function generateShelves(location_id, letters, levels) {
   const existing = new Set((await listStorageUnits()).filter((u) => u.location_id === location_id).map((u) => u.code));
