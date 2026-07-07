@@ -177,7 +177,7 @@ export default function App() {
         {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} />}
-        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} counts={counts} receipts={receipts} reload={reload} />}
+        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} />}
         {tab === "users" && <Users />}
       </div>
     </div>
@@ -1185,7 +1185,7 @@ function computeUsage(products, counts, receipts) {
   return { rows, totalCost, interval };
 }
 
-function Dashboard({ products, onhand, vendors, counts, receipts, reload }) {
+function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload }) {
   const [ship, setShip] = useState({ open: 0, purchased: 0 });
   const [open, setOpen] = useState("review");
   const [spendDays, setSpendDays] = useState(7);
@@ -1281,7 +1281,7 @@ function Dashboard({ products, onhand, vendors, counts, receipts, reload }) {
           {open === key && <div className="panel-b">{body}</div>}
         </div>
       ))}
-      {detail && <ItemHistory product={detail} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+      {detail && <ItemHistory product={detail} locations={locations} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
     </div>
   );
 }
@@ -1433,13 +1433,14 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen }) {
   );
 }
 
-function ItemHistory({ product, onClose, onChanged }) {
+function ItemHistory({ product, locations, onClose, onChanged }) {
   const [rows, setRows] = useState(null);
   const [recs, setRecs] = useState(null);
   const [busy, setBusy] = useState(false);
   const cpc = product.count_per_case || 1;
   const uMeas = measure(product);
   const today = new Date().toISOString().slice(0, 10);
+  const locs = locations || [];
   async function load() {
     try { setRows(await db.getItemCounts(product.product_id)); } catch { setRows([]); }
     try { setRecs(await db.getItemReceipts(product.product_id)); } catch { setRecs([]); }
@@ -1453,8 +1454,16 @@ function ItemHistory({ product, onClose, onChanged }) {
     const total = r._total != null ? Number(r._total) : Number(r.qty) || 0;   // absolute on-hand in the usage measure
     const fields = { qty: total, cases: 0, loose: total };
     if (r._date) fields.counted_at = new Date(r._date + "T12:00:00").toISOString();
+    if (r._loc) fields.location_id = Number(r._loc);
     try { await db.updateCount(r.stock_count_id, fields); await load(); onChanged && onChanged(); }
     catch (e) { alert("Save failed: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+  async function addCount() {
+    const loc = locs[0]; if (!loc) return;
+    setBusy(true);
+    try { await db.postCounts([{ product_id: product.product_id, location_id: loc.location_id, cases: 0, loose: 0, qty: 0 }]); await load(); onChanged && onChanged(); }
+    catch (e) { alert("Couldn't add a count: " + (e.message || e)); }
     finally { setBusy(false); }
   }
   async function delCount(r) {
@@ -1489,14 +1498,17 @@ function ItemHistory({ product, onClose, onChanged }) {
         <div className="stat" style={{ marginBottom: 10 }}>Edit the <b>date</b>, cases/loose, or delete any entry. Deliveries for this item are below — fix their date, qty, or cost here too. Everything recalculates on-hand and usage.</div>
 
         <div className="secthead">Counts</div>
-        <div className="stat" style={{ marginBottom: 6 }}>Total is the actual on-hand for that day, in {uMeas}. Edit it directly (1 case ≈ {r1(cpc)} {uMeas} now) so old counts stay consistent even if the case size changes.</div>
+        <div className="stat" style={{ marginBottom: 6 }}>Every count for this item, all locations. Edit the total (in {uMeas}), date, or <b>location</b> — or delete a stray. 1 case ≈ {r1(cpc)} {uMeas} now. On-hand sums the latest count in each location.</div>
         {rows === null ? <div className="empty">Loading…</div> : rows.length === 0 ? <div className="note">No counts recorded yet.</div> : (
           <div>
             {rows.map((r) => {
               const shownTotal = r._total != null ? r._total : (r.qty ?? 0);
               return (
-              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "132px 1fr auto", alignItems: "center" }}>
-                <div><input type="date" value={r._date ?? (r.counted_at ? r.counted_at.slice(0, 10) : "")} max={today} onChange={(e) => setField(r.stock_count_id, "_date", e.target.value)} /><div className="stat">{r.location_name || "?"}</div></div>
+              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "116px 118px 1fr auto", alignItems: "center", gap: 8 }}>
+                <div><input type="date" value={r._date ?? (r.counted_at ? r.counted_at.slice(0, 10) : "")} max={today} onChange={(e) => setField(r.stock_count_id, "_date", e.target.value)} /></div>
+                <select value={r._loc ?? r.location_id ?? ""} onChange={(e) => setField(r.stock_count_id, "_loc", e.target.value)}>
+                  {locs.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
+                </select>
                 <label>Total ({uMeas})<input className="fig" type="number" step="0.01" value={shownTotal} onChange={(e) => setField(r.stock_count_id, "_total", e.target.value)} /><span className="stat" style={{ marginLeft: 6 }}>≈ {r1((Number(shownTotal) || 0) / cpc)} case{(Number(shownTotal) || 0) / cpc === 1 ? "" : "s"}</span></label>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <button className="mini" disabled={busy} onClick={() => saveCount(r)}>Save</button>
@@ -1504,6 +1516,7 @@ function ItemHistory({ product, onClose, onChanged }) {
                 </div>
               </div>
             );})}
+            <button className="mini" disabled={busy} style={{ marginTop: 8 }} onClick={addCount}>+ Add a count</button>
           </div>
         )}
 
