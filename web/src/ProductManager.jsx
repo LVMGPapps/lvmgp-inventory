@@ -9,13 +9,30 @@ const money = (n) => (n == null || isNaN(n)) ? "—" : "$" + Number(n).toFixed(2
 // Unit model: buy/count in CASE->PACKAGE; use in a usage measure. Stored qty is in the USAGE MEASURE.
 const usagePerCase = (p) => (Number(p.packages_per_case) || 1) * (Number(p.usage_per_package) || 1) || 1;   // usage units per case
 const usagePerPack = (p) => Number(p.usage_per_package) || 1;                                                // usage units per package
+// Per-vendor sizing: a vendor's case may hold a different number of packages/size than the product default.
+const vPPC = (p, v) => Number(v?.packages_per_case) || Number(p.packages_per_case) || 1;
+const vUPP = (p, v) => Number(v?.usage_per_package) || Number(p.usage_per_package) || 1;
+const vUnitsPerCase = (p, v) => (vPPC(p, v) * vUPP(p, v)) || 1;                    // size units in this vendor's case
+const vCostPerUnit = (p, v) => (v?.price != null ? Number(v.price) / vUnitsPerCase(p, v) : null);  // apples-to-apples $/each
+const vPkgName = (p, v, n) => (v?.package_unit || p.package_unit || "package") + (n === 1 ? "" : "s");
 const unitsPerBuy = (p, ou) => { const o = ou || p.buy_by || "case"; return o === "case" ? usagePerCase(p) : o === "package" ? usagePerPack(p) : 1; };
-const measure = (p) => p.usage_measure || p.use_unit || p.count_unit || "each";
+const measure = (p) => p.usage_measure || p.count_unit || "each";   // the size unit inside a package (internal math only)
 const pkgName = (p, n) => (p.package_unit || "package") + (n === 1 ? "" : "s");
 const wholeOnly = (p) => !!p.count_whole_only || /fountain/i.test(p.category || "");   // count whole units, no partial/each
 const buyLabel = (p, ou, n) => { const o = ou || p.buy_by || "case"; const one = n === 1; return o === "case" ? (one ? "case" : "cases") : o === "package" ? pkgName(p, n) : measure(p); };
+const caseMakeup = (p) => { const ppc = Number(p.packages_per_case) || 1, upp = Number(p.usage_per_package) || 1; return ppc > 1 ? `case = ${ppc} ${pkgName(p, 2)} of ${r1(upp)} ${measure(p)}` : `case = ${r1(upp)} ${measure(p)}`; };
 const r1 = (n) => Math.round(n * 10) / 10;
 // Format a usage-unit quantity as "C case, P pkg + L measure"
+const IN_USE_RX = /in[- ]?use|tap|hooked/i;                       // in-use BIB/Icee = partial, not par stock
+const isInUseLoc = (name) => IN_USE_RX.test(String(name || ""));
+// Stock that counts toward par: full/backup stock only (excludes in-use for fountain & icee).
+function parStock(p, oh) {
+  const byLoc = oh?.byLoc || {};
+  const partialItem = wholeOnly(p) || /icee/i.test(p.category || "") || /icee/i.test(p.name || "");
+  if (!partialItem) return oh?.total || 0;
+  return Object.entries(byLoc).reduce((a, [ln, q]) => a + (isInUseLoc(ln) ? 0 : (Number(q) || 0)), 0);
+}
+
 function fmtQty(p, units) {
   units = Number(units) || 0;
   const upc = usagePerCase(p), upp = usagePerPack(p);
@@ -113,6 +130,8 @@ const STYLE = `
 
 export default function App() {
   const [tab, setTab] = useState("catalog");
+  const [jumpTo, setJumpTo] = useState(null);     // product_id to open in Catalog
+  const openItem = (p) => { setJumpTo(p?.product_id ?? p); setTab("catalog"); };
   const [products, setProducts] = useState([]);
   const [locations, setLocations] = useState([]);
   const [vendors, setVendors] = useState([]);
@@ -174,12 +193,12 @@ export default function App() {
 
       <div className="wrap">
         {error && <div className="err">{error}</div>}
-        {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} counts={counts} receipts={receipts} reload={reload} />}
+        {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} counts={counts} receipts={receipts} reload={reload} jumpTo={jumpTo} clearJump={() => setJumpTo(null)} />}
         {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} />}
         {tab === "organize" && <Organize products={products} locations={locations} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
-        {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} />}
-        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} />}
+        {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} locations={locations} />}
+        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
       </div>
     </div>
@@ -189,12 +208,12 @@ export default function App() {
 function blankProduct() {
   return { product_id: null, name: "", category: "", brand: "", supc: "",
     purchase_unit: "Case", pack: 1, size: null, size_unit: "",
-    count_unit: "each", count_per_case: 1, use_unit: "", use_per_count: null, par_level: null, image_url: null, backup_for: null,
+    count_unit: "each", count_per_case: 1, par_level: null, image_url: null, backup_for: null,
     package_unit: "each", packages_per_case: 1, buy_by: "case", usage_measure: "each", usage_per_package: 1, not_stocked: false,
     barcodes: [], vendors: [], locations: [] };
 }
 
-function Catalog({ products, vendors, locations, units, onhand, counts, receipts, reload }) {
+function Catalog({ products, vendors, locations, units, onhand, counts, receipts, reload, jumpTo, clearJump }) {
   const [q, setQ] = useState("");
   const [edit, setEdit] = useState(null);
   const [finding, setFinding] = useState(false);
@@ -203,6 +222,12 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
   const [sortBy, setSortBy] = useState("az");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [showNotStocked, setShowNotStocked] = useState(false);
+  useEffect(() => {
+    if (jumpTo == null) return;
+    const p = products.find((x) => x.product_id === jumpTo);
+    if (p) { setQ(""); setLocFilter(""); setVenFilter(""); setFlaggedOnly(false); setShowNotStocked(true); setEdit(JSON.parse(JSON.stringify(p))); }
+    clearJump && clearJump();
+  }, [jumpTo, products]);
   const locName = Object.fromEntries((locations || []).map((l) => [l.location_id, l.name]));
   // latest count per item
   const lastCount = {};
@@ -294,7 +319,11 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
 
               <div style={{ fontSize: 15, fontWeight: 700, color: "#191B1F" }}>On hand: {fmtQty(p, onhand[p.product_id]?.total ?? 0)}</div>
               <div className="stat">📍 {(p.locations || []).map((l) => l.name).join(" · ") || "No location"}</div>
-              <div className="stat">🛒 {packStr}{casePrice != null ? ` · ${money(casePrice)}/case` : ""}{primeV?.name ? ` · ${primeV.name}` : ""}{p.supc ? ` · #${p.supc}` : ""}</div>
+              <div className="stat">🛒 {packStr}{casePrice != null ? ` · ${money(casePrice)}/case` : ""}{primeV?.name ? ` · ${primeV.name}` : ""}{primeV?.vendor_sku ? ` · #${primeV.vendor_sku}` : (p.supc ? ` · #${p.supc}` : "")}</div>
+              {(() => { const cpu = vCostPerUnit(p, primeV); const best = bestVendor(p);
+                if (cpu == null) return null;
+                const cheaper = best && best.v !== primeV && best.cpu < cpu - 1e-9;
+                return <div className="stat">💲 ${cpu.toFixed(4)}/{measure(p)}{cheaper ? <b style={{ color: "#0a5c50" }}> · {best.v.name} is ${best.cpu.toFixed(4)}</b> : ((p.vendors || []).length > 1 ? " · best price" : "")}</div>; })()}
               <div className="stat">🧮 Last count: {lc ? `${fmtQty(p, lc.qty)} · ${dlabel(lc.counted_at)}${locName[lc.location_id] ? " · " + locName[lc.location_id] : ""}` : "never"}</div>
               <div className="stat">📥 Last received: {lr ? `${r1(lr.qty)} · ${dlabel(lr.received_date)}${lr.vendor ? " · " + lr.vendor : ""}` : "none"}</div>
 
@@ -395,11 +424,11 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             <div className="field"><label>Par (in {p.buy_by === "package" ? "packages" : "cases"})</label><input type="number" step="0.1" value={p.par_level ?? ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
           </div>
           <div className="frow">
-            <div className="field"><label>Usage measure</label><input value={p.usage_measure || ""} onChange={(e) => set("usage_measure", e.target.value)} placeholder="each, lb, oz, tbsp, cup…" /></div>
-            <div className="field"><label>Usage per package</label><input type="number" min="0" step="0.001" value={p.usage_per_package ?? ""} onChange={(e) => set("usage_per_package", num(e.target.value))} /></div>
+            <div className="field"><label>Size unit (what's in a package)</label><input value={p.usage_measure || ""} onChange={(e) => set("usage_measure", e.target.value)} placeholder="each, lb, oz, ct…" /></div>
+            <div className="field"><label>Size per package</label><input type="number" min="0" step="0.001" value={p.usage_per_package ?? ""} onChange={(e) => set("usage_per_package", num(e.target.value))} /></div>
           </div>
           <div className="stat" style={{ marginTop: 2 }}>
-            1 case = <b>{num(p.packages_per_case) || 1} {(p.package_unit || "package") + ((num(p.packages_per_case) || 1) === 1 ? "" : "s")}</b>; 1 {p.package_unit || "package"} = <b>{num(p.usage_per_package) || 1} {p.usage_measure || "each"}</b>. You count in cases &amp; {(p.package_unit || "package") + "s"}, order by the <b>{p.buy_by || "case"}</b>, and usage/value are in {p.usage_measure || "each"}.
+            1 case = <b>{num(p.packages_per_case) || 1} {(p.package_unit || "package") + ((num(p.packages_per_case) || 1) === 1 ? "" : "s")}</b>{(num(p.usage_per_package) || 1) > 1 ? <> · 1 {p.package_unit || "package"} = <b>{num(p.usage_per_package) || 1} {p.usage_measure || "each"}</b></> : null}. You count and report in <b>cases &amp; {(p.package_unit || "package") + "s"}</b>; order by the <b>{p.buy_by || "case"}</b>.
           </div>
         </div>
 
@@ -450,16 +479,34 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
 
         <div className="group">
           <div className="group-t">Vendors &amp; pricing</div>
-          {p.vendors.map((v, i) => (
-            <div className="vrow" key={i}>
-              <select value={v.vendor_id} onChange={(e) => { const id = Number(e.target.value); const nm = vendors.find((x) => x.vendor_id === id)?.name; setP((s) => ({ ...s, vendors: s.vendors.map((x, j) => j === i ? { ...x, vendor_id: id, name: nm } : x) })); }} style={{ flex: 1 }}>
-                {vendors.map((o) => <option key={o.vendor_id} value={o.vendor_id}>{o.name}</option>)}
-              </select>
-              <input type="number" step="0.01" placeholder="case $" value={v.price ?? ""} onChange={(e) => setP((s) => ({ ...s, vendors: s.vendors.map((x, j) => j === i ? { ...x, price: num(e.target.value) } : x) }))} style={{ width: 90 }} />
-              <button className="mini" style={{ background: v.primary ? "#191B1F" : "#fff", color: v.primary ? "#fff" : "#191B1F" }} onClick={() => setP((s) => ({ ...s, vendors: s.vendors.map((x, j) => ({ ...x, primary: j === i })) }))}>★</button>
-              <button className="mini mini-danger" onClick={() => setP((s) => ({ ...s, vendors: s.vendors.filter((_, j) => j !== i) }))}>✕</button>
+          <div className="stat" style={{ marginBottom: 6 }}>Each vendor can pack this item differently. Enter <b>that vendor's</b> case makeup and case price — the <b>$/{p.usage_measure || "each"}</b> below normalizes them so you can compare apples to apples. ★ = primary (used for inventory value).</div>
+          {(() => { const best = bestVendor(p); return p.vendors.map((v, i) => {
+            const cpu = vCostPerUnit(p, v);
+            const isBest = best && cpu != null && Math.abs(cpu - best.cpu) < 1e-9 && p.vendors.length > 1;
+            const upd = (patch) => setP((s) => ({ ...s, vendors: s.vendors.map((x, j) => j === i ? { ...x, ...patch } : x) }));
+            return (
+            <div key={i} style={{ border: "1px solid " + (isBest ? "#0a5c50" : "#E6E1D6"), borderRadius: 9, padding: 8, marginBottom: 8, background: isBest ? "#F2FBF8" : "#fff" }}>
+              <div className="vrow">
+                <select value={v.vendor_id} onChange={(e) => { const id = Number(e.target.value); const nm = vendors.find((x) => x.vendor_id === id)?.name; upd({ vendor_id: id, name: nm }); }} style={{ flex: 1 }}>
+                  {vendors.map((o) => <option key={o.vendor_id} value={o.vendor_id}>{o.name}</option>)}
+                </select>
+                <input type="number" step="0.01" placeholder="case $" value={v.price ?? ""} onChange={(e) => upd({ price: num(e.target.value) })} style={{ width: 90 }} />
+                <button className="mini" title="Primary vendor" style={{ background: v.primary ? "#191B1F" : "#fff", color: v.primary ? "#fff" : "#191B1F" }} onClick={() => setP((s) => ({ ...s, vendors: s.vendors.map((x, j) => ({ ...x, primary: j === i })) }))}>★</button>
+                <button className="mini mini-danger" onClick={() => setP((s) => ({ ...s, vendors: s.vendors.filter((_, j) => j !== i) }))}>✕</button>
+              </div>
+              <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 6 }}>
+                <label style={{ width: 78 }}><span className="stat">pkgs/case</span><input className="fig" type="number" min="1" step="0.001" value={v.packages_per_case ?? ""} placeholder={String(p.packages_per_case ?? 1)} onChange={(e) => upd({ packages_per_case: num(e.target.value) })} /></label>
+                <label style={{ width: 84 }}><span className="stat">size/pkg</span><input className="fig" type="number" min="0" step="0.001" value={v.usage_per_package ?? ""} placeholder={String(p.usage_per_package ?? 1)} onChange={(e) => upd({ usage_per_package: num(e.target.value) })} /></label>
+                <label style={{ width: 88 }}><span className="stat">pkg name</span><input value={v.package_unit ?? ""} placeholder={p.package_unit || "package"} onChange={(e) => upd({ package_unit: e.target.value })} /></label>
+                <label style={{ width: 96 }}><span className="stat">vendor item #</span><input value={v.vendor_sku ?? ""} onChange={(e) => upd({ vendor_sku: e.target.value })} /></label>
+              </div>
+              <div className="stat" style={{ marginTop: 5 }}>
+                case = {r1(vPPC(p, v))} {vPkgName(p, v, 2)} of {r1(vUPP(p, v))} {p.usage_measure || "each"} = <b>{r1(vUnitsPerCase(p, v))} {p.usage_measure || "each"}</b>
+                {cpu != null && <> · <b style={{ color: isBest ? "#0a5c50" : "#191B1F" }}>${cpu.toFixed(4)}/{p.usage_measure || "each"}</b></>}
+                {isBest && <b style={{ color: "#0a5c50" }}> · best price</b>}
+              </div>
             </div>
-          ))}
+          );}); })()}
           <button className="mini" onClick={addVendor}>+ Add vendor</button>
         </div>
 
@@ -477,7 +524,7 @@ function printCountSheet(products, locations, areaId) {
   const areas = areaId ? locations.filter((l) => String(l.location_id) === String(areaId)) : locations;
   let body = "";
   for (const loc of areas) {
-    const items = products.filter((p) => !p.not_stocked && (p.locations || []).some((l) => l.location_id === loc.location_id));
+    const items = products.filter((p) => (p.locations || []).some((l) => l.location_id === loc.location_id));
     if (!items.length) continue;
     const groups = {};
     for (const p of items) {
@@ -539,8 +586,8 @@ function Count({ products, locations, onhand, reload }) {
 
   // Heads = non-backup, stocked items in this location (or whose alternate is in this location).
   let heads = loc
-    ? products.filter((p) => !p.backup_for && !p.not_stocked && (inLoc(p) || (backupsBy[p.product_id] || []).some(inLoc)))
-    : products.filter((p) => !p.backup_for && !p.not_stocked);
+    ? products.filter((p) => !p.backup_for && (inLoc(p) || (backupsBy[p.product_id] || []).some(inLoc)))
+    : products.filter((p) => !p.backup_for);
   if (q) {
     const t = q.toLowerCase();
     const match = (p) => p.name.toLowerCase().includes(t) || (p.brand || "").toLowerCase().includes(t) || (p.barcodes || []).includes(q);
@@ -868,7 +915,12 @@ function computeItemStats(products, counts, receipts) {
   return stats;
 }
 
-function computeSuggestions(products, counts, receipts) {
+function computeSuggestions(products, counts, receipts, locations) {
+  const locName = Object.fromEntries((locations || []).map((l) => [l.location_id, l.name]));
+  const parWeekTotal = (p, it, w) => Object.entries(it[w]).reduce((a, [lid, x]) => {
+    const partialItem = wholeOnly(p) || /icee/i.test(p.category || "") || /icee/i.test(p.name || "");
+    return a + ((partialItem && isInUseLoc(locName[lid])) ? 0 : x.qty);
+  }, 0);
   const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
   const byItem = {};
   for (const c of counts) {
@@ -887,7 +939,7 @@ function computeSuggestions(products, counts, receipts) {
   const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d >= d0) && x.d < d1) ? x.units : 0), 0);
   const out = [];
   for (const p of products) {
-    if (p.backup_for) continue;                                // alternates are ordered via their main item
+    if (p.backup_for || p.not_stocked) continue;               // alternates order via main item; not-stocked never auto-reorders
     const it = byItem[p.product_id]; if (!it) continue;        // need at least one count to know on-hand
     const weeks = Object.keys(it).sort();
     const usages = [];
@@ -900,7 +952,7 @@ function computeSuggestions(products, counts, receipts) {
     const avg = usages.length ? usages.reduce((a, x) => a + x, 0) / usages.length : 0;
     const forecast = 0.6 * last + 0.4 * avg;                   // count units used per week
     const cpc = p.count_per_case || 1;
-    const onhandCases = wtotal(it, weeks[weeks.length - 1]) / cpc;
+    const onhandCases = parWeekTotal(p, it, weeks[weeks.length - 1]) / cpc;   // in-use BIB/Icee is partial: excluded from par stock
     const usageCases = forecast / cpc;
     const parCases = Number(p.par_level) || 0;
     const target = Math.max(parCases, usageCases);             // build up to par, or a week's usage if higher
@@ -911,7 +963,7 @@ function computeSuggestions(products, counts, receipts) {
   return out;
 }
 
-function Shopping({ products, vendors, onhand, counts, receipts }) {
+function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   const [listId, setListId] = useState(null);
   const [lines, setLines] = useState(null);
   const [note, setNote] = useState("");
@@ -924,7 +976,7 @@ function Shopping({ products, vendors, onhand, counts, receipts }) {
   }
   useEffect(() => { load(); }, []);
   if (lines === null) return <div className="empty">Loading…</div>;
-  const suggestions = computeSuggestions(products, counts || [], receipts || []);
+  const suggestions = computeSuggestions(products, counts || [], receipts || [], locations || []);
   const stats = computeItemStats(products, counts || [], receipts || []);
   const r1 = (n) => Math.round(n * 10) / 10;
 
@@ -1223,6 +1275,35 @@ function Organize({ products, locations, reload }) {
   const [sel, setSel] = useState(null);          // tap-to-move: selected product_id
   const [levels, setLevels] = useState(5);
   const [lettersTo, setLettersTo] = useState("H");
+  const [editZones, setEditZones] = useState(false);
+  const [newZone, setNewZone] = useState("");
+
+  async function addZone(code, sort) {
+    if (!code) return;
+    setBusy(true);
+    try { await db.addStorageUnit(aId, code, sort ?? 999); await loadUnits(); setNewZone(""); }
+    catch (e) { alert("Couldn't add: " + (e.message || e)); } finally { setBusy(false); }
+  }
+  async function renameUnit(u) {
+    const c = prompt("Rename zone", u.code); if (!c || c === u.code) return;
+    setBusy(true);
+    try { await db.renameStorageUnit(u.storage_unit_id, c); await loadUnits(); reload && reload(); }
+    catch (e) { alert("Couldn't rename: " + (e.message || e)); } finally { setBusy(false); }
+  }
+  async function delUnit(u) {
+    if (!confirm(`Delete zone “${u.code}”? Items on it become Unassigned (they stay in the area).`)) return;
+    setBusy(true);
+    try { await db.deleteStorageUnit(u.storage_unit_id); await loadUnits(); reload && reload(); }
+    catch (e) { alert("Couldn't delete: " + (e.message || e)); } finally { setBusy(false); }
+  }
+  async function delBay(L) {
+    const inBay = areaUnits.filter((u) => letterOf(u.code) === L);
+    if (!confirm(`Delete bay ${L} and its ${inBay.length} zone(s)? Items become Unassigned.`)) return;
+    setBusy(true);
+    try { for (const u of inBay) await db.deleteStorageUnit(u.storage_unit_id); await loadUnits(); reload && reload(); }
+    catch (e) { alert("Couldn't delete: " + (e.message || e)); } finally { setBusy(false); }
+  }
+  const nextShelfCode = (L) => { const nums = cellsIn(L).map((u) => parseInt(String(u.code).replace(/^[A-Za-z]+/, ""), 10) || 0); const n = (nums.length ? Math.max(...nums) : 0) + 1; return { code: L + n, sort: (L.charCodeAt(0) - 64) * 100 + n }; };
 
   async function loadUnits() { try { setUnits(await db.listStorageUnits()); } catch { setUnits([]); } }
   useEffect(() => { loadUnits(); }, []);
@@ -1236,7 +1317,7 @@ function Organize({ products, locations, reload }) {
   const cellsIn = (L) => areaUnits.filter((u) => letterOf(u.code) === L && /\d/.test(u.code)).sort((a, b) => a.sort_order - b.sort_order);
   const flatUnits = areaUnits.slice().sort((a, b) => a.sort_order - b.sort_order);
 
-  const inArea = products.filter((p) => !p.not_stocked && (p.locations || []).some((l) => l.location_id === aId));
+  const inArea = products.filter((p) => (p.locations || []).some((l) => l.location_id === aId));
   const assignOf = (p) => (p.locations || []).find((l) => l.location_id === aId);
   const bayOfP = (p) => { const c = assignOf(p)?.unit_code; return c ? letterOf(c) : null; };
   const unitCodeOfP = (p) => assignOf(p)?.unit_code || null;
@@ -1288,11 +1369,11 @@ function Organize({ products, locations, reload }) {
     </div>
   );
 
-  const col = (title, sub, prods, dropKey, onDropFn, onOpen) => (
+  const col = (title, sub, prods, dropKey, onDropFn, onOpen, extra) => (
     <div key={dropKey} style={{ width: 220, flex: "0 0 auto" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4, gap: 6 }}>
         <b style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 17, cursor: onOpen ? "pointer" : "default" }} onClick={onOpen}>{title}{onOpen ? " ›" : ""}</b>
-        <span className="stat">{prods.length}</span>
+        <span style={{ display: "flex", gap: 4, alignItems: "center" }}>{extra}<span className="stat">{prods.length}</span></span>
       </div>
       {sub && <div className="stat" style={{ marginBottom: 4 }}>{sub}</div>}
       <div {...dz(dropKey, onDropFn)}>{prods.map(chip)}{prods.length === 0 && <div className="stat" style={{ padding: 6 }}>{sel != null ? "tap to place here" : "empty"}</div>}</div>
@@ -1320,6 +1401,7 @@ function Organize({ products, locations, reload }) {
           {locations.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
         </select>
         {bay && <button className="mini" onClick={() => setBay(null)}>← All bays</button>}
+        {areaId && <button className="mini" onClick={() => setEditZones((v) => !v)} style={editZones ? { background: "#3A3D44", color: "#fff", borderColor: "#3A3D44" } : undefined}>✎ Edit zones</button>}
         {busy && <span className="stat">saving…</span>}
       </div>
       {!areaId ? <div className="empty">Pick an area, then drag items onto a bay (A, B, C…). Click a bay to drop into its shelves (A1–A5).</div> : (
@@ -1341,18 +1423,36 @@ function Organize({ products, locations, reload }) {
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", paddingBottom: 8 }}>
               {col("Unassigned", "no bay yet", inArea.filter((p) => !bayOfP(p)), "unassigned", (pid) => assign(pid, null))}
               {(hasLetters ? bayLetters : []).map((L) =>
-                col(L, cellsIn(L).length ? `shelves ${cellsIn(L).map((c) => c.code).join(", ")}` : "", inArea.filter((p) => bayOfP(p) === L), "bay-" + L, (pid) => dropToBay(pid, L), () => setBay(L)))}
+                col(L, cellsIn(L).length ? `shelves ${cellsIn(L).map((c) => c.code).join(", ")}` : "", inArea.filter((p) => bayOfP(p) === L), "bay-" + L, (pid) => dropToBay(pid, L), () => setBay(L),
+                  editZones ? <button className="mini mini-danger" style={{ padding: "0 5px" }} title={"Delete bay " + L} onClick={(e) => { e.stopPropagation(); delBay(L); }}>✕</button> : null))}
               {!hasLetters && flatUnits.map((u) =>
-                col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "u-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id)))}
+                col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "u-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id), null,
+                  editZones ? <span style={{ display: "flex", gap: 4 }}><button className="mini" style={{ padding: "0 5px" }} onClick={(e) => { e.stopPropagation(); renameUnit(u); }}>✎</button><button className="mini mini-danger" style={{ padding: "0 5px" }} onClick={(e) => { e.stopPropagation(); delUnit(u); }}>✕</button></span> : null))}
+              {editZones && (
+                <div style={{ width: 220, flex: "0 0 auto" }}>
+                  <b style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 17 }}>Add a {hasLetters ? "bay" : "zone"}</b>
+                  <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                    <input className="grow" placeholder={hasLetters ? "e.g. I" : "e.g. 6 or Left"} value={newZone} onChange={(e) => setNewZone(e.target.value)} />
+                    <button className="mini" disabled={busy || !newZone.trim()} onClick={() => { const c = newZone.trim(); addZone(hasLetters ? c.toUpperCase() : c, /^[A-Za-z]$/.test(c) ? (c.toUpperCase().charCodeAt(0) - 64) * 100 : 999); }}>Add</button>
+                  </div>
+                </div>
+              )}
               {removeCol("remove-bay")}
             </div>
           ) : (
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", paddingBottom: 8 }}>
               {col("In " + bay + " · no shelf", "", inArea.filter((p) => bayOfP(p) === bay && !/\d/.test(unitCodeOfP(p) || "")), "baynoshelf", (pid) => dropToBay(pid, bay))}
               {cellsIn(bay).map((u) =>
-                col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "cell-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id)))}
+                col(u.code, "", inArea.filter((p) => unitCodeOfP(p) === u.code), "cell-" + u.storage_unit_id, (pid) => assign(pid, u.storage_unit_id), null,
+                  editZones ? <span style={{ display: "flex", gap: 4 }}><button className="mini" style={{ padding: "0 5px" }} onClick={(e) => { e.stopPropagation(); renameUnit(u); }}>✎</button><button className="mini mini-danger" style={{ padding: "0 5px" }} onClick={(e) => { e.stopPropagation(); delUnit(u); }}>✕</button></span> : null))}
+              {editZones && (
+                <div style={{ width: 220, flex: "0 0 auto", alignSelf: "flex-start" }}>
+                  <b style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 17 }}>Add a shelf</b>
+                  <button className="mini" style={{ display: "block", marginTop: 6 }} disabled={busy} onClick={() => { const s = nextShelfCode(bay); addZone(s.code, s.sort); }}>+ Add {nextShelfCode(bay).code}</button>
+                </div>
+              )}
               {removeCol("remove-shelf")}
-              {cellsIn(bay).length === 0 && <div className="note">No numbered shelves under {bay} yet. Add them on the Generate step, or they’ll be created A1–A{levels}.</div>}
+              {cellsIn(bay).length === 0 && !editZones && <div className="note">No numbered shelves under {bay} yet. Turn on ✎ Edit zones to add some.</div>}
             </div>
           )}
         </div>
@@ -1381,7 +1481,14 @@ function Picker({ products, exclude, onPick }) {
 const fmtUSD = (n) => (n == null || isNaN(n)) ? "$0" : "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 function costPerCount(p) {
   const v = (p.vendors || []).find((x) => x.primary) || (p.vendors || [])[0];
-  return v?.price != null ? v.price / (p.count_per_case || 1) : null;
+  return vCostPerUnit(p, v);          // price ÷ THIS vendor's units-per-case
+}
+// Cheapest vendor by normalized $/each, for comparison.
+function bestVendor(p) {
+  const rows = (p.vendors || []).filter((v) => v.price != null).map((v) => ({ v, cpu: vCostPerUnit(p, v) }));
+  if (!rows.length) return null;
+  rows.sort((a, b) => a.cpu - b.cpu);
+  return rows[0];
 }
 function lineCost(l) { return (Number(l.purchase_qty) || 0) * (Number(l.unit_cost) || 0); }
 
@@ -1441,7 +1548,7 @@ function computeUsage(products, counts, receipts) {
   return { rows, totalCost, interval };
 }
 
-function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload }) {
+function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload, openItem }) {
   const [ship, setShip] = useState({ open: 0, purchased: 0 });
   const [open, setOpen] = useState("attention");
   const [spendDays, setSpendDays] = useState(7);
@@ -1496,11 +1603,11 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   attention.sort((a, b) => (attnRank[a.rs[0]] - attnRank[b.rs[0]]) || a.p.name.localeCompare(b.p.name));
 
   const reports = [
-    ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} />],
+    ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} openItem={openItem} />],
     ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} reload={reload} />],
     ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
     ["value", "Inventory value — by category", <ValueReport valByCat={valByCat} total={invValue} />],
-    ["valitem", "Inventory value — by item", <ValueByItemReport products={products} onhand={onhand} />],
+    ["valitem", "Inventory value — by item", <ValueByItemReport products={products} onhand={onhand} openItem={openItem} />],
     ["spend", "Purchasing — by vendor", <SpendReport recs={recs} vName={vName} days={spendDays} setDays={setSpendDays} />],
     ["foodcost", "Weekly food cost & usage", <UsageReport usage={usage} />],
     ["counts", "Counts by week", <CountsByWeekReport counts={counts} products={products} onOpen={setDetail} />],
@@ -1542,12 +1649,12 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
           {open === key && <div className="panel-b">{body}</div>}
         </div>
       ))}
-      {detail && <ItemHistory product={detail} locations={locations} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+      {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
     </div>
   );
 }
 
-function NeedsAttentionReport({ attention, onOpen }) {
+function NeedsAttentionReport({ attention, onOpen, openItem }) {
   if (!attention.length) return <div className="note">Nothing needs attention — no flags, everything counted, and every delivery reconciled. ✓</div>;
   const chipFor = (r) => {
     const map = { "flagged": ["🚩 flagged", "#FDECEA", "#E0392B", "#B0271B"], "received, not counted": ["📥 received, not counted", "#FFF6E9", "#E68A00", "#9a5b00"], "never counted": ["• never counted", "#EEF1F4", "#B7BBC4", "#555"] };
@@ -1559,7 +1666,7 @@ function NeedsAttentionReport({ attention, onOpen }) {
       <div className="stat" style={{ marginBottom: 8 }}>Tap an item to open and fix it (recount, clear the flag, or check the delivery).</div>
       {attention.map(({ p, rs }) => (
         <div key={p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto", alignItems: "center", cursor: "pointer" }} onClick={() => onOpen && onOpen(p)}>
-          <div><b>{p.name}</b><div className="stat">{p.category || "Uncategorized"}{p.recount_note ? ` · ${p.recount_note}` : ""}</div></div>
+          <div><b style={{ borderBottom: "1px dashed #B7BBC4" }}>{p.name}</b>{openItem && <button className="mini" style={{ marginLeft: 6, padding: "0 5px" }} title="Open in Catalog" onClick={(e) => { e.stopPropagation(); openItem(p); }}>✎</button>}<div className="stat">{p.category || "Uncategorized"}{p.recount_note ? ` · ${p.recount_note}` : ""}</div></div>
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap", justifyContent: "flex-end" }}>{rs.map(chipFor)}</div>
         </div>
       ))}
@@ -1583,7 +1690,7 @@ function OnHandReport({ products, onhand }) {
   );
 }
 
-function ValueByItemReport({ products, onhand }) {
+function ValueByItemReport({ products, onhand, openItem }) {
   const rows = products.map((p) => {
     const oh = onhand[p.product_id]?.total || 0;
     const cpc = costPerCount(p);
@@ -1601,7 +1708,7 @@ function ValueByItemReport({ products, onhand }) {
             <tr><td style={{ fontWeight: 700 }}>Total</td><td></td><td></td><td className="fig" style={{ textAlign: "right", fontWeight: 700 }}>{fmtUSD(total)}</td></tr>
             {rows.map((r) => (
               <tr key={r.p.product_id}>
-                <td>{r.p.name}</td>
+                <td>{openItem ? <span style={{ cursor: "pointer", borderBottom: "1px dashed #B7BBC4" }} onClick={() => openItem(r.p)}>{r.p.name}</span> : r.p.name}</td>
                 <td className="fig" style={{ textAlign: "right" }}>{fmtQty(r.p, r.oh)}</td>
                 <td className="fig" style={{ textAlign: "right" }}>{r.cpc != null ? "$" + r.cpc.toFixed(3) + "/" + measure(r.p) : "—"}</td>
                 <td className="fig" style={{ textAlign: "right", fontWeight: 600 }}>{fmtUSD(r.val)}</td>
@@ -1735,14 +1842,14 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
             <Fragment key={r.pid}>
               {head && <tr><td colSpan={5} style={{ background: "#F4F1EA", fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", fontSize: 13, padding: "6px 8px" }}>{cat}</td></tr>}
               <tr style={{ cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
-                <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span>{r.alts && r.alts.length ? <span className="bchip" style={{ marginLeft: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>+ {r.alts.join(", ")}</span> : ""}<div className="stat">{r.p.count_unit}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
-                <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : r1(r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
+                <td><button className="mini" style={{ marginRight: 6, padding: "1px 5px", borderColor: r.p.needs_recount ? "#E0392B" : undefined }} title={r.p.needs_recount ? "Flagged for recount — click to clear" : "Flag for recount"} onClick={(e) => { e.stopPropagation(); flag(r.p); }}>{r.p.needs_recount ? "🚩" : "⚑"}</button><span style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</span>{r.alts && r.alts.length ? <span className="bchip" style={{ marginLeft: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>+ {r.alts.join(", ")}</span> : ""}<div className="stat">{caseMakeup(r.p)}{r.p.needs_recount ? " · needs recount" : ""}</div></td>
+                <td className="fig" style={{ textAlign: "right" }}>{r.prev == null ? "—" : fmtQty(r.p, r.prev)}<div className="stat">{label(r.dPrev)}</div></td>
                 <td className="fig" style={{ textAlign: "right" }}>
-                  <span style={{ color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? r1(r.rec) : "—"}</span>
-                  {r.pend ? <div style={{ color: "#B26A00", fontWeight: 600 }} title={"received " + r.pendDates.map(label).join(", ") + " — awaiting count"}>+{r1(r.pend)} awaiting count</div> : <div className="stat">{r.recDates.map(label).join(", ")}</div>}
+                  <span style={{ color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? fmtQty(r.p, r.rec) : "—"}</span>
+                  {r.pend ? <div style={{ color: "#B26A00", fontWeight: 600 }} title={"received " + r.pendDates.map(label).join(", ") + " — awaiting count"}>+{fmtQty(r.p, r.pend)} awaiting count</div> : <div className="stat">{r.recDates.map(label).join(", ")}</div>}
                 </td>
-                <td className="fig" style={{ textAlign: "right" }}>{r.cur == null ? "—" : r1(r.cur)}<div className="stat">{r.cur == null ? "not counted" : label(r.dCur)}</div></td>
-                <td className="fig" style={{ textAlign: "right", fontWeight: 600, color: r.used == null ? "#B7BBC4" : r.used < 0 ? "#E0392B" : "#191B1F" }}>{r.used == null ? "—" : r1(r.used)}</td>
+                <td className="fig" style={{ textAlign: "right" }}>{r.cur == null ? "—" : fmtQty(r.p, r.cur)}<div className="stat">{r.cur == null ? "not counted" : label(r.dCur)}</div></td>
+                <td className="fig" style={{ textAlign: "right", fontWeight: 600, color: r.used == null ? "#B7BBC4" : r.used < 0 ? "#E0392B" : "#191B1F" }}>{r.used == null ? "—" : (r.used < 0 ? "-" : "") + fmtQty(r.p, Math.abs(r.used))}</td>
               </tr>
             </Fragment>
           );})}</tbody>
@@ -1752,7 +1859,7 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
   );
 }
 
-function ItemHistory({ product, locations, onClose, onChanged }) {
+function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
   const [rows, setRows] = useState(null);
   const [recs, setRecs] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1762,6 +1869,15 @@ function ItemHistory({ product, locations, onClose, onChanged }) {
   const locs = locations || [];
   const [flagged, setFlagged] = useState(!!product.needs_recount);
   const [flagNote, setFlagNote] = useState(product.recount_note || "");
+  const [meas, setMeas] = useState(product.usage_measure || product.count_unit || "each");
+  const [perPkg, setPerPkg] = useState(product.usage_per_package ?? 1);
+  const [wholeChk, setWholeChk] = useState(!!product.count_whole_only);
+  async function saveMeasure() {
+    setBusy(true);
+    try { await db.setProductMeasure(product.product_id, { usage_measure: meas.trim() || "each", usage_per_package: Number(perPkg) || 1, packages_per_case: Number(product.packages_per_case) || 1, count_whole_only: wholeChk }); onChanged && onChanged(); alert("Measure updated. Reopen this item to refresh the case conversions."); }
+    catch (e) { alert("Couldn't update measure: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
   async function toggleFlag(next) {
     setBusy(true);
     try { await db.setRecountFlag(product.product_id, next, flagNote); setFlagged(next); onChanged && onChanged(); }
@@ -1778,8 +1894,11 @@ function ItemHistory({ product, locations, onClose, onChanged }) {
 
   async function saveCount(r) {
     setBusy(true);
-    const total = r._total != null ? Number(r._total) : Number(r.qty) || 0;   // absolute on-hand in the usage measure
-    const fields = { qty: total, cases: 0, loose: total };
+    const upc = usagePerCase(product), upp = usagePerPack(product);
+    const total = r._c != null || r._p != null || r._x != null
+      ? (Number(r._c) || 0) * upc + (Number(r._p) || 0) * upp + (Number(r._x) || 0)
+      : (Number(r.qty) || 0);
+    const fields = { qty: total, cases: Number(r._c) || 0, loose: total - (Number(r._c) || 0) * upc };
     if (r._date) fields.counted_at = new Date(r._date + "T12:00:00").toISOString();
     if (r._loc) fields.location_id = Number(r._loc);
     try { await db.updateCount(r.stock_count_id, fields); await load(); onChanged && onChanged(); }
@@ -1821,26 +1940,48 @@ function ItemHistory({ product, locations, onClose, onChanged }) {
   return (
     <div className="overlay" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px,100%)" }}>
-        <h2>{product.name}</h2>
+        <h2 style={{ marginBottom: 2 }}>{product.name}</h2>
+        {openItem && <button className="mini" style={{ marginBottom: 8 }} onClick={() => { onClose && onClose(); openItem(product); }}>✎ Open in Catalog →</button>}
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "6px 0 10px" }}>
           <button className="mini" style={{ borderColor: flagged ? "#E0392B" : undefined, color: flagged ? "#E0392B" : undefined, fontWeight: 600 }} disabled={busy} onClick={() => toggleFlag(!flagged)}>{flagged ? "🚩 Flagged — clear" : "⚑ Flag for recount"}</button>
           <input placeholder="note (e.g. count looks high)" value={flagNote} onChange={(e) => setFlagNote(e.target.value)} onBlur={() => { if (flagged) toggleFlag(true); }} style={{ flex: 1, minWidth: 160 }} />
         </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "0 0 10px", padding: "8px", background: "#F8F6F1", borderRadius: 8 }}>
+          <span className="stat">Package size</span>
+          <input value={meas} onChange={(e) => setMeas(e.target.value)} placeholder="each, lb, oz, ct…" style={{ width: 90 }} />
+          <span className="stat">·</span>
+          <input type="number" step="0.001" value={perPkg} onChange={(e) => setPerPkg(e.target.value)} style={{ width: 70 }} />
+          <span className="stat">per {product.package_unit || "package"}</span>
+          <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 13 }}><input type="checkbox" checked={wholeChk} onChange={(e) => setWholeChk(e.target.checked)} />whole only</label>
+          <button className="mini" disabled={busy} onClick={saveMeasure}>Save measure</button>
+        </div>
         <div className="stat" style={{ marginBottom: 10 }}>Edit the <b>date</b>, cases/loose, or delete any entry. Deliveries for this item are below — fix their date, qty, or cost here too. Everything recalculates on-hand and usage.</div>
 
         <div className="secthead">Counts</div>
-        <div className="stat" style={{ marginBottom: 6 }}>Every count for this item, all locations. Edit the total (in {uMeas}), date, or <b>location</b> — or delete a stray. 1 case ≈ {r1(cpc)} {uMeas} now. On-hand sums the latest count in each location.</div>
+        <div className="stat" style={{ marginBottom: 6 }}>Count the way you count: cases, {pkgName(product, 2)}, and a partial if there is one. All locations shown. On-hand sums the latest count in each location.</div>
         {rows === null ? <div className="empty">Loading…</div> : rows.length === 0 ? <div className="note">No counts recorded yet.</div> : (
           <div>
             {rows.map((r) => {
-              const shownTotal = r._total != null ? r._total : (r.qty ?? 0);
+              const upc = usagePerCase(product), upp = usagePerPack(product);
+              const whole = wholeOnly(product);
+              const showCase = !whole && (Number(product.packages_per_case) || 1) > 1;
+              const dC = r._c != null ? r._c : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
+              const remA = (r.qty || 0) - (Number(dC) || 0) * upc;
+              const dP = r._p != null ? r._p : Math.floor(remA / upp + 1e-9);
+              const dX = r._x != null ? r._x : Math.round((remA - (Number(dP) || 0) * upp) * 100) / 100;
+              const tot = (Number(dC) || 0) * upc + (Number(dP) || 0) * upp + (Number(dX) || 0);
               return (
-              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "116px 118px 1fr auto", alignItems: "center", gap: 8 }}>
+              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "112px 112px 1fr auto", alignItems: "center", gap: 8 }}>
                 <div><input type="date" value={r._date ?? (r.counted_at ? r.counted_at.slice(0, 10) : "")} max={today} onChange={(e) => setField(r.stock_count_id, "_date", e.target.value)} /></div>
                 <select value={r._loc ?? r.location_id ?? ""} onChange={(e) => setField(r.stock_count_id, "_loc", e.target.value)}>
                   {locs.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
                 </select>
-                <label>Total ({uMeas})<input className="fig" type="number" step="0.01" value={shownTotal} onChange={(e) => setField(r.stock_count_id, "_total", e.target.value)} /><span className="stat" style={{ marginLeft: 6 }}>≈ {r1((Number(shownTotal) || 0) / cpc)} case{(Number(shownTotal) || 0) / cpc === 1 ? "" : "s"}</span></label>
+                <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap" }}>
+                  {showCase && <label style={{ width: 62 }}>Cases<input className="fig" type="number" min="0" value={dC} onChange={(e) => setField(r.stock_count_id, "_c", e.target.value)} /></label>}
+                  <label style={{ width: 72 }}>{pkgName(product, 2)}<input className="fig" type="number" min="0" value={dP} onChange={(e) => setField(r.stock_count_id, "_p", e.target.value)} /></label>
+                  {!whole && <label style={{ width: 68 }}>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={dX} onChange={(e) => setField(r.stock_count_id, "_x", e.target.value)} /></label>}
+                  <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(product, tot)}</span>
+                </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <button className="mini" disabled={busy} onClick={() => saveCount(r)}>Save</button>
                   <button className="mini mini-danger" disabled={busy} onClick={() => delCount(r)}>✕</button>
