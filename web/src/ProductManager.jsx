@@ -704,6 +704,27 @@ function Receive({ products, vendors, reload }) {
   const [recent, setRecent] = useState([]);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
 
+  // Price integrity at receiving: above catalog price for this vendor? another vendor cheaper per each?
+  function priceCheck(product_id, vendor_id, enteredCasePrice, orderUnit) {
+    const p = byId[product_id]; if (!p) return null;
+    const entered = Number(enteredCasePrice);
+    if (!(entered > 0)) return null;
+    const thisV = (p.vendors || []).find((v) => v.vendor_id === vendor_id);
+    const upc = vUnitsPerCase(p, thisV), upp = vUPP(p, thisV);
+    const ou = orderUnit || p.buy_by || "case";
+    const enteredCase = ou === "case" ? entered : ou === "package" ? entered * (upc / upp) : entered * upc;
+    const cpu = enteredCase / upc;                                   // $/each actually paid
+    const out = { cpu, enteredCase, upc };
+    if (thisV?.price != null && enteredCase > Number(thisV.price) + 0.004) {
+      const old = Number(thisV.price);
+      out.increase = { old, now: enteredCase, pct: ((enteredCase - old) / old) * 100 };
+    }
+    const others = (p.vendors || []).filter((v) => v.vendor_id !== vendor_id && v.price != null)
+      .map((v) => ({ v, cpu: vCostPerUnit(p, v) })).filter((x) => x.cpu != null).sort((a, b) => a.cpu - b.cpu);
+    if (others.length && others[0].cpu < cpu - 1e-6) out.cheaper = others[0];
+    return out;
+  }
+
   async function load() {
     try {
       const r = await db.getReceivables();
@@ -744,6 +765,20 @@ function Receive({ products, vendors, reload }) {
   }
 
   async function receive(list) {
+    // Ask for the purchase price if it's missing — price is how value/comparison stay honest.
+    const missing = list.filter((r) => r.case_cost === "" || r.case_cost == null);
+    if (missing.length) {
+      const names = missing.map((r) => r.product_name || "item").join(", ");
+      const ans = prompt(`Purchase price per ${missing[0].order_unit || "case"} for: ${names}\n(Leave blank to receive without a price.)`, "");
+      if (ans === null) return;
+      if (ans.trim() !== "") { const v = num(ans); list = list.map((r) => (missing.includes(r) ? { ...r, case_cost: v } : r)); }
+    }
+    // Warn on price increases before writing them to the catalog.
+    const ups = list.map((r) => ({ r, pc: priceCheck(r.product_id, r.vendor_id, r.case_cost, r.order_unit) })).filter((x) => x.pc?.increase);
+    if (ups.length) {
+      const lines = ups.map((x) => `• ${x.r.product_name}: ${money(x.pc.increase.old)} → ${money(x.pc.increase.now)}/case (+${x.pc.increase.pct.toFixed(1)}%)`).join("\n");
+      if (!confirm(`Price increase detected:\n\n${lines}\n\nReceiving will update the catalog price to what you paid. Continue?`)) return;
+    }
     const payload = list.map((r) => ({
       shopping_line_id: r.shopping_line_id, product_id: Number(r.product_id),
       vendor_id: r.vendor_id ? Number(r.vendor_id) : null,
@@ -776,6 +811,18 @@ function Receive({ products, vendors, reload }) {
         <label className="btn btn-primary">{busy ? <><span className="spin" /> Working…</> : "📷 Scan a receipt"}<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} disabled={busy} /></label>
         {rows.length > 0 && <button className="btn btn-ghost" onClick={() => receive(rows)}>Receive everything</button>}
       </div>
+      {(() => {
+        const alerts = rows.map((r) => ({ r, pc: priceCheck(r.product_id, r.vendor_id, r.case_cost, r.order_unit) })).filter((x) => x.pc && (x.pc.increase || x.pc.cheaper));
+        if (!alerts.length) return null;
+        const ups = alerts.filter((x) => x.pc.increase);
+        const save = alerts.filter((x) => x.pc.cheaper).reduce((a, x) => a + (x.pc.cpu - x.pc.cheaper.cpu) * x.pc.upc * (num(x.r.qty) || 0), 0);
+        return (
+          <div className="note" style={{ borderColor: "#E0392B", background: "#FFF6F5" }}>
+            {ups.length > 0 && <div><b style={{ color: "#B0271B" }}>▲ {ups.length} price increase{ups.length === 1 ? "" : "s"}</b> vs the catalog price: {ups.map((x) => x.r.product_name).join(", ")}. Receiving updates the catalog price to what you paid.</div>}
+            {save > 0.005 && <div style={{ marginTop: ups.length ? 4 : 0 }}><b style={{ color: "#B26A00" }}>Could have saved {money(save)}</b> buying from the cheaper vendor on these lines.</div>}
+          </div>
+        );
+      })()}
       <p className="stat" style={{ margin: "0 2px 10px" }}>Set the date the delivery actually arrived — that's what decides which week's usage it counts toward. Defaults to today; change it to back-date (e.g., yesterday).</p>
       {err && <div className="err">{err}</div>}
       {msg && <div className="ok">{msg}</div>}
@@ -796,15 +843,23 @@ function Receive({ products, vendors, reload }) {
               </span>
             </div>
             <table className="tbl" style={{ border: "none" }}>
-              <thead><tr><th>Item</th><th>Qty</th><th>Unit $</th><th></th></tr></thead>
-              <tbody>{g.map((r) => (
+              <thead><tr><th>Item</th><th>Qty</th><th>{"Price paid"}</th><th></th></tr></thead>
+              <tbody>{g.map((r) => {
+                const pc = priceCheck(r.product_id, r.vendor_id, r.case_cost, r.order_unit);
+                const qtyN = num(r.qty) || 0;
+                return (
                 <tr key={r.shopping_line_id}>
                   <td>{r.product_name}{r.scanned && <span className="bchip" style={{ marginLeft: 6, background: "#E6F4F0", borderColor: "#0E7C6B" }}>from receipt</span>}<div className="stat">by the {r.order_unit} · 1 {r.order_unit} = {r.order_unit === "case" ? r.count_per_case : r.order_unit === "package" ? (r.units_per_package || 1) : 1} {r.count_unit || "unit"}</div></td>
-                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /> <span className="stat">{buyLabel(r, r.order_unit, num(r.qty))}</span></td>
-                  <td><input className="fig" style={{ width: 80 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => setRow(r.shopping_line_id, { case_cost: e.target.value })} /></td>
+                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /> <span className="stat">{buyLabel(r, r.order_unit, qtyN)}</span></td>
+                  <td>
+                    <input className="fig" style={{ width: 80, borderColor: pc?.increase ? "#E0392B" : undefined }} type="number" step="0.01" placeholder={`$ / ${r.order_unit}`} value={r.case_cost} onChange={(e) => setRow(r.shopping_line_id, { case_cost: e.target.value })} />
+                    {pc && <div className="stat">${pc.cpu.toFixed(4)}/{r.count_unit || "each"}</div>}
+                    {pc?.increase && <div style={{ color: "#B0271B", fontWeight: 600, fontSize: 11 }} title="Higher than the catalog price for this vendor">▲ up {pc.increase.pct.toFixed(1)}% from {money(pc.increase.old)}/case</div>}
+                    {pc?.cheaper && <div style={{ color: "#B26A00", fontWeight: 600, fontSize: 11 }} title="Another vendor is cheaper per each">{pc.cheaper.v.name} ${pc.cheaper.cpu.toFixed(4)}/{r.count_unit || "each"} · could save {money((pc.cpu - pc.cheaper.cpu) * pc.upc * qtyN)}</div>}
+                  </td>
                   <td><button className="mini" onClick={() => receive([r])}>Receive</button></td>
                 </tr>
-              ))}</tbody>
+              );})}</tbody>
             </table>
           </div>
         );
