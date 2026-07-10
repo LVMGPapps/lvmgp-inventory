@@ -12,7 +12,7 @@ export async function getCatalog(domain = "fnb") {
   const { data, error } = await supabase
     .from("product")
     .select(
-      "*, product_vendor(vendor_id, current_price, is_primary, vendor(name))," +
+      "*, product_vendor(vendor_id, current_price, is_primary, packages_per_case, usage_per_package, package_unit, vendor_sku, vendor(name))," +
       " product_location(location_id, is_primary, storage_unit_id, location(name), storage_unit(code, sort_order))," +
       " product_barcode(code)",
     )
@@ -26,6 +26,8 @@ export async function getCatalog(domain = "fnb") {
     ...p,
     vendors: (p.product_vendor ?? []).map((v) => ({
       vendor_id: v.vendor_id, name: v.vendor?.name, price: v.current_price, primary: v.is_primary,
+      packages_per_case: v.packages_per_case, usage_per_package: v.usage_per_package,
+      package_unit: v.package_unit, vendor_sku: v.vendor_sku,
     })),
     locations: (p.product_location ?? []).map((l) => ({
       location_id: l.location_id, name: l.location?.name, primary: l.is_primary,
@@ -56,6 +58,8 @@ export async function createProduct(p) {
   if (p.vendors?.length)
     await supabase.from("product_vendor").insert(p.vendors.map((v) => ({
       product_id: id, vendor_id: v.vendor_id, current_price: v.price, is_primary: v.primary,
+      packages_per_case: v.packages_per_case ?? null, usage_per_package: v.usage_per_package ?? null,
+      package_unit: v.package_unit ?? null, vendor_sku: v.vendor_sku ?? null,
     })));
   if (p.locations?.length)
     await supabase.from("product_location").insert(p.locations.map((l) => ({
@@ -89,6 +93,8 @@ export async function updateProduct(p) {
   if (p.vendors?.length)
     await supabase.from("product_vendor").insert(p.vendors.map((v) => ({
       product_id: id, vendor_id: v.vendor_id, current_price: v.price, is_primary: v.primary,
+      packages_per_case: v.packages_per_case ?? null, usage_per_package: v.usage_per_package ?? null,
+      package_unit: v.package_unit ?? null, vendor_sku: v.vendor_sku ?? null,
     })));
   if (p.locations?.length)
     await supabase.from("product_location").insert(p.locations.map((l) => ({
@@ -143,6 +149,16 @@ export async function addStorageUnit(location_id, code, sort_order = 999) {
     .insert({ location_id, code, sort_order }).select("storage_unit_id").single();
   if (error) throw error;
   return data.storage_unit_id;
+}
+export async function renameStorageUnit(storage_unit_id, code) {
+  const { error } = await supabase.from("storage_unit").update({ code }).eq("storage_unit_id", storage_unit_id);
+  if (error) throw error;
+}
+export async function deleteStorageUnit(storage_unit_id) {
+  // unassign any products sitting on this shelf, then remove it
+  await supabase.from("product_location").update({ storage_unit_id: null }).eq("storage_unit_id", storage_unit_id);
+  const { error } = await supabase.from("storage_unit").delete().eq("storage_unit_id", storage_unit_id);
+  if (error) throw error;
 }
 // Assign (or clear) a product's shelf within a location. Creates the product↔location link if needed.
 export async function setProductShelf(product_id, location_id, storage_unit_id) {
@@ -217,6 +233,18 @@ export async function getItemCounts(productId, days = 400) {
 }
 export async function updateCount(id, fields) {
   const { error } = await supabase.from("stock_count").update(fields).eq("stock_count_id", id);
+  if (error) throw error;
+}
+// Change how an item is measured/counted (from the item editor).
+export async function setProductMeasure(product_id, m) {
+  const ppc = Number(m.packages_per_case) || 1, upp = Number(m.usage_per_package) || 1;
+  const patch = {
+    usage_measure: m.usage_measure || "each", count_unit: m.usage_measure || "each",
+    usage_per_package: upp, packages_per_case: ppc,
+    count_per_case: Math.max(ppc * upp, 0.0001),
+  };
+  if (m.count_whole_only !== undefined) patch.count_whole_only = !!m.count_whole_only;
+  const { error } = await supabase.from("product").update(patch).eq("product_id", product_id);
   if (error) throw error;
 }
 export async function setRecountFlag(productId, needs, note) {
@@ -398,13 +426,16 @@ export async function getReceivables(domain = "fnb") {
   const listId = await ensureOpenList(domain);
   const { data, error } = await supabase.from("shopping_line")
     .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status, order_unit," +
-      " product(name, count_per_case, count_unit, package_unit, packages_per_case, usage_per_package, usage_measure, buy_by, purchase_unit, product_vendor(vendor_id, current_price))," +
+      " product(name, count_per_case, count_unit, package_unit, packages_per_case, usage_per_package, usage_measure, buy_by, purchase_unit, product_vendor(vendor_id, current_price, packages_per_case, usage_per_package))," +
       " vendor(name)")
     .eq("shopping_list_id", listId).eq("status", "purchased").order("shopping_line_id");
   if (error) throw error;
   return (data ?? []).map((l) => {
     const pv = (l.product?.product_vendor ?? []).find((v) => v.vendor_id === l.vendor_id);
+    const vppc = Number(pv?.packages_per_case) || Number(l.product?.packages_per_case) || 1;
+    const vupp = Number(pv?.usage_per_package) || Number(l.product?.usage_per_package) || 1;
     return {
+      vendor_units_per_case: vppc * vupp, vendor_units_per_package: vupp,
       shopping_line_id: l.shopping_line_id, product_id: l.product_id, vendor_id: l.vendor_id,
       qty: l.qty, unit_cost: l.unit_cost ?? pv?.current_price ?? null, order_unit: l.order_unit || l.product?.buy_by || "case",
       product_name: l.product?.name, count_per_case: l.product?.count_per_case,
@@ -460,8 +491,9 @@ export async function receiveRows(rows, received_date) {
     }).select("receipt_id").single();
     if (error) throw error;
     for (const ln of group) {
-      const upc = Number(ln.count_per_case) || 1;         // units per case
-      const upp = Number(ln.units_per_package) || 1;      // units per package
+      // Use THIS vendor's pack sizing when known — a case differs by vendor.
+      const upc = Number(ln.vendor_units_per_case) || Number(ln.count_per_case) || 1;   // units per case
+      const upp = Number(ln.vendor_units_per_package) || Number(ln.units_per_package) || 1;  // units per package
       const ou = ln.order_unit || "case";
       const factor = ou === "case" ? upc : ou === "package" ? upp : 1;   // units per ordered unit
       const qcu = (Number(ln.qty) || 0) * factor;                        // count units received
