@@ -435,7 +435,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
           </div>
           <div className="frow">
             <div className="field"><label>Packages per case</label><input type="number" min="1" step="0.001" value={p.packages_per_case ?? ""} onChange={(e) => set("packages_per_case", num(e.target.value))} /></div>
-            <div className="field"><label>Par (in {p.buy_by === "package" ? "packages" : "cases"})</label><input type="number" step="0.1" value={p.par_level ?? ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
+            <div className="field"><label>Par (in {p.buy_by === "package" ? "packages" : "cases"})</label><input type="number" step="0.1" value={p.not_stocked ? 0 : (p.par_level ?? "")} disabled={!!p.not_stocked} title={p.not_stocked ? "Not-stocked items have no par (won't auto-reorder)" : ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
           </div>
           <div className="frow">
             <div className="field"><label>Size unit (what's in a package)</label><input value={p.usage_measure || ""} onChange={(e) => set("usage_measure", e.target.value)} placeholder="each, lb, oz, ct…" /></div>
@@ -453,7 +453,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             Count whole units only — no partial/each (e.g. fountain BIBs)
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
-            <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => set("not_stocked", e.target.checked)} />
+            <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => setP((s) => ({ ...s, not_stocked: e.target.checked, ...(e.target.checked ? { par_level: 0 } : {}) }))} />
             Not stocked — we don't normally carry this (hidden from counts)
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
