@@ -222,6 +222,18 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
   const [sortBy, setSortBy] = useState("az");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [showNotStocked, setShowNotStocked] = useState(false);
+  // Clone: copy an item's setup as a brand-new product (no counts/history), ready to tweak.
+  const cloneProduct = (p) => {
+    const c = JSON.parse(JSON.stringify(p));
+    delete c.product_id; delete c.created_at; delete c.updated_at;
+    delete c.product_vendor; delete c.product_location; delete c.product_barcode;
+    c.name = (p.name || "Item") + " (copy)";
+    c.barcodes = [];                                   // barcodes are unique per product
+    c.needs_recount = false; c.recount_note = null;
+    c.vendors = (p.vendors || []).map((v) => ({ ...v }));   // keep vendor pricing/pack sizes
+    c.locations = (p.locations || []).map((l) => ({ ...l })); // keep storage locations
+    setEdit(c);
+  };
   useEffect(() => {
     if (jumpTo == null) return;
     const p = products.find((x) => x.product_id === jumpTo);
@@ -329,6 +341,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
 
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button className="mini" onClick={() => setEdit(JSON.parse(JSON.stringify(p)))}>Edit</button>
+                <button className="mini" title="Duplicate this item as a new product" onClick={() => cloneProduct(p)}>Clone</button>
                 <button className="mini" style={{ borderColor: p.needs_recount ? "#E0392B" : undefined, color: p.needs_recount ? "#E0392B" : undefined }} onClick={async () => { try { await db.setRecountFlag(p.product_id, !p.needs_recount); reload(); } catch (e) { alert(e.message); } }}>{p.needs_recount ? "🚩 Clear" : "⚑ Flag"}</button>
                 <button className="mini mini-danger" onClick={async () => { if (confirm(`Remove ${p.name}?`)) { await db.deleteProduct(p.product_id); reload(); } }}>Remove</button>
               </div>
@@ -378,7 +391,8 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
   return (
     <div className="overlay" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <h2>{isNew ? "New product" : p.name}</h2>
+        <h2 style={{ marginBottom: 2 }}>{isNew ? "New product" : p.name}</h2>
+        {!isNew && <button className="mini" style={{ marginBottom: 8 }} title="Duplicate as a new product" onClick={() => { const c = JSON.parse(JSON.stringify(p)); delete c.product_id; delete c.created_at; delete c.updated_at; c.name = (p.name || "Item") + " (copy)"; c.barcodes = []; c.needs_recount = false; c.recount_note = null; setP(c); }}>⧉ Clone this product</button>}
         <div className="group">
           <div className="group-t">Photo</div>
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
@@ -785,6 +799,7 @@ function Receive({ products, vendors, reload }) {
       qty: num(r.qty), unit_cost: (r.case_cost !== "" && r.case_cost != null) ? num(r.case_cost) : null,
       count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
       units_per_package: r.units_per_package ?? byId[r.product_id]?.usage_per_package ?? 1,
+      vendor_units_per_case: r.vendor_units_per_case ?? null, vendor_units_per_package: r.vendor_units_per_package ?? null,
       order_unit: r.order_unit || "case",
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
