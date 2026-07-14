@@ -48,7 +48,7 @@ export async function createProduct(p) {
     buy_by: p.buy_by || "case",
     usage_measure: p.usage_measure || p.count_unit || "each",
     usage_per_package: Number(p.usage_per_package) || 1,
-    use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
+    use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
   }).select("product_id").single();
   if (error) throw error;
@@ -80,7 +80,7 @@ export async function updateProduct(p) {
     buy_by: p.buy_by || "case",
     usage_measure: p.usage_measure || p.count_unit || "each",
     usage_per_package: Number(p.usage_per_package) || 1,
-    use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.par_level, image_url: p.image_url ?? null,
+    use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
     updated_at: new Date().toISOString(),
   }).eq("product_id", id);
