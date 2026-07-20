@@ -345,9 +345,10 @@ export async function getReceipts(days = 120) {
 }
 export async function getCounts(days = 120) {
   const since = new Date(Date.now() - days * 864e5).toISOString();
+  // Newest first + a high cap so recent counts are never dropped by the default 1000-row limit.
   const { data, error } = await supabase.from("stock_count")
     .select("product_id, location_id, qty, counted_at").gte("counted_at", since)
-    .order("counted_at", { ascending: true });
+    .order("counted_at", { ascending: false }).limit(100000);
   if (error) throw error;
   return data ?? [];
 }
