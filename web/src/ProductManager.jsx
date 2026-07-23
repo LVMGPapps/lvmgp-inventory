@@ -1672,7 +1672,14 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   const attnRank = { "flagged": 0, "received, not counted": 1, "never counted": 2 };
   attention.sort((a, b) => (attnRank[a.rs[0]] - attnRank[b.rs[0]]) || a.p.name.localeCompare(b.p.name));
 
+  // Not counted this week (stocked items still carrying old stock)
+  const wkStartISO = weekStart(new Date().toISOString().slice(0, 10)).toISOString().slice(0, 10);
+  const countedThisWk = {};
+  for (const c of counts || []) if (String(c.counted_at).slice(0, 10) >= wkStartISO) countedThisWk[c.product_id] = true;
+  const notCountedStocked = products.filter((p) => !p.backup_for && !p.not_stocked && !countedThisWk[p.product_id]).length;
+
   const reports = [
+    ["notcounted", `Not counted this week (${notCountedStocked})`, <NotCountedReport products={products} counts={counts} locations={locations} onOpen={setDetail} reload={reload} />],
     ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} openItem={openItem} />],
     ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} reload={reload} />],
     ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
@@ -1692,6 +1699,7 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
         {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true, () => setOpen("valitem"))}
         {tile("Spent · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`, false, () => setOpen("spend"))}
         {tile("Needs attention", attention.length, attention.length ? "tap to see the list" : "all clear ✓", false, () => setOpen("attention"))}
+        {tile("Not counted", notCountedStocked, notCountedStocked ? "stocked · this week" : "all counted ✓", false, () => setOpen("notcounted"))}
         {tile("To buy / awaiting", `${ship.open} / ${ship.purchased}`, "open · purchased")}
       </div>
 
@@ -1720,6 +1728,75 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
         </div>
       ))}
       {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+    </div>
+  );
+}
+
+function NotCountedReport({ products, counts, locations, onOpen, reload }) {
+  const [busy, setBusy] = useState(false);
+  const today = new Date().toISOString().slice(0, 10);
+  const wkStart = weekStart(today).toISOString().slice(0, 10);
+  const locName = Object.fromEntries((locations || []).map((l) => [l.location_id, l.name]));
+
+  // latest count per (item, location); and which items were counted at all this week
+  const latest = {}, countedThisWeek = {};
+  for (const c of counts || []) {
+    const d = String(c.counted_at).slice(0, 10), t = new Date(c.counted_at).getTime();
+    const k = c.product_id + "|" + c.location_id;
+    if (!latest[k] || t > latest[k].t) latest[k] = { t, d, qty: Number(c.qty) || 0, location_id: c.location_id };
+    if (d >= wkStart) countedThisWeek[c.product_id] = true;
+  }
+  const build = (p) => {
+    const ls = Object.entries(latest).filter(([k]) => k.startsWith(p.product_id + "|")).map(([, v]) => v);
+    return { p, locs: ls, carried: ls.reduce((a, x) => a + x.qty, 0), lastD: ls.length ? ls.map((x) => x.d).sort().pop() : null };
+  };
+  const missing = products.filter((p) => !p.backup_for && !countedThisWeek[p.product_id]).map(build)
+    .sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
+  const stocked = missing.filter((r) => !r.p.not_stocked);
+  const unstocked = missing.filter((r) => r.p.not_stocked);
+  const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "never";
+
+  async function zero(list) {
+    const entries = [];
+    for (const r of list) for (const l of r.locs) if (l.qty !== 0) entries.push({ product_id: r.p.product_id, location_id: l.location_id, cases: 0, loose: 0, qty: 0 });
+    if (!entries.length) { alert("Nothing to zero — these already read 0."); return; }
+    const names = list.filter((r) => r.carried > 0).map((r) => r.p.name);
+    if (!confirm(`Record a zero count (dated today) for ${names.length} item${names.length === 1 ? "" : "s"} that weren't counted this week?\n\n${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""}\n\nThis clears the stock they're still carrying from earlier counts.`)) return;
+    setBusy(true);
+    try { await db.postCounts(entries); reload && reload(); }
+    catch (e) { alert("Couldn't save: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+
+  const row = (r, assumeZero) => (
+    <div key={r.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto auto", alignItems: "center", gap: 8, cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
+      <div>
+        <b style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</b>
+        <div className="stat">{r.p.category || "Uncategorized"} · last counted {label(r.lastD)}{r.locs.length > 1 ? ` · ${r.locs.length} locations` : (r.locs[0] ? ` · ${locName[r.locs[0].location_id] || ""}` : "")}</div>
+      </div>
+      <div className="fig" style={{ textAlign: "right" }}>
+        {fmtQty(r.p, r.carried)}
+        <div className="stat" style={{ color: assumeZero ? "#B0271B" : "#B26A00" }}>{assumeZero ? "→ treat as 0" : "held from last count"}</div>
+      </div>
+      {assumeZero && <button className="mini" disabled={busy} onClick={(e) => { e.stopPropagation(); zero([r]); }}>Zero</button>}
+    </div>
+  );
+
+  if (!missing.length) return <div className="note">Everything stocked has been counted this week. ✓</div>;
+  return (
+    <div>
+      <div className="stat" style={{ marginBottom: 8 }}>Not counted since <b>{label(wkStart)}</b> (this count week). Stocked items still carry stock from an earlier count — that's what quietly inflates on-hand and the shopping list.</div>
+
+      <div className="secthead" style={{ marginTop: 4 }}>Stocked · not counted ({stocked.length}) — assume zero</div>
+      {stocked.length === 0 ? <div className="note">None — every stocked item was counted. ✓</div> : (
+        <div>
+          <button className="btn btn-primary" disabled={busy} style={{ marginBottom: 8 }} onClick={() => zero(stocked)}>Zero all {stocked.filter((r) => r.carried > 0).length} carrying stock</button>
+          {stocked.map((r) => row(r, true))}
+        </div>
+      )}
+
+      <div className="secthead" style={{ marginTop: 16 }}>Not stocked · not counted ({unstocked.length}) — holding last count</div>
+      {unstocked.length === 0 ? <div className="note">None.</div> : <div>{unstocked.map((r) => row(r, false))}</div>}
     </div>
   );
 }
