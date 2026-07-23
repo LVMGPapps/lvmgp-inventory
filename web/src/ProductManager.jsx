@@ -589,6 +589,12 @@ function Count({ products, locations, onhand, reload }) {
   const [finding, setFinding] = useState(false);
   const [focusId, setFocusId] = useState(null);
   const [flaggedOnly, setFlaggedOnly] = useState(false);
+  // Weekly count = a complete statement of a section (blanks become 0).
+  // Spot count = a single-item correction (nothing else is touched).
+  const [weekly, setWeekly] = useState(() => { try { return JSON.parse(localStorage.getItem("lvmgp_weekly") || "null"); } catch { return null; } });
+  const [review, setReview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const saveWeekly = (w) => { setWeekly(w); try { w ? localStorage.setItem("lvmgp_weekly", JSON.stringify(w)) : localStorage.removeItem("lvmgp_weekly"); } catch {} };
   const flaggedCount = products.filter((p) => p.needs_recount).length;
   const setRow = (key, f, v) => setDraft((d) => ({ ...d, [key]: { ...(d[key] || {}), [f]: v } }));
 
@@ -620,14 +626,20 @@ function Count({ products, locations, onhand, reload }) {
   const orderedGroups = Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
   const entered = Object.entries(draft).filter(([k, e]) => ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== ""));
 
-  async function save() {
-    const entries = entered.map(([k, e]) => {
+  // What you actually typed, turned into count rows.
+  function draftEntries() {
+    return entered.map(([k, e]) => {
       const pid = Number(k);
       const p = products.find((x) => x.product_id === pid);
       const locId2 = loc ? loc.location_id : ((p.locations || []).find((l) => l.primary)?.location_id ?? (p.locations || [])[0]?.location_id ?? null);
       const units = (num(e.cases) || 0) * usagePerCase(p) + (num(e.packages) || 0) * usagePerPack(p) + (num(e.units) || 0) + (num(e.loose) || 0);
       return { product_id: pid, location_id: locId2, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * usagePerCase(p), qty: units };
     }).filter((e) => e.location_id != null);
+  }
+
+  // SPOT COUNT — saves only what you typed. Nothing else is touched.
+  async function save() {
+    const entries = draftEntries();
     if (!entries.length) { alert("These items don't have a location set yet — add one in Catalog, or pick a location above."); return; }
     try {
       await db.postCounts(entries);
@@ -636,6 +648,39 @@ function Count({ products, locations, onhand, reload }) {
     } catch (err) {
       alert("Couldn't save the count: " + (err.message || err));
     }
+  }
+
+  // WEEKLY COUNT — submitting a section says "this is everything here now."
+  // Anything in the section you left blank is proposed as zero, for your review.
+  function submitSection() {
+    if (!loc) { alert("Pick the section you just counted."); return; }
+    const typed = new Set(entered.map(([k]) => Number(k)));
+    const all = products.filter((p) => !p.backup_for && (p.locations || []).some((l) => l.location_id === loc.location_id));
+    const missing = all.filter((p) => !typed.has(p.product_id))
+      .map((p) => ({ p, qty: Number(onhand[p.product_id]?.byLoc?.[loc.name]) || 0, action: "zero", c: "", k: "" }))
+      .sort((a, b) => b.qty - a.qty || a.p.name.localeCompare(b.p.name));
+    setReview({ missing, counted: typed.size });
+  }
+  const setRev = (pid, patch) => setReview((r) => ({ ...r, missing: r.missing.map((m) => m.p.product_id === pid ? { ...m, ...patch } : m) }));
+
+  async function confirmSection() {
+    const entries = draftEntries();
+    const toFlag = [];
+    for (const m of (review?.missing || [])) {
+      if (m.action === "flag") { toFlag.push(m.p.product_id); continue; }         // keep last count, mark for recount
+      let units = 0;
+      if (m.action === "count") units = (num(m.c) || 0) * usagePerCase(m.p) + (num(m.k) || 0) * usagePerPack(m.p);
+      entries.push({ product_id: m.p.product_id, location_id: loc.location_id, cases: num(m.c) || 0, loose: units - (num(m.c) || 0) * usagePerCase(m.p), qty: units });
+    }
+    setBusy(true);
+    try {
+      if (entries.length) await db.postCounts(entries);
+      for (const pid of toFlag) { try { await db.setRecountFlag(pid, true, "not counted during weekly count"); } catch {} }
+      for (const e of entries) { const p = products.find((x) => x.product_id === e.product_id); if (p?.needs_recount && !toFlag.includes(e.product_id)) { try { await db.setRecountFlag(e.product_id, false); } catch {} } }
+      saveWeekly({ ...(weekly || { started: new Date().toISOString(), done: {} }), done: { ...((weekly && weekly.done) || {}), [loc.location_id]: new Date().toISOString() } });
+      setNote(entries.length); setDraft({}); setReview(null); setLocId(""); reload();
+    } catch (err) { alert("Couldn't submit the section: " + (err.message || err)); }
+    finally { setBusy(false); }
   }
 
   function onFound(p) {
@@ -682,11 +727,80 @@ function Count({ products, locations, onhand, reload }) {
         {flaggedCount > 0 && <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : { borderColor: "#E0392B", color: "#E0392B" }}>🚩 {flaggedCount}</button>}
         <button className="mini" title={loc ? `Print a blank count sheet for ${loc.name}` : "Print blank count sheets for all areas"} onClick={() => printCountSheet(products, locations, locId)}>🖨 Print{loc ? "" : " all"}</button>
         <button className="mini" onClick={() => setFinding(true)}>📷 Find</button>
-        <button className="btn btn-primary" disabled={!entered.length} onClick={save}>Save {entered.length || ""} count{entered.length === 1 ? "" : "s"}</button>
+        {weekly && loc
+          ? <button className="btn btn-primary" disabled={busy} onClick={submitSection}>Submit {loc.name} ›</button>
+          : <button className="btn btn-primary" disabled={!entered.length} onClick={save}>Save {entered.length || ""} count{entered.length === 1 ? "" : "s"}</button>}
       </div>
+
+      {weekly ? (
+        <div className="ok" style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <b>Weekly count in progress — {Object.keys(weekly.done || {}).length} of {locations.length} sections submitted</b>
+            <button className="mini" onClick={() => { if (confirm("Finish the weekly count? Sections you haven't submitted stay as they were.")) saveWeekly(null); }}>Finish</button>
+          </div>
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
+            {locations.map((l) => { const d = (weekly.done || {})[l.location_id]; return (
+              <button key={l.location_id} className="bchip" onClick={() => { setLocId(String(l.location_id)); setDraft({}); setQ(""); }}
+                style={{ cursor: "pointer", background: d ? "#E6F4F0" : "#fff", borderColor: d ? "#0E7C6B" : "#E6E1D6", color: d ? "#0a5c50" : "#555" }}>
+                {d ? "✓ " : ""}{l.name}
+              </button>
+            );})}
+          </div>
+          <div className="stat" style={{ marginTop: 6 }}>Submitting a section records it as complete: anything you left blank there is proposed as <b>0</b> for your review first.</div>
+        </div>
+      ) : (
+        <div className="toolbar" style={{ marginBottom: 10 }}>
+          <button className="mini" onClick={() => saveWeekly({ started: new Date().toISOString(), done: {} })}>▶ Start weekly count</button>
+          <span className="stat">Otherwise this is a <b>spot count</b> — it updates only the items you enter and zeroes nothing.</span>
+        </div>
+      )}
+
       <p className="stat" style={{ margin: "0 2px 12px" }}>Items list in shelf order (A1, A2, …). Count cases and loose separately — the total is figured for you. Each location is a partial count; on-hand sums across locations.</p>
       {note > 0 && <div className="ok">Saved {note} count{note === 1 ? "" : "s"}. On-hand updated.</div>}
       {!loc && <div className="note" style={{ marginBottom: 14 }}>Pick a location above to count the items stored there — they'll be sorted by shelf.</div>}
+
+      {review && (
+        <div className="overlay" onClick={() => setReview(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(640px,100%)" }}>
+            <h2>Submit {loc?.name}</h2>
+            <div className="stat" style={{ marginBottom: 10 }}>
+              You counted <b>{review.counted}</b> item{review.counted === 1 ? "" : "s"} here. The <b>{review.missing.length}</b> below weren't counted, so they'll be recorded as <b>0</b> — that's what keeps old stock from lingering. Change a count, flag it for recount (keeps its current number), or confirm.
+            </div>
+            {review.missing.filter((m) => m.qty > 0).length > 0 && (
+              <div className="note" style={{ borderColor: "#E0392B", background: "#FFF6F5", marginBottom: 8 }}>
+                <b style={{ color: "#B0271B" }}>{review.missing.filter((m) => m.qty > 0).length} still show stock here</b> and will drop to 0.
+              </div>
+            )}
+            <div style={{ maxHeight: "50vh", overflowY: "auto" }}>
+              {review.missing.length === 0 ? <div className="note">Everything in {loc?.name} was counted. ✓</div> : review.missing.map((m) => {
+                const showCase = (Number(m.p.packages_per_case) || 1) > 1;
+                return (
+                <div className="crow" key={m.p.product_id} style={{ gridTemplateColumns: "1fr auto", alignItems: "center", gap: 8, opacity: m.qty > 0 || m.action !== "zero" ? 1 : 0.6 }}>
+                  <div>
+                    <b>{m.p.name}</b>
+                    <div className="stat">
+                      here now: {fmtQty(m.p, m.qty)}
+                      {m.action === "zero" && <b style={{ color: m.qty > 0 ? "#B0271B" : "#999" }}> → 0</b>}
+                      {m.action === "flag" && <b style={{ color: "#B26A00" }}> → 🚩 keeps {fmtQty(m.p, m.qty)}</b>}
+                      {m.action === "count" && <b style={{ color: "#0a5c50" }}> → {fmtQty(m.p, (num(m.c) || 0) * usagePerCase(m.p) + (num(m.k) || 0) * usagePerPack(m.p))}</b>}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    {showCase && <input className="fig" style={{ width: 52 }} type="number" min="0" placeholder="cs" value={m.c} onChange={(e) => setRev(m.p.product_id, { c: e.target.value, action: (e.target.value === "" && m.k === "") ? "zero" : "count" })} />}
+                    <input className="fig" style={{ width: 56 }} type="number" min="0" placeholder={pkgName(m.p, 2).slice(0, 4)} value={m.k} onChange={(e) => setRev(m.p.product_id, { k: e.target.value, action: (e.target.value === "" && m.c === "") ? "zero" : "count" })} />
+                    <button className="mini" title="Flag for recount — keeps its current number" style={m.action === "flag" ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : undefined}
+                      onClick={() => setRev(m.p.product_id, { action: m.action === "flag" ? "zero" : "flag", c: "", k: "" })}>🚩</button>
+                  </div>
+                </div>
+              );})}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+              <button className="btn btn-primary" disabled={busy} onClick={confirmSection}>Confirm &amp; submit {loc?.name}</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setReview(null)}>Back to counting</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {orderedGroups.map(([g, grp]) => (
         <div className="vgroup" key={g}>
