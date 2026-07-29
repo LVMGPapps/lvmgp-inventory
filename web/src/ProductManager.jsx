@@ -1094,7 +1094,8 @@ function computeItemStats(products, counts, receipts) {
     const forecast = 0.6 * last + 0.4 * avg;
     const onhandUnits = wtotal(it, weeks[weeks.length - 1]);
     const target = Math.max(Number(p.par_level) || 0, forecast / cpc);
-    const suggestCases = Math.max(0, Math.ceil(target - onhandUnits / cpc - 1e-9));
+    let suggestCases = Math.max(0, Math.ceil(target - onhandUnits / cpc - 1e-9));
+    if (p.not_stocked || (Number(p.par_level) || 0) <= 0) suggestCases = 0;   // par 0 / not-stocked are never "needed"
     stats[p.product_id] = { onhandUnits, usedUnits: last, suggestCases };
   }
   return stats;
@@ -1140,6 +1141,7 @@ function computeSuggestions(products, counts, receipts, locations) {
     const onhandCases = parWeekTotal(p, it, weeks[weeks.length - 1]) / cpc;   // in-use BIB/Icee is partial: excluded from par stock
     const usageCases = forecast / cpc;
     const parCases = Number(p.par_level) || 0;
+    if (parCases <= 0) continue;                               // no par set = never auto-suggested (add by hand if needed)
     const target = Math.max(parCases, usageCases);             // build up to par, or a week's usage if higher
     const cases = Math.ceil(target - onhandCases - 1e-9);
     if (cases >= 1) out.push({ product: p, cases, target: +target.toFixed(1), usageCases: +usageCases.toFixed(1), onhandCases: +onhandCases.toFixed(1) });
@@ -1225,12 +1227,17 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
                   : <button className="mini" onClick={() => purchaseVendor(k === "none" ? null : Number(k), false)}>Undo all</button>}
               </span>
             </div>
-            {g.map((l) => {
+            {g.slice().sort((a, b) => {
+              const oa = (byId[a.product_id]?.not_stocked || (Number(byId[a.product_id]?.par_level) || 0) <= 0) ? 1 : 0;
+              const ob = (byId[b.product_id]?.not_stocked || (Number(byId[b.product_id]?.par_level) || 0) <= 0) ? 1 : 0;
+              return oa - ob;
+            }).map((l) => {
               const p = byId[l.product_id]; if (!p) return null;
               const done = l.status === "purchased";
+              const optional = p.not_stocked || (Number(p.par_level) || 0) <= 0;
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
-                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{fmtQty(p, stats[p.product_id]?.usedUnits ?? 0)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
+                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{optional && <span className="bchip" style={{ marginLeft: 6, background: "#EEE", borderColor: "#B7BBC4", color: "#666" }}>{p.not_stocked ? "not stocked" : "no par"}</span>}{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{fmtQty(p, stats[p.product_id]?.usedUnits ?? 0)}</b>{optional ? "" : <> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</>}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
