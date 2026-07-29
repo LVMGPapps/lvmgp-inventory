@@ -1188,16 +1188,40 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   async function purchase(line, on) { await db.updateShoppingLine(line.shopping_line_id, { status: on ? "purchased" : "open" }); load(); }
   async function purchaseVendor(vid, on) { await db.setVendorStatus(listId, vid, on ? "purchased" : "open", on ? "open" : "purchased"); load(); }
   async function remove(line) { await db.removeShoppingLine(line.shopping_line_id); load(); }
+  const [building, setBuilding] = useState(false);
   async function buildFromUsage() {
-    const have = new Set(lines.map((l) => l.product_id));
-    let added = 0;
-    for (const s of suggestions) {
-      if (have.has(s.product.product_id)) continue;
-      const v = s.product.vendors.find((x) => x.primary) || s.product.vendors[0];
-      await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null, order_unit: s.product.buy_by || "case" });
-      added++;
-    }
-    setNote(added ? `Added ${added} item${added === 1 ? "" : "s"} from last week's usage. Review the quantities, then mark Purchased.` : "Everything suggested is already on your list.");
+    if (building) return;
+    setBuilding(true);
+    try {
+      const fresh = await db.getShopping();                        // live list, not stale state
+      const have = new Set((fresh.lines || []).map((l) => l.product_id));
+      let added = 0;
+      for (const s of suggestions) {
+        if (have.has(s.product.product_id)) continue;
+        have.add(s.product.product_id);                            // guard within the loop too
+        const v = s.product.vendors.find((x) => x.primary) || s.product.vendors[0];
+        await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null, order_unit: s.product.buy_by || "case" });
+        added++;
+      }
+      setNote(added ? `Added ${added} item${added === 1 ? "" : "s"} from last week's usage. Review the quantities, then mark Purchased.` : "Everything suggested is already on your list.");
+      await load();
+    } catch (e) { setNote("Couldn't build: " + (e.message || e)); }
+    finally { setBuilding(false); }
+  }
+  async function dedupe() {
+    const seen = new Set(); const dups = [];
+    for (const l of lines) { if (seen.has(l.product_id)) dups.push(l); else seen.add(l.product_id); }
+    if (!dups.length) { setNote("No duplicates on the list."); return; }
+    for (const l of dups) await db.removeShoppingLine(l.shopping_line_id);
+    setNote(`Removed ${dups.length} duplicate line${dups.length === 1 ? "" : "s"}.`);
+    load();
+  }
+  async function clearOptional() {
+    const opt = lines.filter((l) => { const p = byId[l.product_id]; return p && (p.not_stocked || (Number(p.par_level) || 0) <= 0); });
+    if (!opt.length) { setNote("No optional (no-par / not-stocked) items on the list."); return; }
+    if (!confirm(`Remove ${opt.length} optional item${opt.length === 1 ? "" : "s"} (no par / not stocked) from the list?`)) return;
+    for (const l of opt) await db.removeShoppingLine(l.shopping_line_id);
+    setNote(`Removed ${opt.length} optional item${opt.length === 1 ? "" : "s"}.`);
     load();
   }
 
@@ -1209,7 +1233,9 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
     <div>
       <div className="toolbar">
         <Picker products={products} exclude={lines.map((l) => l.product_id)} onPick={add} />
-        <button className="btn btn-ghost" disabled={!suggestions.length} onClick={buildFromUsage}>🧮 Build from usage{suggestions.length ? ` (${suggestions.length})` : ""}</button>
+        <button className="btn btn-ghost" disabled={building || !suggestions.length} onClick={buildFromUsage}>{building ? "Building…" : `🧮 Build from usage${suggestions.length ? ` (${suggestions.length})` : ""}`}</button>
+        {(() => { const seen = new Set(); const dupCount = lines.filter((l) => seen.has(l.product_id) ? true : (seen.add(l.product_id), false)).length; return dupCount > 0 ? <button className="mini mini-danger" onClick={dedupe}>Remove {dupCount} duplicate{dupCount === 1 ? "" : "s"}</button> : null; })()}
+        {lines.some((l) => { const p = byId[l.product_id]; return p && (p.not_stocked || (Number(p.par_level) || 0) <= 0); }) && <button className="mini" onClick={clearOptional}>Clear optional</button>}
       </div>
       {note && <div className="ok">{note}</div>}
       <div className="note" style={{ marginBottom: 14 }}>Add items by hand, or tap <b>Build from usage</b> to fill the order up to each item's <b>par</b> (or a week's usage if that's higher), minus what's on hand, rounded up to whole cases. Then mark items <b>Purchased</b> — one at a time or a whole vendor at once — and they move to the <b>Receive</b> tab.</div>
