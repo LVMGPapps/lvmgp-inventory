@@ -1154,6 +1154,7 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   const [listId, setListId] = useState(null);
   const [lines, setLines] = useState(null);
   const [note, setNote] = useState("");
+  const [building, setBuilding] = useState(false);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
 
@@ -1188,7 +1189,6 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   async function purchase(line, on) { await db.updateShoppingLine(line.shopping_line_id, { status: on ? "purchased" : "open" }); load(); }
   async function purchaseVendor(vid, on) { await db.setVendorStatus(listId, vid, on ? "purchased" : "open", on ? "open" : "purchased"); load(); }
   async function remove(line) { await db.removeShoppingLine(line.shopping_line_id); load(); }
-  const [building, setBuilding] = useState(false);
   async function buildFromUsage() {
     if (building) return;
     setBuilding(true);
