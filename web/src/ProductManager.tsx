@@ -35,17 +35,15 @@ function parStock(p, oh) {
 
 function fmtQty(p, units) {
   units = Number(units) || 0;
-  const upc = usagePerCase(p), upp = usagePerPack(p);
+  const upp = usagePerPack(p) || 1;                    // size units per package (oz/each/slice — cost only)
+  const ppc = Number(p.packages_per_case) || 1;        // packages per case
+  const totalPkgs = units / upp;                       // express everything in PACKAGES (never the size unit)
+  const cases = ppc > 1 ? Math.floor(totalPkgs / ppc + 1e-9) : 0;
+  const remPkgs = totalPkgs - cases * ppc;
+  const trim = (n) => { const r = Math.round(n * 100) / 100; return Number.isInteger(r) ? String(r) : String(r); };
   const parts = [];
-  let rem = units;
-  const cases = upc > upp ? Math.floor(rem / upc + 1e-9) : 0;
-  rem -= cases * upc;
-  const packs = Math.floor(rem / upp + 1e-9);
-  rem -= packs * upp;
-  const leftover = Math.round(rem * 100) / 100;
   if (cases) parts.push(`${cases} ${cases === 1 ? "case" : "cases"}`);
-  if (packs) parts.push(`${packs} ${pkgName(p, packs)}`);
-  if (leftover || !parts.length) parts.push(`${r1(leftover)} ${measure(p)}`);
+  if (remPkgs > 0.004 || !parts.length) parts.push(`${trim(remPkgs)} ${pkgName(p, Math.abs(remPkgs - 1) < 1e-9 ? 1 : 2)}`);
   return parts.join(", ");
 }
 
@@ -222,6 +220,18 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
   const [sortBy, setSortBy] = useState("az");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [showNotStocked, setShowNotStocked] = useState(false);
+  // Clone: copy an item's setup as a brand-new product (no counts/history), ready to tweak.
+  const cloneProduct = (p) => {
+    const c = JSON.parse(JSON.stringify(p));
+    delete c.product_id; delete c.created_at; delete c.updated_at;
+    delete c.product_vendor; delete c.product_location; delete c.product_barcode;
+    c.name = (p.name || "Item") + " (copy)";
+    c.barcodes = [];                                   // barcodes are unique per product
+    c.needs_recount = false; c.recount_note = null;
+    c.vendors = (p.vendors || []).map((v) => ({ ...v }));   // keep vendor pricing/pack sizes
+    c.locations = (p.locations || []).map((l) => ({ ...l })); // keep storage locations
+    setEdit(c);
+  };
   useEffect(() => {
     if (jumpTo == null) return;
     const p = products.find((x) => x.product_id === jumpTo);
@@ -329,6 +339,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
 
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button className="mini" onClick={() => setEdit(JSON.parse(JSON.stringify(p)))}>Edit</button>
+                <button className="mini" title="Duplicate this item as a new product" onClick={() => cloneProduct(p)}>Clone</button>
                 <button className="mini" style={{ borderColor: p.needs_recount ? "#E0392B" : undefined, color: p.needs_recount ? "#E0392B" : undefined }} onClick={async () => { try { await db.setRecountFlag(p.product_id, !p.needs_recount); reload(); } catch (e) { alert(e.message); } }}>{p.needs_recount ? "🚩 Clear" : "⚑ Flag"}</button>
                 <button className="mini mini-danger" onClick={async () => { if (confirm(`Remove ${p.name}?`)) { await db.deleteProduct(p.product_id); reload(); } }}>Remove</button>
               </div>
@@ -336,7 +347,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
           );})}
         </div>
       )}
-      {edit && <Editor product={edit} products={products} vendors={vendors} locations={locations} units={units} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
+      {edit && <Editor key={edit.product_id ?? "new"} product={edit} products={products} vendors={vendors} locations={locations} units={units} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
       {finding && <Finder products={products} onClose={() => setFinding(false)} onFound={(p) => { setQ(p.name); setFinding(false); }} />}
     </div>
   );
@@ -376,9 +387,13 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
   }
 
   return (
-    <div className="overlay" onClick={onClose}>
+    <div className="overlay">
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <h2>{isNew ? "New product" : p.name}</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <h2 style={{ marginBottom: 2 }}>{isNew ? "New product" : p.name}</h2>
+          <button className="mini" title="Close without saving" onClick={onClose}>✕</button>
+        </div>
+        {!isNew && <button className="mini" style={{ marginBottom: 8 }} title="Duplicate as a new product" onClick={() => { const c = JSON.parse(JSON.stringify(p)); delete c.product_id; delete c.created_at; delete c.updated_at; c.name = (p.name || "Item") + " (copy)"; c.barcodes = []; c.needs_recount = false; c.recount_note = null; setP(c); }}>⧉ Clone this product</button>}
         <div className="group">
           <div className="group-t">Photo</div>
           <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
@@ -421,7 +436,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
           </div>
           <div className="frow">
             <div className="field"><label>Packages per case</label><input type="number" min="1" step="0.001" value={p.packages_per_case ?? ""} onChange={(e) => set("packages_per_case", num(e.target.value))} /></div>
-            <div className="field"><label>Par (in {p.buy_by === "package" ? "packages" : "cases"})</label><input type="number" step="0.1" value={p.par_level ?? ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
+            <div className="field"><label>Par (in {p.buy_by === "package" ? "packages" : "cases"})</label><input type="number" step="0.1" value={p.not_stocked ? 0 : (p.par_level ?? "")} disabled={!!p.not_stocked} title={p.not_stocked ? "Not-stocked items have no par (won't auto-reorder)" : ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
           </div>
           <div className="frow">
             <div className="field"><label>Size unit (what's in a package)</label><input value={p.usage_measure || ""} onChange={(e) => set("usage_measure", e.target.value)} placeholder="each, lb, oz, ct…" /></div>
@@ -439,7 +454,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             Count whole units only — no partial/each (e.g. fountain BIBs)
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
-            <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => set("not_stocked", e.target.checked)} />
+            <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => setP((s) => ({ ...s, not_stocked: e.target.checked, ...(e.target.checked ? { par_level: 0 } : {}) }))} />
             Not stocked — we don't normally carry this (hidden from counts)
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
@@ -575,6 +590,12 @@ function Count({ products, locations, onhand, reload }) {
   const [finding, setFinding] = useState(false);
   const [focusId, setFocusId] = useState(null);
   const [flaggedOnly, setFlaggedOnly] = useState(false);
+  // Weekly count = a complete statement of a section (blanks become 0).
+  // Spot count = a single-item correction (nothing else is touched).
+  const [weekly, setWeekly] = useState(() => { try { return JSON.parse(localStorage.getItem("lvmgp_weekly") || "null"); } catch { return null; } });
+  const [review, setReview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const saveWeekly = (w) => { setWeekly(w); try { w ? localStorage.setItem("lvmgp_weekly", JSON.stringify(w)) : localStorage.removeItem("lvmgp_weekly"); } catch {} };
   const flaggedCount = products.filter((p) => p.needs_recount).length;
   const setRow = (key, f, v) => setDraft((d) => ({ ...d, [key]: { ...(d[key] || {}), [f]: v } }));
 
@@ -606,14 +627,20 @@ function Count({ products, locations, onhand, reload }) {
   const orderedGroups = Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
   const entered = Object.entries(draft).filter(([k, e]) => ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== ""));
 
-  async function save() {
-    const entries = entered.map(([k, e]) => {
+  // What you actually typed, turned into count rows.
+  function draftEntries() {
+    return entered.map(([k, e]) => {
       const pid = Number(k);
       const p = products.find((x) => x.product_id === pid);
       const locId2 = loc ? loc.location_id : ((p.locations || []).find((l) => l.primary)?.location_id ?? (p.locations || [])[0]?.location_id ?? null);
       const units = (num(e.cases) || 0) * usagePerCase(p) + (num(e.packages) || 0) * usagePerPack(p) + (num(e.units) || 0) + (num(e.loose) || 0);
       return { product_id: pid, location_id: locId2, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * usagePerCase(p), qty: units };
     }).filter((e) => e.location_id != null);
+  }
+
+  // SPOT COUNT — saves only what you typed. Nothing else is touched.
+  async function save() {
+    const entries = draftEntries();
     if (!entries.length) { alert("These items don't have a location set yet — add one in Catalog, or pick a location above."); return; }
     try {
       await db.postCounts(entries);
@@ -622,6 +649,39 @@ function Count({ products, locations, onhand, reload }) {
     } catch (err) {
       alert("Couldn't save the count: " + (err.message || err));
     }
+  }
+
+  // WEEKLY COUNT — submitting a section says "this is everything here now."
+  // Anything in the section you left blank is proposed as zero, for your review.
+  function submitSection() {
+    if (!loc) { alert("Pick the section you just counted."); return; }
+    const typed = new Set(entered.map(([k]) => Number(k)));
+    const all = products.filter((p) => !p.backup_for && (p.locations || []).some((l) => l.location_id === loc.location_id));
+    const missing = all.filter((p) => !typed.has(p.product_id))
+      .map((p) => ({ p, qty: Number(onhand[p.product_id]?.byLoc?.[loc.name]) || 0, action: "zero", c: "", k: "" }))
+      .sort((a, b) => b.qty - a.qty || a.p.name.localeCompare(b.p.name));
+    setReview({ missing, counted: typed.size });
+  }
+  const setRev = (pid, patch) => setReview((r) => ({ ...r, missing: r.missing.map((m) => m.p.product_id === pid ? { ...m, ...patch } : m) }));
+
+  async function confirmSection() {
+    const entries = draftEntries();
+    const toFlag = [];
+    for (const m of (review?.missing || [])) {
+      if (m.action === "flag") { toFlag.push(m.p.product_id); continue; }         // keep last count, mark for recount
+      let units = 0;
+      if (m.action === "count") units = (num(m.c) || 0) * usagePerCase(m.p) + (num(m.k) || 0) * usagePerPack(m.p);
+      entries.push({ product_id: m.p.product_id, location_id: loc.location_id, cases: num(m.c) || 0, loose: units - (num(m.c) || 0) * usagePerCase(m.p), qty: units });
+    }
+    setBusy(true);
+    try {
+      if (entries.length) await db.postCounts(entries);
+      for (const pid of toFlag) { try { await db.setRecountFlag(pid, true, "not counted during weekly count"); } catch {} }
+      for (const e of entries) { const p = products.find((x) => x.product_id === e.product_id); if (p?.needs_recount && !toFlag.includes(e.product_id)) { try { await db.setRecountFlag(e.product_id, false); } catch {} } }
+      saveWeekly({ ...(weekly || { started: new Date().toISOString(), done: {} }), done: { ...((weekly && weekly.done) || {}), [loc.location_id]: new Date().toISOString() } });
+      setNote(entries.length); setDraft({}); setReview(null); setLocId(""); reload();
+    } catch (err) { alert("Couldn't submit the section: " + (err.message || err)); }
+    finally { setBusy(false); }
   }
 
   function onFound(p) {
@@ -668,11 +728,80 @@ function Count({ products, locations, onhand, reload }) {
         {flaggedCount > 0 && <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : { borderColor: "#E0392B", color: "#E0392B" }}>🚩 {flaggedCount}</button>}
         <button className="mini" title={loc ? `Print a blank count sheet for ${loc.name}` : "Print blank count sheets for all areas"} onClick={() => printCountSheet(products, locations, locId)}>🖨 Print{loc ? "" : " all"}</button>
         <button className="mini" onClick={() => setFinding(true)}>📷 Find</button>
-        <button className="btn btn-primary" disabled={!entered.length} onClick={save}>Save {entered.length || ""} count{entered.length === 1 ? "" : "s"}</button>
+        {weekly && loc
+          ? <button className="btn btn-primary" disabled={busy} onClick={submitSection}>Submit {loc.name} ›</button>
+          : <button className="btn btn-primary" disabled={!entered.length} onClick={save}>Save {entered.length || ""} count{entered.length === 1 ? "" : "s"}</button>}
       </div>
+
+      {weekly ? (
+        <div className="ok" style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <b>Weekly count in progress — {Object.keys(weekly.done || {}).length} of {locations.length} sections submitted</b>
+            <button className="mini" onClick={() => { if (confirm("Finish the weekly count? Sections you haven't submitted stay as they were.")) saveWeekly(null); }}>Finish</button>
+          </div>
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
+            {locations.map((l) => { const d = (weekly.done || {})[l.location_id]; return (
+              <button key={l.location_id} className="bchip" onClick={() => { setLocId(String(l.location_id)); setDraft({}); setQ(""); }}
+                style={{ cursor: "pointer", background: d ? "#E6F4F0" : "#fff", borderColor: d ? "#0E7C6B" : "#E6E1D6", color: d ? "#0a5c50" : "#555" }}>
+                {d ? "✓ " : ""}{l.name}
+              </button>
+            );})}
+          </div>
+          <div className="stat" style={{ marginTop: 6 }}>Submitting a section records it as complete: anything you left blank there is proposed as <b>0</b> for your review first.</div>
+        </div>
+      ) : (
+        <div className="toolbar" style={{ marginBottom: 10 }}>
+          <button className="mini" onClick={() => saveWeekly({ started: new Date().toISOString(), done: {} })}>▶ Start weekly count</button>
+          <span className="stat">Otherwise this is a <b>spot count</b> — it updates only the items you enter and zeroes nothing.</span>
+        </div>
+      )}
+
       <p className="stat" style={{ margin: "0 2px 12px" }}>Items list in shelf order (A1, A2, …). Count cases and loose separately — the total is figured for you. Each location is a partial count; on-hand sums across locations.</p>
       {note > 0 && <div className="ok">Saved {note} count{note === 1 ? "" : "s"}. On-hand updated.</div>}
       {!loc && <div className="note" style={{ marginBottom: 14 }}>Pick a location above to count the items stored there — they'll be sorted by shelf.</div>}
+
+      {review && (
+        <div className="overlay" onClick={() => setReview(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(640px,100%)" }}>
+            <h2>Submit {loc?.name}</h2>
+            <div className="stat" style={{ marginBottom: 10 }}>
+              You counted <b>{review.counted}</b> item{review.counted === 1 ? "" : "s"} here. The <b>{review.missing.length}</b> below weren't counted, so they'll be recorded as <b>0</b> — that's what keeps old stock from lingering. Change a count, flag it for recount (keeps its current number), or confirm.
+            </div>
+            {review.missing.filter((m) => m.qty > 0).length > 0 && (
+              <div className="note" style={{ borderColor: "#E0392B", background: "#FFF6F5", marginBottom: 8 }}>
+                <b style={{ color: "#B0271B" }}>{review.missing.filter((m) => m.qty > 0).length} still show stock here</b> and will drop to 0.
+              </div>
+            )}
+            <div style={{ maxHeight: "50vh", overflowY: "auto" }}>
+              {review.missing.length === 0 ? <div className="note">Everything in {loc?.name} was counted. ✓</div> : review.missing.map((m) => {
+                const showCase = (Number(m.p.packages_per_case) || 1) > 1;
+                return (
+                <div className="crow" key={m.p.product_id} style={{ gridTemplateColumns: "1fr auto", alignItems: "center", gap: 8, opacity: m.qty > 0 || m.action !== "zero" ? 1 : 0.6 }}>
+                  <div>
+                    <b>{m.p.name}</b>
+                    <div className="stat">
+                      here now: {fmtQty(m.p, m.qty)}
+                      {m.action === "zero" && <b style={{ color: m.qty > 0 ? "#B0271B" : "#999" }}> → 0</b>}
+                      {m.action === "flag" && <b style={{ color: "#B26A00" }}> → 🚩 keeps {fmtQty(m.p, m.qty)}</b>}
+                      {m.action === "count" && <b style={{ color: "#0a5c50" }}> → {fmtQty(m.p, (num(m.c) || 0) * usagePerCase(m.p) + (num(m.k) || 0) * usagePerPack(m.p))}</b>}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    {showCase && <input className="fig" style={{ width: 52 }} type="number" min="0" placeholder="cs" value={m.c} onChange={(e) => setRev(m.p.product_id, { c: e.target.value, action: (e.target.value === "" && m.k === "") ? "zero" : "count" })} />}
+                    <input className="fig" style={{ width: 56 }} type="number" min="0" placeholder={pkgName(m.p, 2).slice(0, 4)} value={m.k} onChange={(e) => setRev(m.p.product_id, { k: e.target.value, action: (e.target.value === "" && m.c === "") ? "zero" : "count" })} />
+                    <button className="mini" title="Flag for recount — keeps its current number" style={m.action === "flag" ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : undefined}
+                      onClick={() => setRev(m.p.product_id, { action: m.action === "flag" ? "zero" : "flag", c: "", k: "" })}>🚩</button>
+                  </div>
+                </div>
+              );})}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+              <button className="btn btn-primary" disabled={busy} onClick={confirmSection}>Confirm &amp; submit {loc?.name}</button>
+              <button className="btn btn-ghost" disabled={busy} onClick={() => setReview(null)}>Back to counting</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {orderedGroups.map(([g, grp]) => (
         <div className="vgroup" key={g}>
@@ -703,6 +832,27 @@ function Receive({ products, vendors, reload }) {
   const [err, setErr] = useState("");
   const [recent, setRecent] = useState([]);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+
+  // Price integrity at receiving: above catalog price for this vendor? another vendor cheaper per each?
+  function priceCheck(product_id, vendor_id, enteredCasePrice, orderUnit) {
+    const p = byId[product_id]; if (!p) return null;
+    const entered = Number(enteredCasePrice);
+    if (!(entered > 0)) return null;
+    const thisV = (p.vendors || []).find((v) => v.vendor_id === vendor_id);
+    const upc = vUnitsPerCase(p, thisV), upp = vUPP(p, thisV);
+    const ou = orderUnit || p.buy_by || "case";
+    const enteredCase = ou === "case" ? entered : ou === "package" ? entered * (upc / upp) : entered * upc;
+    const cpu = enteredCase / upc;                                   // $/each actually paid
+    const out = { cpu, enteredCase, upc };
+    if (thisV?.price != null && enteredCase > Number(thisV.price) + 0.004) {
+      const old = Number(thisV.price);
+      out.increase = { old, now: enteredCase, pct: ((enteredCase - old) / old) * 100 };
+    }
+    const others = (p.vendors || []).filter((v) => v.vendor_id !== vendor_id && v.price != null)
+      .map((v) => ({ v, cpu: vCostPerUnit(p, v) })).filter((x) => x.cpu != null).sort((a, b) => a.cpu - b.cpu);
+    if (others.length && others[0].cpu < cpu - 1e-6) out.cheaper = others[0];
+    return out;
+  }
 
   async function load() {
     try {
@@ -744,12 +894,27 @@ function Receive({ products, vendors, reload }) {
   }
 
   async function receive(list) {
+    // Ask for the purchase price if it's missing — price is how value/comparison stay honest.
+    const missing = list.filter((r) => r.case_cost === "" || r.case_cost == null);
+    if (missing.length) {
+      const names = missing.map((r) => r.product_name || "item").join(", ");
+      const ans = prompt(`Purchase price per ${missing[0].order_unit || "case"} for: ${names}\n(Leave blank to receive without a price.)`, "");
+      if (ans === null) return;
+      if (ans.trim() !== "") { const v = num(ans); list = list.map((r) => (missing.includes(r) ? { ...r, case_cost: v } : r)); }
+    }
+    // Warn on price increases before writing them to the catalog.
+    const ups = list.map((r) => ({ r, pc: priceCheck(r.product_id, r.vendor_id, r.case_cost, r.order_unit) })).filter((x) => x.pc?.increase);
+    if (ups.length) {
+      const lines = ups.map((x) => `• ${x.r.product_name}: ${money(x.pc.increase.old)} → ${money(x.pc.increase.now)}/case (+${x.pc.increase.pct.toFixed(1)}%)`).join("\n");
+      if (!confirm(`Price increase detected:\n\n${lines}\n\nReceiving will update the catalog price to what you paid. Continue?`)) return;
+    }
     const payload = list.map((r) => ({
       shopping_line_id: r.shopping_line_id, product_id: Number(r.product_id),
       vendor_id: r.vendor_id ? Number(r.vendor_id) : null,
       qty: num(r.qty), unit_cost: (r.case_cost !== "" && r.case_cost != null) ? num(r.case_cost) : null,
       count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
       units_per_package: r.units_per_package ?? byId[r.product_id]?.usage_per_package ?? 1,
+      vendor_units_per_case: r.vendor_units_per_case ?? null, vendor_units_per_package: r.vendor_units_per_package ?? null,
       order_unit: r.order_unit || "case",
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
@@ -776,6 +941,18 @@ function Receive({ products, vendors, reload }) {
         <label className="btn btn-primary">{busy ? <><span className="spin" /> Working…</> : "📷 Scan a receipt"}<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} disabled={busy} /></label>
         {rows.length > 0 && <button className="btn btn-ghost" onClick={() => receive(rows)}>Receive everything</button>}
       </div>
+      {(() => {
+        const alerts = rows.map((r) => ({ r, pc: priceCheck(r.product_id, r.vendor_id, r.case_cost, r.order_unit) })).filter((x) => x.pc && (x.pc.increase || x.pc.cheaper));
+        if (!alerts.length) return null;
+        const ups = alerts.filter((x) => x.pc.increase);
+        const save = alerts.filter((x) => x.pc.cheaper).reduce((a, x) => a + (x.pc.cpu - x.pc.cheaper.cpu) * x.pc.upc * (num(x.r.qty) || 0), 0);
+        return (
+          <div className="note" style={{ borderColor: "#E0392B", background: "#FFF6F5" }}>
+            {ups.length > 0 && <div><b style={{ color: "#B0271B" }}>▲ {ups.length} price increase{ups.length === 1 ? "" : "s"}</b> vs the catalog price: {ups.map((x) => x.r.product_name).join(", ")}. Receiving updates the catalog price to what you paid.</div>}
+            {save > 0.005 && <div style={{ marginTop: ups.length ? 4 : 0 }}><b style={{ color: "#B26A00" }}>Could have saved {money(save)}</b> buying from the cheaper vendor on these lines.</div>}
+          </div>
+        );
+      })()}
       <p className="stat" style={{ margin: "0 2px 10px" }}>Set the date the delivery actually arrived — that's what decides which week's usage it counts toward. Defaults to today; change it to back-date (e.g., yesterday).</p>
       {err && <div className="err">{err}</div>}
       {msg && <div className="ok">{msg}</div>}
@@ -796,15 +973,23 @@ function Receive({ products, vendors, reload }) {
               </span>
             </div>
             <table className="tbl" style={{ border: "none" }}>
-              <thead><tr><th>Item</th><th>Qty</th><th>Unit $</th><th></th></tr></thead>
-              <tbody>{g.map((r) => (
+              <thead><tr><th>Item</th><th>Qty</th><th>{"Price paid"}</th><th></th></tr></thead>
+              <tbody>{g.map((r) => {
+                const pc = priceCheck(r.product_id, r.vendor_id, r.case_cost, r.order_unit);
+                const qtyN = num(r.qty) || 0;
+                return (
                 <tr key={r.shopping_line_id}>
                   <td>{r.product_name}{r.scanned && <span className="bchip" style={{ marginLeft: 6, background: "#E6F4F0", borderColor: "#0E7C6B" }}>from receipt</span>}<div className="stat">by the {r.order_unit} · 1 {r.order_unit} = {r.order_unit === "case" ? r.count_per_case : r.order_unit === "package" ? (r.units_per_package || 1) : 1} {r.count_unit || "unit"}</div></td>
-                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /> <span className="stat">{buyLabel(r, r.order_unit, num(r.qty))}</span></td>
-                  <td><input className="fig" style={{ width: 80 }} type="number" step="0.01" value={r.case_cost} onChange={(e) => setRow(r.shopping_line_id, { case_cost: e.target.value })} /></td>
+                  <td><input className="fig" style={{ width: 70 }} type="number" min="0" value={r.qty} onChange={(e) => setRow(r.shopping_line_id, { qty: e.target.value })} /> <span className="stat">{buyLabel(r, r.order_unit, qtyN)}</span></td>
+                  <td>
+                    <input className="fig" style={{ width: 80, borderColor: pc?.increase ? "#E0392B" : undefined }} type="number" step="0.01" placeholder={`$ / ${r.order_unit}`} value={r.case_cost} onChange={(e) => setRow(r.shopping_line_id, { case_cost: e.target.value })} />
+                    {pc && <div className="stat">${pc.cpu.toFixed(4)}/{r.count_unit || "each"}</div>}
+                    {pc?.increase && <div style={{ color: "#B0271B", fontWeight: 600, fontSize: 11 }} title="Higher than the catalog price for this vendor">▲ up {pc.increase.pct.toFixed(1)}% from {money(pc.increase.old)}/case</div>}
+                    {pc?.cheaper && <div style={{ color: "#B26A00", fontWeight: 600, fontSize: 11 }} title="Another vendor is cheaper per each">{pc.cheaper.v.name} ${pc.cheaper.cpu.toFixed(4)}/{r.count_unit || "each"} · could save {money((pc.cpu - pc.cheaper.cpu) * pc.upc * qtyN)}</div>}
+                  </td>
                   <td><button className="mini" onClick={() => receive([r])}>Receive</button></td>
                 </tr>
-              ))}</tbody>
+              );})}</tbody>
             </table>
           </div>
         );
@@ -909,7 +1094,8 @@ function computeItemStats(products, counts, receipts) {
     const forecast = 0.6 * last + 0.4 * avg;
     const onhandUnits = wtotal(it, weeks[weeks.length - 1]);
     const target = Math.max(Number(p.par_level) || 0, forecast / cpc);
-    const suggestCases = Math.max(0, Math.ceil(target - onhandUnits / cpc - 1e-9));
+    let suggestCases = Math.max(0, Math.ceil(target - onhandUnits / cpc - 1e-9));
+    if (p.not_stocked || (Number(p.par_level) || 0) <= 0) suggestCases = 0;   // par 0 / not-stocked are never "needed"
     stats[p.product_id] = { onhandUnits, usedUnits: last, suggestCases };
   }
   return stats;
@@ -955,6 +1141,7 @@ function computeSuggestions(products, counts, receipts, locations) {
     const onhandCases = parWeekTotal(p, it, weeks[weeks.length - 1]) / cpc;   // in-use BIB/Icee is partial: excluded from par stock
     const usageCases = forecast / cpc;
     const parCases = Number(p.par_level) || 0;
+    if (parCases <= 0) continue;                               // no par set = never auto-suggested (add by hand if needed)
     const target = Math.max(parCases, usageCases);             // build up to par, or a week's usage if higher
     const cases = Math.ceil(target - onhandCases - 1e-9);
     if (cases >= 1) out.push({ product: p, cases, target: +target.toFixed(1), usageCases: +usageCases.toFixed(1), onhandCases: +onhandCases.toFixed(1) });
@@ -967,6 +1154,7 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   const [listId, setListId] = useState(null);
   const [lines, setLines] = useState(null);
   const [note, setNote] = useState("");
+  const [building, setBuilding] = useState(false);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
 
@@ -1002,15 +1190,38 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   async function purchaseVendor(vid, on) { await db.setVendorStatus(listId, vid, on ? "purchased" : "open", on ? "open" : "purchased"); load(); }
   async function remove(line) { await db.removeShoppingLine(line.shopping_line_id); load(); }
   async function buildFromUsage() {
-    const have = new Set(lines.map((l) => l.product_id));
-    let added = 0;
-    for (const s of suggestions) {
-      if (have.has(s.product.product_id)) continue;
-      const v = s.product.vendors.find((x) => x.primary) || s.product.vendors[0];
-      await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null, order_unit: s.product.buy_by || "case" });
-      added++;
-    }
-    setNote(added ? `Added ${added} item${added === 1 ? "" : "s"} from last week's usage. Review the quantities, then mark Purchased.` : "Everything suggested is already on your list.");
+    if (building) return;
+    setBuilding(true);
+    try {
+      const fresh = await db.getShopping();                        // live list, not stale state
+      const have = new Set((fresh.lines || []).map((l) => l.product_id));
+      let added = 0;
+      for (const s of suggestions) {
+        if (have.has(s.product.product_id)) continue;
+        have.add(s.product.product_id);                            // guard within the loop too
+        const v = s.product.vendors.find((x) => x.primary) || s.product.vendors[0];
+        await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null, order_unit: s.product.buy_by || "case" });
+        added++;
+      }
+      setNote(added ? `Added ${added} item${added === 1 ? "" : "s"} from last week's usage. Review the quantities, then mark Purchased.` : "Everything suggested is already on your list.");
+      await load();
+    } catch (e) { setNote("Couldn't build: " + (e.message || e)); }
+    finally { setBuilding(false); }
+  }
+  async function dedupe() {
+    const seen = new Set(); const dups = [];
+    for (const l of lines) { if (seen.has(l.product_id)) dups.push(l); else seen.add(l.product_id); }
+    if (!dups.length) { setNote("No duplicates on the list."); return; }
+    for (const l of dups) await db.removeShoppingLine(l.shopping_line_id);
+    setNote(`Removed ${dups.length} duplicate line${dups.length === 1 ? "" : "s"}.`);
+    load();
+  }
+  async function clearOptional() {
+    const opt = lines.filter((l) => { const p = byId[l.product_id]; return p && (p.not_stocked || (Number(p.par_level) || 0) <= 0); });
+    if (!opt.length) { setNote("No optional (no-par / not-stocked) items on the list."); return; }
+    if (!confirm(`Remove ${opt.length} optional item${opt.length === 1 ? "" : "s"} (no par / not stocked) from the list?`)) return;
+    for (const l of opt) await db.removeShoppingLine(l.shopping_line_id);
+    setNote(`Removed ${opt.length} optional item${opt.length === 1 ? "" : "s"}.`);
     load();
   }
 
@@ -1022,7 +1233,9 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
     <div>
       <div className="toolbar">
         <Picker products={products} exclude={lines.map((l) => l.product_id)} onPick={add} />
-        <button className="btn btn-ghost" disabled={!suggestions.length} onClick={buildFromUsage}>🧮 Build from usage{suggestions.length ? ` (${suggestions.length})` : ""}</button>
+        <button className="btn btn-ghost" disabled={building || !suggestions.length} onClick={buildFromUsage}>{building ? "Building…" : `🧮 Build from usage${suggestions.length ? ` (${suggestions.length})` : ""}`}</button>
+        {(() => { const seen = new Set(); const dupCount = lines.filter((l) => seen.has(l.product_id) ? true : (seen.add(l.product_id), false)).length; return dupCount > 0 ? <button className="mini mini-danger" onClick={dedupe}>Remove {dupCount} duplicate{dupCount === 1 ? "" : "s"}</button> : null; })()}
+        {lines.some((l) => { const p = byId[l.product_id]; return p && (p.not_stocked || (Number(p.par_level) || 0) <= 0); }) && <button className="mini" onClick={clearOptional}>Clear optional</button>}
       </div>
       {note && <div className="ok">{note}</div>}
       <div className="note" style={{ marginBottom: 14 }}>Add items by hand, or tap <b>Build from usage</b> to fill the order up to each item's <b>par</b> (or a week's usage if that's higher), minus what's on hand, rounded up to whole cases. Then mark items <b>Purchased</b> — one at a time or a whole vendor at once — and they move to the <b>Receive</b> tab.</div>
@@ -1040,12 +1253,17 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
                   : <button className="mini" onClick={() => purchaseVendor(k === "none" ? null : Number(k), false)}>Undo all</button>}
               </span>
             </div>
-            {g.map((l) => {
+            {g.slice().sort((a, b) => {
+              const oa = (byId[a.product_id]?.not_stocked || (Number(byId[a.product_id]?.par_level) || 0) <= 0) ? 1 : 0;
+              const ob = (byId[b.product_id]?.not_stocked || (Number(byId[b.product_id]?.par_level) || 0) <= 0) ? 1 : 0;
+              return oa - ob;
+            }).map((l) => {
               const p = byId[l.product_id]; if (!p) return null;
               const done = l.status === "purchased";
+              const optional = p.not_stocked || (Number(p.par_level) || 0) <= 0;
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
-                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{r1(stats[p.product_id]?.usedUnits ?? 0)} {measure(p)}</b> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</div></div>
+                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{optional && <span className="bchip" style={{ marginLeft: 6, background: "#EEE", borderColor: "#B7BBC4", color: "#666" }}>{p.not_stocked ? "not stocked" : "no par"}</span>}{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{fmtQty(p, stats[p.product_id]?.usedUnits ?? 0)}</b>{optional ? "" : <> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</>}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
                   </select>
@@ -1602,7 +1820,14 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   const attnRank = { "flagged": 0, "received, not counted": 1, "never counted": 2 };
   attention.sort((a, b) => (attnRank[a.rs[0]] - attnRank[b.rs[0]]) || a.p.name.localeCompare(b.p.name));
 
+  // Not counted this week (stocked items still carrying old stock)
+  const wkStartISO = weekStart(new Date().toISOString().slice(0, 10)).toISOString().slice(0, 10);
+  const countedThisWk = {};
+  for (const c of counts || []) if (String(c.counted_at).slice(0, 10) >= wkStartISO) countedThisWk[c.product_id] = true;
+  const notCountedStocked = products.filter((p) => !p.backup_for && !p.not_stocked && !countedThisWk[p.product_id]).length;
+
   const reports = [
+    ["notcounted", `Not counted this week (${notCountedStocked})`, <NotCountedReport products={products} counts={counts} locations={locations} onOpen={setDetail} reload={reload} />],
     ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} openItem={openItem} />],
     ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} reload={reload} />],
     ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
@@ -1622,6 +1847,7 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
         {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true, () => setOpen("valitem"))}
         {tile("Spent · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`, false, () => setOpen("spend"))}
         {tile("Needs attention", attention.length, attention.length ? "tap to see the list" : "all clear ✓", false, () => setOpen("attention"))}
+        {tile("Not counted", notCountedStocked, notCountedStocked ? "stocked · this week" : "all counted ✓", false, () => setOpen("notcounted"))}
         {tile("To buy / awaiting", `${ship.open} / ${ship.purchased}`, "open · purchased")}
       </div>
 
@@ -1650,6 +1876,75 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
         </div>
       ))}
       {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+    </div>
+  );
+}
+
+function NotCountedReport({ products, counts, locations, onOpen, reload }) {
+  const [busy, setBusy] = useState(false);
+  const today = new Date().toISOString().slice(0, 10);
+  const wkStart = weekStart(today).toISOString().slice(0, 10);
+  const locName = Object.fromEntries((locations || []).map((l) => [l.location_id, l.name]));
+
+  // latest count per (item, location); and which items were counted at all this week
+  const latest = {}, countedThisWeek = {};
+  for (const c of counts || []) {
+    const d = String(c.counted_at).slice(0, 10), t = new Date(c.counted_at).getTime();
+    const k = c.product_id + "|" + c.location_id;
+    if (!latest[k] || t > latest[k].t) latest[k] = { t, d, qty: Number(c.qty) || 0, location_id: c.location_id };
+    if (d >= wkStart) countedThisWeek[c.product_id] = true;
+  }
+  const build = (p) => {
+    const ls = Object.entries(latest).filter(([k]) => k.startsWith(p.product_id + "|")).map(([, v]) => v);
+    return { p, locs: ls, carried: ls.reduce((a, x) => a + x.qty, 0), lastD: ls.length ? ls.map((x) => x.d).sort().pop() : null };
+  };
+  const missing = products.filter((p) => !p.backup_for && !countedThisWeek[p.product_id]).map(build)
+    .sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
+  const stocked = missing.filter((r) => !r.p.not_stocked);
+  const unstocked = missing.filter((r) => r.p.not_stocked);
+  const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "never";
+
+  async function zero(list) {
+    const entries = [];
+    for (const r of list) for (const l of r.locs) if (l.qty !== 0) entries.push({ product_id: r.p.product_id, location_id: l.location_id, cases: 0, loose: 0, qty: 0 });
+    if (!entries.length) { alert("Nothing to zero — these already read 0."); return; }
+    const names = list.filter((r) => r.carried > 0).map((r) => r.p.name);
+    if (!confirm(`Record a zero count (dated today) for ${names.length} item${names.length === 1 ? "" : "s"} that weren't counted this week?\n\n${names.slice(0, 12).join(", ")}${names.length > 12 ? ", …" : ""}\n\nThis clears the stock they're still carrying from earlier counts.`)) return;
+    setBusy(true);
+    try { await db.postCounts(entries); reload && reload(); }
+    catch (e) { alert("Couldn't save: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+
+  const row = (r, assumeZero) => (
+    <div key={r.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto auto", alignItems: "center", gap: 8, cursor: "pointer" }} onClick={() => onOpen && onOpen(r.p)}>
+      <div>
+        <b style={{ borderBottom: "1px dashed #B7BBC4" }}>{r.p.name}</b>
+        <div className="stat">{r.p.category || "Uncategorized"} · last counted {label(r.lastD)}{r.locs.length > 1 ? ` · ${r.locs.length} locations` : (r.locs[0] ? ` · ${locName[r.locs[0].location_id] || ""}` : "")}</div>
+      </div>
+      <div className="fig" style={{ textAlign: "right" }}>
+        {fmtQty(r.p, r.carried)}
+        <div className="stat" style={{ color: assumeZero ? "#B0271B" : "#B26A00" }}>{assumeZero ? "→ treat as 0" : "held from last count"}</div>
+      </div>
+      {assumeZero && <button className="mini" disabled={busy} onClick={(e) => { e.stopPropagation(); zero([r]); }}>Zero</button>}
+    </div>
+  );
+
+  if (!missing.length) return <div className="note">Everything stocked has been counted this week. ✓</div>;
+  return (
+    <div>
+      <div className="stat" style={{ marginBottom: 8 }}>Not counted since <b>{label(wkStart)}</b> (this count week). Stocked items still carry stock from an earlier count — that's what quietly inflates on-hand and the shopping list.</div>
+
+      <div className="secthead" style={{ marginTop: 4 }}>Stocked · not counted ({stocked.length}) — assume zero</div>
+      {stocked.length === 0 ? <div className="note">None — every stocked item was counted. ✓</div> : (
+        <div>
+          <button className="btn btn-primary" disabled={busy} style={{ marginBottom: 8 }} onClick={() => zero(stocked)}>Zero all {stocked.filter((r) => r.carried > 0).length} carrying stock</button>
+          {stocked.map((r) => row(r, true))}
+        </div>
+      )}
+
+      <div className="secthead" style={{ marginTop: 16 }}>Not stocked · not counted ({unstocked.length}) — holding last count</div>
+      {unstocked.length === 0 ? <div className="note">None.</div> : <div>{unstocked.map((r) => row(r, false))}</div>}
     </div>
   );
 }
@@ -1892,17 +2187,28 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
   const setField = (id, f, v) => setRows((rs) => rs.map((r) => r.stock_count_id === id ? { ...r, [f]: v } : r));
   const setRec = (id, f, v) => setRecs((rs) => rs.map((r) => r.receipt_line_id === id ? { ...r, [f]: v } : r));
 
-  async function saveCount(r) {
-    setBusy(true);
+  // Rebuild a row's fields from cases/packages/partial, keeping unedited sub-fields at their decomposed value.
+  function rowFields(r) {
     const upc = usagePerCase(product), upp = usagePerPack(product);
-    const total = r._c != null || r._p != null || r._x != null
-      ? (Number(r._c) || 0) * upc + (Number(r._p) || 0) * upp + (Number(r._x) || 0)
-      : (Number(r.qty) || 0);
-    const fields = { qty: total, cases: Number(r._c) || 0, loose: total - (Number(r._c) || 0) * upc };
+    const showCase = !wholeOnly(product) && (Number(product.packages_per_case) || 1) > 1;
+    const dC = r._c != null ? (Number(r._c) || 0) : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
+    const remA = (r.qty || 0) - dC * upc;
+    const dP = r._p != null ? (Number(r._p) || 0) : Math.floor(remA / upp + 1e-9);
+    const dX = r._x != null ? (Number(r._x) || 0) : Math.round((remA - dP * upp) * 100) / 100;
+    const total = dC * upc + dP * upp + dX;
+    const fields = { qty: total, cases: dC, loose: total - dC * upc };
     if (r._date) fields.counted_at = new Date(r._date + "T12:00:00").toISOString();
     if (r._loc) fields.location_id = Number(r._loc);
-    try { await db.updateCount(r.stock_count_id, fields); await load(); onChanged && onChanged(); }
-    catch (e) { alert("Save failed: " + (e.message || e)); }
+    return fields;
+  }
+  async function saveAllCounts() {
+    const changed = rows.filter((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined));
+    if (!changed.length) return;
+    setBusy(true);
+    try {
+      for (const r of changed) await db.updateCount(r.stock_count_id, rowFields(r));
+      await load(); onChanged && onChanged();
+    } catch (e) { alert("Save failed: " + (e.message || e)); }
     finally { setBusy(false); }
   }
   async function addCount() {
@@ -1938,9 +2244,12 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
   }
 
   return (
-    <div className="overlay" onClick={onClose}>
+    <div className="overlay">
       <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px,100%)" }}>
-        <h2 style={{ marginBottom: 2 }}>{product.name}</h2>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <h2 style={{ marginBottom: 2 }}>{product.name}</h2>
+          <button className="mini" title="Close" onClick={onClose}>✕</button>
+        </div>
         {openItem && <button className="mini" style={{ marginBottom: 8 }} onClick={() => { onClose && onClose(); openItem(product); }}>✎ Open in Catalog →</button>}
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", margin: "6px 0 10px" }}>
           <button className="mini" style={{ borderColor: flagged ? "#E0392B" : undefined, color: flagged ? "#E0392B" : undefined, fontWeight: 600 }} disabled={busy} onClick={() => toggleFlag(!flagged)}>{flagged ? "🚩 Flagged — clear" : "⚑ Flag for recount"}</button>
@@ -1970,8 +2279,9 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
               const dP = r._p != null ? r._p : Math.floor(remA / upp + 1e-9);
               const dX = r._x != null ? r._x : Math.round((remA - (Number(dP) || 0) * upp) * 100) / 100;
               const tot = (Number(dC) || 0) * upc + (Number(dP) || 0) * upp + (Number(dX) || 0);
+              const edited = ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined);
               return (
-              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "112px 112px 1fr auto", alignItems: "center", gap: 8 }}>
+              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "112px 112px 1fr auto", alignItems: "center", gap: 8, background: edited ? "#FFF8E1" : undefined, borderRadius: edited ? 8 : undefined }}>
                 <div><input type="date" value={r._date ?? (r.counted_at ? r.counted_at.slice(0, 10) : "")} max={today} onChange={(e) => setField(r.stock_count_id, "_date", e.target.value)} /></div>
                 <select value={r._loc ?? r.location_id ?? ""} onChange={(e) => setField(r.stock_count_id, "_loc", e.target.value)}>
                   {locs.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
@@ -1980,15 +2290,18 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
                   {showCase && <label style={{ width: 62 }}>Cases<input className="fig" type="number" min="0" value={dC} onChange={(e) => setField(r.stock_count_id, "_c", e.target.value)} /></label>}
                   <label style={{ width: 72 }}>{pkgName(product, 2)}<input className="fig" type="number" min="0" value={dP} onChange={(e) => setField(r.stock_count_id, "_p", e.target.value)} /></label>
                   {!whole && <label style={{ width: 68 }}>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={dX} onChange={(e) => setField(r.stock_count_id, "_x", e.target.value)} /></label>}
-                  <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(product, tot)}</span>
+                  <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(product, tot)}{edited ? " ·edited" : ""}</span>
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <button className="mini" disabled={busy} onClick={() => saveCount(r)}>Save</button>
                   <button className="mini mini-danger" disabled={busy} onClick={() => delCount(r)}>✕</button>
                 </div>
               </div>
             );})}
-            <button className="mini" disabled={busy} style={{ marginTop: 8 }} onClick={addCount}>+ Add a count</button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+              <button className="btn btn-primary" disabled={busy || !rows.some((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined))} onClick={saveAllCounts}>Save {rows.filter((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined)).length || ""} change{rows.filter((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined)).length === 1 ? "" : "s"}</button>
+              <button className="mini" disabled={busy} onClick={addCount}>+ Add a count</button>
+              {rows.some((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined)) && <button className="mini" disabled={busy} onClick={() => load()}>Discard edits</button>}
+            </div>
           </div>
         )}
 
