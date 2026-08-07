@@ -1213,7 +1213,8 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
         if (have.has(s.product.product_id)) continue;
         have.add(s.product.product_id);                            // guard within the loop too
         const v = s.product.vendors.find((x) => x.primary) || s.product.vendors[0];
-        await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null, order_unit: s.product.buy_by || "case" });
+        const ou = (s.product.buy_by === "package") ? "package" : "case";   // list only stores case/package
+        await db.addShoppingLine(listId, { product_id: s.product.product_id, vendor_id: v?.vendor_id ?? null, qty: s.cases, unit_cost: v?.price ?? null, order_unit: ou });
         added++;
       }
       setNote(added ? `Added ${added} item${added === 1 ? "" : "s"} from last week's usage. Review the quantities, then mark Purchased.` : "Everything suggested is already on your list.");
@@ -1278,7 +1279,8 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
                 <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
                   <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{optional && <span className="bchip" style={{ marginLeft: 6, background: "#EEE", borderColor: "#B7BBC4", color: "#666" }}>{p.not_stocked ? "not stocked" : "no par"}</span>}{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{fmtQty(p, stats[p.product_id]?.usedUnits ?? 0)}</b>{optional ? "" : <> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</>}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
-                    {(p.vendors || []).map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}{v.price != null ? ` (${money(v.price)})` : ""}</option>)}
+                    <option value="">No vendor</option>
+                    {vendors.map((vv) => { const pv = (p.vendors || []).find((x) => x.vendor_id === vv.vendor_id); return <option key={vv.vendor_id} value={vv.vendor_id}>{vv.name}{pv?.price != null ? ` (${money(pv.price)})` : ""}{pv ? "" : " ·not linked"}</option>; })}
                   </select>
                   <input className="fig" type="number" min="0" value={l.qty} onChange={(e) => setQty(l, e.target.value)} disabled={done} />
                   <select value={l.order_unit || p.buy_by || "case"} onChange={(e) => setUnit(l, e.target.value)} disabled={done} title="Order by case or package">
