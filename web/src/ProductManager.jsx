@@ -156,11 +156,22 @@ export default function App() {
         const t = r.counted_at ? new Date(r.counted_at).getTime() : 0;
         if (!latest[k] || t >= latest[k].t) latest[k] = { product_id: r.product_id, location_id: r.location_id, qty: Number(r.qty), t };
       }
+      // "Not counted this week = 0": if a stocked everyday item was counted more recently in
+      // another location, a location a week behind is assumed empty (0). Not-stocked and event
+      // items keep their last count. This is computed here, not written as rows.
+      const prodById = Object.fromEntries(p.map((x) => [x.product_id, x]));
+      const wkOf = (t) => t ? weekStart(new Date(t).toISOString().slice(0, 10)).getTime() : 0;
+      const newestWk = {};
+      for (const r of Object.values(latest)) { const w = wkOf(r.t); if (w > (newestWk[r.product_id] || 0)) newestWk[r.product_id] = w; }
       const map = {};
       for (const r of Object.values(latest)) {
+        const prod = prodById[r.product_id] || {};
+        const hold = prod.not_stocked || prod.menu === "events";
+        const stale = !hold && wkOf(r.t) < (newestWk[r.product_id] || 0);   // counted, but this location is a week behind
+        const qty = stale ? 0 : r.qty;
         const m = map[r.product_id] || (map[r.product_id] = { byLoc: {}, total: 0 });
-        m.byLoc[locName[r.location_id] || "?"] = r.qty;
-        m.total += r.qty;
+        m.byLoc[locName[r.location_id] || "?"] = qty;
+        m.total += qty;
       }
       setProducts(p); setLocations(l); setVendors(v); setUnits(u); setOnhand(map); setCounts(cts); setReceipts(rcs);
     } catch (e) {
