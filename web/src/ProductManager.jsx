@@ -1839,8 +1839,14 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   for (const c of counts || []) if (String(c.counted_at).slice(0, 10) >= wkStartISO) countedThisWk[c.product_id] = true;
   const notCountedStocked = products.filter((p) => !p.backup_for && !p.not_stocked && !countedThisWk[p.product_id]).length;
 
+  // Stray stock: a location holding stock that wasn't counted this week, though the item was counted newer elsewhere.
+  const _latest = {}, _newest = {};
+  for (const c of counts || []) { const k = c.product_id + "|" + c.location_id, d = String(c.counted_at).slice(0, 10); if (!_latest[k] || d > _latest[k].d) _latest[k] = { pid: c.product_id, qty: Number(c.qty) || 0, d }; if (!_newest[c.product_id] || d > _newest[c.product_id]) _newest[c.product_id] = d; }
+  const staleLocs = Object.values(_latest).filter((r) => { const p = products.find((x) => x.product_id === r.pid); return p && !p.not_stocked && p.menu !== "events" && !p.backup_for && r.qty > 0 && r.d < wkStartISO && (_newest[r.pid] || "") >= wkStartISO; }).length;
+
   const reports = [
     ["notcounted", `Not counted this week (${notCountedStocked})`, <NotCountedReport products={products} counts={counts} locations={locations} onOpen={setDetail} reload={reload} />],
+    ["stale", `Stray stock by location (${staleLocs})`, <StaleLocationsReport products={products} counts={counts} locations={locations} onOpen={setDetail} reload={reload} />],
     ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} openItem={openItem} />],
     ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} reload={reload} />],
     ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
@@ -1861,6 +1867,7 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
         {tile("Spent · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`, false, () => setOpen("spend"))}
         {tile("Needs attention", attention.length, attention.length ? "tap to see the list" : "all clear ✓", false, () => setOpen("attention"))}
         {tile("Not counted", notCountedStocked, notCountedStocked ? "stocked · this week" : "all counted ✓", false, () => setOpen("notcounted"))}
+        {staleLocs > 0 && tile("Stray stock", staleLocs, "wrong location · zero it", false, () => setOpen("stale"))}
         {tile("To buy / awaiting", `${ship.open} / ${ship.purchased}`, "open · purchased")}
       </div>
 
@@ -1889,6 +1896,59 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
         </div>
       ))}
       {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+    </div>
+  );
+}
+
+function StaleLocationsReport({ products, counts, locations, onOpen, reload }) {
+  const [busy, setBusy] = useState(false);
+  const today = new Date().toISOString().slice(0, 10);
+  const wkStart = weekStart(today).toISOString().slice(0, 10);
+  const locName = Object.fromEntries((locations || []).map((l) => [l.location_id, l.name]));
+  const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+
+  // latest count per (item, location), and each item's newest count date anywhere
+  const latest = {}, newest = {};
+  for (const c of counts || []) {
+    const k = c.product_id + "|" + c.location_id, d = String(c.counted_at).slice(0, 10);
+    if (!latest[k] || d > latest[k].d) latest[k] = { product_id: c.product_id, location_id: c.location_id, qty: Number(c.qty) || 0, d };
+    if (!newest[c.product_id] || d > newest[c.product_id]) newest[c.product_id] = d;
+  }
+  // A stale location = holds stock, wasn't counted this week, but the item WAS counted more recently elsewhere.
+  const stale = Object.values(latest).map((r) => {
+    const p = byId[r.product_id]; if (!p || p.not_stocked || p.menu === "events" || p.backup_for) return null;
+    if (r.qty <= 0) return null;
+    if (r.d >= wkStart) return null;                          // this location was counted this week — fine
+    if ((newest[r.product_id] || "") < wkStart) return null;  // whole item not counted this week — handled by the other report
+    return { p, location_id: r.location_id, loc: locName[r.location_id] || "?", qty: r.qty, d: r.d };
+  }).filter(Boolean).sort((a, b) => a.p.name.localeCompare(b.p.name) || a.loc.localeCompare(b.loc));
+
+  const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "";
+  async function zero(list) {
+    if (!list.length) return;
+    const names = [...new Set(list.map((s) => `${s.p.name} · ${s.loc}`))];
+    if (!confirm(`Zero ${list.length} location count${list.length === 1 ? "" : "s"} (dated today)?\n\n${names.slice(0, 15).join("\n")}${names.length > 15 ? "\n…" : ""}\n\nUse when the stock moved out of that area (e.g. thawed and used).`)) return;
+    setBusy(true);
+    try { await db.postCounts(list.map((s) => ({ product_id: s.p.product_id, location_id: s.location_id, cases: 0, loose: 0, qty: 0 }))); reload && reload(); }
+    catch (e) { alert("Couldn't zero: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+
+  if (!stale.length) return <div className="note">No stray stock — every location holding stock was counted this week (or the item holds its last count). ✓</div>;
+  return (
+    <div>
+      <div className="stat" style={{ marginBottom: 8 }}>These locations still hold stock but weren't counted this week, even though the item <b>was</b> counted somewhere newer — so the stock likely moved out (e.g. Wings thawed from freezer to fridge, then used). Zero the ones that are actually empty.</div>
+      <button className="btn btn-primary" disabled={busy} style={{ marginBottom: 8 }} onClick={() => zero(stale)}>Zero all {stale.length}</button>
+      {stale.map((s) => (
+        <div key={s.p.product_id + "|" + s.location_id} className="crow" style={{ gridTemplateColumns: "1fr auto auto", alignItems: "center", gap: 8 }}>
+          <div onClick={() => onOpen && onOpen(s.p)} style={{ cursor: "pointer" }}>
+            <b style={{ borderBottom: "1px dashed #B7BBC4" }}>{s.p.name}</b>
+            <div className="stat">📍 {s.loc} · last counted {label(s.d)}</div>
+          </div>
+          <div className="fig" style={{ textAlign: "right" }}>{fmtQty(s.p, s.qty)}<div className="stat" style={{ color: "#B0271B" }}>→ 0</div></div>
+          <button className="mini" disabled={busy} onClick={() => zero([s])}>Zero</button>
+        </div>
+      ))}
     </div>
   );
 }
