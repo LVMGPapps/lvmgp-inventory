@@ -1839,7 +1839,7 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   const wkStartISO = weekStart(new Date().toISOString().slice(0, 10)).toISOString().slice(0, 10);
   const countedThisWk = {};
   for (const c of counts || []) if (String(c.counted_at).slice(0, 10) >= wkStartISO) countedThisWk[c.product_id] = true;
-  const notCountedStocked = products.filter((p) => !p.backup_for && !p.not_stocked && !countedThisWk[p.product_id]).length;
+  const notCountedStocked = products.filter((p) => !p.backup_for && !p.not_stocked && !countedThisWk[p.product_id] && (onhand[p.product_id]?.total || 0) > 0.004).length;
 
   // Stray stock: a location holding stock that wasn't counted this week, though the item was counted newer elsewhere.
   const _latest = {}, _newest = {};
@@ -1978,7 +1978,7 @@ function NotCountedReport({ products, counts, locations, onOpen, reload }) {
   };
   const missing = products.filter((p) => !p.backup_for && !countedThisWeek[p.product_id]).map(build)
     .sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
-  const stocked = missing.filter((r) => !r.p.not_stocked);
+  const stocked = missing.filter((r) => !r.p.not_stocked && r.carried > 0.004);   // already-zero items have nothing to clear
   const unstocked = missing.filter((r) => r.p.not_stocked);
   const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "never";
 
