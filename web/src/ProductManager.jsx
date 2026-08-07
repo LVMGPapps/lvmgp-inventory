@@ -143,13 +143,15 @@ export default function App() {
   async function reload() {
     setError("");
     try {
-      const [p, l, v, u, oh, cts, rcs] = await Promise.all([
-        db.getCatalog(), db.listLocations(), db.listVendors(), db.listStorageUnits(), db.onHandByLocation(),
-        db.getCounts(160), db.getReceipts(160),
+      const [p, l, v, u, cts, rcs] = await Promise.all([
+        db.getCatalog(), db.listLocations(), db.listVendors(), db.listStorageUnits(),
+        db.getCounts(400), db.getReceipts(160),
       ]);
       const locName = Object.fromEntries(l.map((x) => [x.location_id, x.name]));
+      // On-hand = latest count per (product, location), summed — built from the SAME counts
+      // the Weekly review uses, so every screen agrees.
       const latest = {};
-      for (const r of oh) {
+      for (const r of cts) {
         const k = r.product_id + "|" + r.location_id;
         const t = r.counted_at ? new Date(r.counted_at).getTime() : 0;
         if (!latest[k] || t >= latest[k].t) latest[k] = { product_id: r.product_id, location_id: r.location_id, qty: Number(r.qty), t };
@@ -2187,17 +2189,28 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
   const setField = (id, f, v) => setRows((rs) => rs.map((r) => r.stock_count_id === id ? { ...r, [f]: v } : r));
   const setRec = (id, f, v) => setRecs((rs) => rs.map((r) => r.receipt_line_id === id ? { ...r, [f]: v } : r));
 
-  async function saveCount(r) {
-    setBusy(true);
+  // Rebuild a row's fields from cases/packages/partial, keeping unedited sub-fields at their decomposed value.
+  function rowFields(r) {
     const upc = usagePerCase(product), upp = usagePerPack(product);
-    const total = r._c != null || r._p != null || r._x != null
-      ? (Number(r._c) || 0) * upc + (Number(r._p) || 0) * upp + (Number(r._x) || 0)
-      : (Number(r.qty) || 0);
-    const fields = { qty: total, cases: Number(r._c) || 0, loose: total - (Number(r._c) || 0) * upc };
+    const showCase = !wholeOnly(product) && (Number(product.packages_per_case) || 1) > 1;
+    const dC = r._c != null ? (Number(r._c) || 0) : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
+    const remA = (r.qty || 0) - dC * upc;
+    const dP = r._p != null ? (Number(r._p) || 0) : Math.floor(remA / upp + 1e-9);
+    const dX = r._x != null ? (Number(r._x) || 0) : Math.round((remA - dP * upp) * 100) / 100;
+    const total = dC * upc + dP * upp + dX;
+    const fields = { qty: total, cases: dC, loose: total - dC * upc };
     if (r._date) fields.counted_at = new Date(r._date + "T12:00:00").toISOString();
     if (r._loc) fields.location_id = Number(r._loc);
-    try { await db.updateCount(r.stock_count_id, fields); await load(); onChanged && onChanged(); }
-    catch (e) { alert("Save failed: " + (e.message || e)); }
+    return fields;
+  }
+  async function saveAllCounts() {
+    const changed = rows.filter((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined));
+    if (!changed.length) return;
+    setBusy(true);
+    try {
+      for (const r of changed) await db.updateCount(r.stock_count_id, rowFields(r));
+      await load(); onChanged && onChanged();
+    } catch (e) { alert("Save failed: " + (e.message || e)); }
     finally { setBusy(false); }
   }
   async function addCount() {
@@ -2268,8 +2281,9 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
               const dP = r._p != null ? r._p : Math.floor(remA / upp + 1e-9);
               const dX = r._x != null ? r._x : Math.round((remA - (Number(dP) || 0) * upp) * 100) / 100;
               const tot = (Number(dC) || 0) * upc + (Number(dP) || 0) * upp + (Number(dX) || 0);
+              const edited = ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined);
               return (
-              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "112px 112px 1fr auto", alignItems: "center", gap: 8 }}>
+              <div className="crow" key={r.stock_count_id} style={{ gridTemplateColumns: "112px 112px 1fr auto", alignItems: "center", gap: 8, background: edited ? "#FFF8E1" : undefined, borderRadius: edited ? 8 : undefined }}>
                 <div><input type="date" value={r._date ?? (r.counted_at ? r.counted_at.slice(0, 10) : "")} max={today} onChange={(e) => setField(r.stock_count_id, "_date", e.target.value)} /></div>
                 <select value={r._loc ?? r.location_id ?? ""} onChange={(e) => setField(r.stock_count_id, "_loc", e.target.value)}>
                   {locs.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
@@ -2278,15 +2292,18 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
                   {showCase && <label style={{ width: 62 }}>Cases<input className="fig" type="number" min="0" value={dC} onChange={(e) => setField(r.stock_count_id, "_c", e.target.value)} /></label>}
                   <label style={{ width: 72 }}>{pkgName(product, 2)}<input className="fig" type="number" min="0" value={dP} onChange={(e) => setField(r.stock_count_id, "_p", e.target.value)} /></label>
                   {!whole && <label style={{ width: 68 }}>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={dX} onChange={(e) => setField(r.stock_count_id, "_x", e.target.value)} /></label>}
-                  <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(product, tot)}</span>
+                  <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(product, tot)}{edited ? " ·edited" : ""}</span>
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <button className="mini" disabled={busy} onClick={() => saveCount(r)}>Save</button>
                   <button className="mini mini-danger" disabled={busy} onClick={() => delCount(r)}>✕</button>
                 </div>
               </div>
             );})}
-            <button className="mini" disabled={busy} style={{ marginTop: 8 }} onClick={addCount}>+ Add a count</button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+              <button className="btn btn-primary" disabled={busy || !rows.some((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined))} onClick={saveAllCounts}>Save {rows.filter((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined)).length || ""} change{rows.filter((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined)).length === 1 ? "" : "s"}</button>
+              <button className="mini" disabled={busy} onClick={addCount}>+ Add a count</button>
+              {rows.some((r) => ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined)) && <button className="mini" disabled={busy} onClick={() => load()}>Discard edits</button>}
+            </div>
           </div>
         )}
 
