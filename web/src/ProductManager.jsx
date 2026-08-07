@@ -1889,14 +1889,17 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
           </div>}
 
       <div className="secthead">Reports</div>
-      {reports.map(([key, label, body]) => (
-        <div className="panel" key={key}>
-          <div className="panel-h" onClick={() => setOpen(open === key ? "" : key)}>
-            <span>{label}</span><span style={{ color: "#71757E" }}>{open === key ? "▾" : "▸"}</span>
-          </div>
-          {open === key && <div className="panel-b">{body}</div>}
-        </div>
-      ))}
+      <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "2px 0 10px", WebkitOverflowScrolling: "touch" }}>
+        {reports.map(([key, label]) => (
+          <button key={key} className="mini" onClick={() => setOpen(key)}
+            style={{ whiteSpace: "nowrap", flex: "0 0 auto", fontWeight: open === key ? 700 : 500, background: open === key ? "#191B1F" : "#fff", color: open === key ? "#fff" : "#191B1F", borderColor: open === key ? "#191B1F" : "#E6E1D6" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="panel-b" style={{ background: "#fff", border: "1.5px solid #E6E1D6", borderRadius: 11, padding: 14 }}>
+        {(() => { const r = reports.find((x) => x[0] === open) || reports[0]; return <div><div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 18, marginBottom: 8 }}>{r[1]}</div>{r[2]}</div>; })()}
+      </div>
       {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
     </div>
   );
