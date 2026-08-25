@@ -344,7 +344,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
               {discList.map((p) => (
                 <div className="card" key={p.product_id} style={{ opacity: 0.85 }}>
                   <div style={{ display: "flex", gap: 10 }}>
-                    {p.image_url ? <img src={p.image_url} alt="" loading="lazy" decoding="async" width="54" height="54" style={{ width: 54, height: 54, objectFit: "contain", borderRadius: 8, background: "#F4F1EA", flex: "0 0 auto" }} /> : <div style={{ width: 54, height: 54, borderRadius: 8, background: "#F4F1EA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flex: "0 0 auto" }}>📦</div>}
+                    <Thumb url={p.image_url} size={54} />
                     <div style={{ minWidth: 0, flex: 1 }}><div className="tag">{p.category || "Uncategorized"}</div><div className="card-name">{p.name}</div>{p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}</div>
                   </div>
                   <div className="stat" style={{ marginTop: 6 }}>🛒 {(p.vendors || []).map((v) => v.name).join(", ") || "no vendor"}{(p.vendors || [])[0]?.price != null ? ` · ${money((p.vendors || [])[0].price)}/case` : ""}</div>
@@ -371,9 +371,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
             return (
             <div className="card" key={p.product_id} style={p.not_stocked ? { opacity: 0.72 } : undefined}>
               <div style={{ display: "flex", gap: 10 }}>
-                {p.image_url
-                  ? <img src={p.image_url} alt="" loading="lazy" decoding="async" width="64" height="64" style={{ width: 64, height: 64, objectFit: "contain", borderRadius: 8, background: "#F4F1EA", flex: "0 0 auto" }} />
-                  : <div style={{ width: 64, height: 64, borderRadius: 8, background: "#F4F1EA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flex: "0 0 auto" }}>📦</div>}
+                <Thumb url={p.image_url} size={64} />
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div className="tag">{p.category || "Uncategorized"}</div>
                   <div className="card-name">{p.name}</div>
@@ -1786,6 +1784,15 @@ function bestVendor(p) {
   return rows[0];
 }
 function lineCost(l) { return (Number(l.purchase_qty) || 0) * (Number(l.unit_cost) || 0); }
+
+// Photo loads only when tapped — keeps the catalog from fetching every image on load.
+function Thumb({ url, size = 64 }) {
+  const [show, setShow] = useState(false);
+  const box = { width: size, height: size, borderRadius: 8, background: "#F4F1EA", flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center" };
+  if (!url) return <div style={{ ...box, fontSize: size > 60 ? 22 : 18 }}>📦</div>;
+  if (!show) return <button onClick={(e) => { e.stopPropagation(); setShow(true); }} title="Load photo" style={{ ...box, cursor: "pointer", border: "1px dashed #C9C4B8", fontSize: 10, lineHeight: 1.1, color: "#71757E", padding: 0 }}>See<br />photo</button>;
+  return <img src={url} alt="" decoding="async" width={size} height={size} style={{ ...box, objectFit: "contain" }} />;
+}
 
 function weekStart(dateStr) {  const dt = new Date(dateStr + "T00:00:00");
   const off = (dt.getDay() + 6) % 7; // Monday = start of week
