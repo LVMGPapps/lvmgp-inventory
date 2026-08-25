@@ -2040,19 +2040,36 @@ function PrepSheet({ products, reload }) {
   async function saveDay() {
     setBusy(true);
     try {
-      // 1) save any recounted batch remainings
+      // FIFO check across all items before writing anything
+      const today4 = new Date().toISOString().slice(0, 10);
+      const violations = [];
+      for (const it of items) {
+        const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id))
+          .slice().sort((a, b) => String(a.thawed_on).localeCompare(String(b.thawed_on)));
+        const leftOf = (b) => { const v = draft[`b${b.batch_id}`]; return v === undefined ? (Number(b.remaining) || 0) : (Number(v) || 0); };
+        for (let i = 0; i < mine.length; i++) {
+          if (leftOf(mine[i]) < (Number(mine[i].qty) || 0) - 0.0001) {
+            for (let j = 0; j < i; j++) { if (leftOf(mine[j]) > 0.0001) { violations.push(it.p.name); break; } }
+          }
+          if (violations.includes(it.p.name)) break;
+        }
+      }
+      if (violations.length) {
+        if (!confirm(`⚠ FIFO out of order for: ${violations.join(", ")}.\n\nA newer batch was used before an older one was finished. Save anyway?`)) { setBusy(false); return; }
+      }
+      // 1) save recounted batch remainings
       const batchEdits = Object.keys(draft).filter((k) => k.startsWith("b"));
       for (const k of batchEdits) { const id = Number(k.slice(1)); await db.setBatchRemaining(id, Number(draft[k]) || 0); }
-      // 2) per item: record the handoff (on_hand = counted fridge total, pulled), and create a batch for the pull
+      // 2) per item: record handoff + create a dated batch for the pull
       const entries = [];
       for (const it of items) {
         const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id));
         const inFridge = mine.reduce((a, b) => { const v = draft[`b${b.batch_id}`]; return a + (v === undefined ? (Number(b.remaining) || 0) : (Number(v) || 0)); }, 0);
         const d = draft[it.p.product_id] || {};
         const pulled = d.pulled === "" || d.pulled == null ? 0 : Number(d.pulled);
-        if (!batchEdits.length && !d.pulled && !d.by_who) continue;   // nothing touched for this item
+        if (!batchEdits.length && !d.pulled && !d.by_who) continue;
         entries.push({ product_id: it.p.product_id, on_hand: inFridge, pulled: pulled || null, by_who: d.by_who });
-        if (pulled > 0) await db.createBatch({ product_id: it.p.product_id, qty: pulled, shelf_days: it.p.fridge_shelf_days, pulled_by: d.by_who, thawed_on: date });
+        if (pulled > 0) await db.createBatch({ product_id: it.p.product_id, qty: pulled, shelf_days: it.p.fridge_shelf_days, pulled_by: d.by_who, thawed_on: d.batch_date || date });
       }
       if (entries.length) await db.savePrepLog(date, handoff, entries);
       setMsg(`${handoffName} prep saved.`);
@@ -2149,27 +2166,40 @@ function PrepSheet({ products, reload }) {
         <div>
           {items.length === 0 ? <div className="note">No items have a prep par for {dayName}. Set daily prep pars in an item's Catalog editor.</div> : (
             <div>
-              <div className="stat" style={{ marginBottom: 8 }}>At <b>{handoffName}</b>: for each item, count what's left in each dated batch. <b>Pull to par</b> = par − total in fridge — enter that under Pull to make a new dated batch.</div>
+              <div className="stat" style={{ marginBottom: 8 }}>At <b>{handoffName}</b>: count what's left in each dated batch (oldest first). <b>Pull to par</b> = par − total in fridge — enter that under Pull to make a new dated batch (set its date if it wasn't today).</div>
               {items.map((it) => {
-                const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id));
+                const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id))
+                  .slice().sort((a, b) => String(a.thawed_on).localeCompare(String(b.thawed_on)));   // oldest first
                 const today3 = new Date().toISOString().slice(0, 10);
-                const inFridge = mine.reduce((a, b) => { const v = draft[`b${b.batch_id}`]; return a + (v === undefined ? (Number(b.remaining) || 0) : (Number(v) || 0)); }, 0);
+                const leftOf = (b) => { const v = draft[`b${b.batch_id}`]; return v === undefined ? (Number(b.remaining) || 0) : (Number(v) || 0); };
+                const inFridge = mine.reduce((a, b) => a + leftOf(b), 0);
                 const pull = Math.max(0, it.par - inFridge);
+                // FIFO alarm: a newer batch dropped below its starting qty while an older batch still has product.
+                let fifoBad = false;
+                for (let i = 0; i < mine.length; i++) {
+                  const newer = mine[i];
+                  const reduced = leftOf(newer) < (Number(newer.qty) || 0) - 0.0001;   // this (newer) batch was drawn down
+                  if (reduced) { for (let j = 0; j < i; j++) { if (leftOf(mine[j]) > 0.0001) { fifoBad = true; break; } } }
+                  if (fifoBad) break;
+                }
                 return (
-                <div key={it.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr", alignItems: "flex-start", gap: 6 }}>
+                <div key={it.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr", alignItems: "flex-start", gap: 6, background: fifoBad ? "#FFF1F0" : undefined, borderRadius: fifoBad ? 8 : undefined }}>
                   <div style={{ width: "100%" }}>
                     <b>{it.p.name}</b> <span className="stat">· par {it.par} {unitLabel(it)} · in fridge {r1(inFridge)}</span>
+                    {fifoBad && <div style={{ color: "#B0271B", fontWeight: 700, fontSize: 12, marginTop: 2 }}>⚠ FIFO: a newer batch was used before an older one was finished. Use the oldest first.</div>}
                     {mine.length === 0 && <div className="stat" style={{ marginTop: 2 }}>No dated batches yet.</div>}
-                    {mine.map((b) => { const expired = b.expires_on && b.expires_on < today3; return (
+                    {mine.map((b, idx) => { const expired = b.expires_on && b.expires_on < today3; const oldest = idx === 0; return (
                       <div key={b.batch_id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
-                        <span className="stat" style={{ width: 168, color: expired ? "#B0271B" : "#71757E" }}>thawed {b.thawed_on} · exp {b.expires_on}{expired ? " ⚠" : ""}</span>
+                        <span className="stat" style={{ width: 180, color: expired ? "#B0271B" : "#71757E" }}>{oldest ? "▶ " : ""}thawed {b.thawed_on} · exp {b.expires_on}{expired ? " ⚠" : ""}</span>
                         <label style={{ fontSize: 12, color: "#71757E" }}>left <input className="fig" type="number" min="0" style={{ width: 64 }} value={draft[`b${b.batch_id}`] ?? b.remaining} onChange={(e) => setDraft((s) => ({ ...s, [`b${b.batch_id}`]: e.target.value }))} /></label>
+                        <span className="stat">/ {r1(b.qty)}</span>
                         {expired && <button className="mini mini-danger" onClick={() => discard(b)}>Discard</button>}
                       </div>
                     );})}
                     <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 6 }}>
                       <span className="fig" style={{ paddingBottom: 6, color: "#B0271B" }}>&rarr; pull {r1(pull)} {unitLabel(it)}</span>
                       <label style={{ width: 78, fontSize: 12, color: "#71757E" }}>Pull<input className="fig" type="number" min="0" placeholder={String(r1(pull))} value={val(it.p.product_id, "pulled")} onChange={(e) => setV(it.p.product_id, "pulled", e.target.value)} /></label>
+                      <label style={{ fontSize: 12, color: "#71757E" }}>Date prepped<input type="date" max={today3} value={draft[it.p.product_id]?.batch_date ?? date} onChange={(e) => setV(it.p.product_id, "batch_date", e.target.value)} /></label>
                       <label style={{ width: 88, fontSize: 12, color: "#71757E" }}>By<input value={val(it.p.product_id, "by_who")} onChange={(e) => setV(it.p.product_id, "by_who", e.target.value)} /></label>
                     </div>
                   </div>
