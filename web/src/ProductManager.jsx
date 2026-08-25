@@ -2012,7 +2012,9 @@ function PrepSheet({ products, reload }) {
   const [pars, setPars] = useState({});
   const [log, setLog] = useState({});
   const [draft, setDraft] = useState({});
-  const [view, setView] = useState("today");   // today | print | history
+  const [view, setView] = useState("shift");   // shift | today | fridge | print | history
+  const [usage, setUsage] = useState({});      // product_id -> {overall, byWeekday}
+  const [sdraft, setSdraft] = useState({});    // shift entry: product_id -> {used, ready, wip, by_who, pull}
   const [hist, setHist] = useState([]);
   const [batches, setBatches] = useState([]);
   const [msg, setMsg] = useState("");
@@ -2026,7 +2028,8 @@ function PrepSheet({ products, reload }) {
   useEffect(() => { db.getPrepLog(date, handoff).then((m) => { setLog(m); setDraft({}); }).catch(() => {}); }, [date, handoff]);
   useEffect(() => { if (view === "history") db.getPrepHistory(60).then(setHist).catch(() => {}); }, [view]);
   const loadBatches = () => db.listActiveBatches().then(setBatches).catch(() => {});
-  useEffect(() => { if (view === "fridge" || view === "today") loadBatches(); }, [view]);
+  useEffect(() => { if (view === "fridge" || view === "today" || view === "shift") loadBatches(); }, [view]);
+  useEffect(() => { if (view === "shift") { db.getUsageModel().then(setUsage).catch(() => {}); setSdraft({}); } }, [view, date, handoff]);
 
   const items = products.filter((p) => (pars[p.product_id]?.[wd] || 0) > 0)
     .map((p) => ({ p, par: Number(pars[p.product_id][wd]) || 0, unit: p.prep_unit || "each" }))
@@ -2036,6 +2039,59 @@ function PrepSheet({ products, reload }) {
   const setV = (pid, k, v) => setDraft((s) => ({ ...s, [pid]: { ...(s[pid] || {}), [k]: v } }));
   const toPull = (it) => { const oh = Number(val(it.p.product_id, "on_hand")); return Math.max(0, it.par - (isNaN(oh) ? 0 : oh)); };
   const unitLabel = (it) => it.unit === "each" ? (measure(it.p) || "each") : it.unit === "package" ? pkgName(it.p, 2) : "cases";
+
+  // ---- Shift-flow planning ----
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const addDays = (ds, n) => { const d = new Date(ds + "T00:00:00"); d.setDate(d.getDate() + n); return iso(d); };
+  const parForDate = (p, ds) => { const w = new Date(ds + "T00:00:00").getDay(); return Number(pars[p.product_id]?.[w]) || 0; };
+  const leadDaysOf = (p) => Math.ceil((Number(p.thaw_hours) || 0) / 24);
+  const expUse = (p, ds) => { const m = usage[p.product_id]; if (!m) return 0; const w = new Date(ds + "T00:00:00").getDay(); return Number(m.byWeekday?.[w] ?? m.overall) || 0; };
+
+  // Ready now / WIP for an item from live batches (fallbacks the cook confirms).
+  function readyWip(p) {
+    const today5 = new Date().toISOString().slice(0, 10);
+    const mine = batches.filter((b) => String(b.product_id) === String(p.product_id));
+    let ready = 0, wip = 0;
+    for (const b of mine) { const rem = Number(b.remaining) || 0; const isReady = b.ready_early || !b.ready_on || b.ready_on <= today5; if (isReady) ready += rem; else wip += rem; }
+    return { ready, wip };
+  }
+  // The plan: pull to cover the target day (today + lead), netting expected usage until then and WIP that lands in time.
+  function planFor(p, readyNow, wipNow) {
+    const lead = leadDaysOf(p);
+    const target = addDays(date, Math.max(lead, 0));
+    const targetPar = parForDate(p, target);
+    // expected usage from tomorrow through the target day (today's usage already reflected in readyNow at close)
+    let use = 0; for (let k = 1; k <= lead; k++) use += expUse(p, addDays(date, k));
+    const projected = Math.max(0, readyNow + wipNow - use);
+    const pull = Math.max(0, targetPar - projected);
+    return { lead, target, targetPar, use, projected, pull };
+  }
+  const verdict = (p, used) => {
+    const e = expUse(p, date); if (!(e > 0)) return { label: "logged", tone: "#71757E" };
+    const r = used / e;
+    if (r <= 0.6) return { label: "lighter than usual", tone: "#0a5c50" };
+    if (r >= 1.4) return { label: "heavier than usual", tone: "#B0271B" };
+    return { label: "about normal", tone: "#71757E" };
+  };
+
+  async function saveShift() {
+    const entries = [];
+    for (const it of items) {
+      const p = it.p; const d = sdraft[p.product_id] || {};
+      const touched = ["used", "ready", "wip", "pull", "by_who"].some((k) => d[k] !== undefined && d[k] !== "");
+      if (!touched) continue;
+      entries.push({ product_id: p.product_id, used: d.used, ready_snap: d.ready, wip_snap: d.wip, by_who: d.by_who, pulled: d.pull });
+    }
+    if (!entries.length) { setMsg("Nothing to save yet."); return; }
+    setBusy(true);
+    try {
+      await db.saveShift(date, handoff, entries);
+      // create a dated batch for any pull entered (open handoff)
+      for (const e of entries) { const amt = Number(e.pulled); if (amt > 0) { const p = byId[e.product_id]; await db.createBatch({ product_id: e.product_id, qty: amt, shelf_days: p?.fridge_shelf_days, thaw_hours: p?.thaw_hours, pulled_by: e.by_who, thawed_on: date }); } }
+      setMsg(`${handoffName} shift saved.`); setSdraft({}); await loadBatches();
+    } catch (e) { setMsg("Couldn't save: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
 
   async function saveDay() {
     setBusy(true);
@@ -2108,7 +2164,7 @@ function PrepSheet({ products, reload }) {
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <span className="bchip">{dayName}</span>
         <div style={{ flex: 1 }} />
-        {[["today", "Log"], ["fridge", "Fridge (FIFO)"], ["print", "Print"], ["history", "History"]].map(([k, t]) => (
+        {[["shift", "Shift"], ["today", "Log"], ["fridge", "Fridge (FIFO)"], ["print", "Print"], ["history", "History"]].map(([k, t]) => (
           <button key={k} className="mini" onClick={() => setView(k)} style={{ fontWeight: view === k ? 700 : 500, background: view === k ? "#191B1F" : "#fff", color: view === k ? "#fff" : "#191B1F", borderColor: view === k ? "#191B1F" : "#E6E1D6" }}>{t}</button>
         ))}
       </div>
@@ -2119,7 +2175,68 @@ function PrepSheet({ products, reload }) {
       </div>
       {msg && <div className="ok" style={{ marginBottom: 10 }}>{msg}</div>}
 
-      {view === "fridge" ? (
+      {view === "shift" ? (
+        <div>
+          {items.length === 0 ? <div className="note">No items have a prep par for {dayName}. Set daily prep pars in the Catalog editor.</div> : (
+            <div>
+              <div className="stat" style={{ marginBottom: 8 }}>
+                {handoff === "open" && <>Confirm what's on hand, then follow the suggested pull for each item.</>}
+                {handoff === "mid" && <>Enter how many you used this shift. That's all.</>}
+                {handoff === "close" && <>Enter used this shift, then confirm what's left ready and in process for tomorrow.</>}
+              </div>
+              {items.map((it) => {
+                const p = it.p;
+                const rw = readyWip(p);
+                const d = sdraft[p.product_id] || {};
+                const readyV = d.ready !== undefined ? Number(d.ready) || 0 : rw.ready;
+                const wipV = d.wip !== undefined ? Number(d.wip) || 0 : rw.wip;
+                const usedV = d.used === "" || d.used === undefined ? null : Number(d.used) || 0;
+                const setS = (k, v) => setSdraft((s) => ({ ...s, [p.product_id]: { ...(s[p.product_id] || {}), [k]: v } }));
+                const plan = planFor(p, readyV, wipV);
+                const shortPrep = usedV != null && usedV > rw.ready + 1e-9;
+                const vd = usedV != null ? verdict(p, usedV) : null;
+                return (
+                  <div key={p.product_id} className="crow" style={{ gridTemplateColumns: "1fr", gap: 4, background: shortPrep ? "#FFF6F5" : undefined, borderRadius: 8 }}>
+                    <div><b>{p.name}</b> <span className="stat">· par today {it.par} {unitLabel(it)}</span></div>
+
+                    {/* USED — mid & close */}
+                    {(handoff === "mid" || handoff === "close") && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <label style={{ fontSize: 12, color: "#71757E" }}>Used this shift <input className="fig" type="number" min="0" style={{ width: 70 }} value={d.used ?? ""} onChange={(e) => setS("used", e.target.value)} /></label>
+                        {vd && <span className="stat" style={{ color: vd.tone, fontWeight: 600 }}>{vd.label}</span>}
+                      </div>
+                    )}
+                    {shortPrep && (
+                      <div className="note" style={{ borderColor: "#E0392B", background: "#FFF1F0", margin: "2px 0" }}>
+                        <b style={{ color: "#B0271B" }}>Used more than we show ready ({usedV} used, {r1(rw.ready)} ready).</b> Please recount “ready” below. If that's right, pull <b>{r1(Math.ceil(usedV - rw.ready))}</b> extra now (short prep).
+                      </div>
+                    )}
+
+                    {/* CONFIRM COUNTS — open & close */}
+                    {(handoff === "open" || handoff === "close") && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <label style={{ fontSize: 12, color: "#71757E" }}>Ready <input className="fig" type="number" min="0" style={{ width: 66 }} value={d.ready ?? r1(rw.ready)} onChange={(e) => setS("ready", e.target.value)} /></label>
+                        <label style={{ fontSize: 12, color: "#71757E" }}>In process <input className="fig" type="number" min="0" style={{ width: 66 }} value={d.wip ?? r1(rw.wip)} onChange={(e) => setS("wip", e.target.value)} /></label>
+                        <span className="stat">by date: {batches.filter((b) => String(b.product_id) === String(p.product_id) && b.ready_on > new Date().toISOString().slice(0,10) && !b.ready_early).map((b) => `${r1(b.remaining)}→${b.ready_on}`).join(", ") || "—"}</span>
+                      </div>
+                    )}
+
+                    {/* SUGGESTED PULL — open only */}
+                    {handoff === "open" && (
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 2 }}>
+                        <span className="fig" style={{ color: "#0a5c50" }}>Pull {r1(plan.pull)} {unitLabel(it)}</span>
+                        <span className="stat">for {new Date(plan.target + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} (par {plan.targetPar}) → ~{r1(plan.projected + plan.pull)} ready that day</span>
+                        <label style={{ fontSize: 12, color: "#71757E" }}>Pulling <input className="fig" type="number" min="0" style={{ width: 66 }} placeholder={String(r1(plan.pull))} value={d.pull ?? ""} onChange={(e) => setS("pull", e.target.value)} /></label>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              <button className="btn btn-primary" disabled={busy} style={{ marginTop: 10 }} onClick={saveShift}>Save {handoffName} shift</button>
+            </div>
+          )}
+        </div>
+      ) : view === "fridge" ? (
         <div>
           <div className="stat" style={{ marginBottom: 8 }}>Thawed batches in the fridge, <b>oldest first</b>. Use the top one first; discard anything past its date (logs to waste).</div>
           {batches.length === 0 ? <div className="note">No active thawed batches. Pull items on the Log tab to create them.</div> : (() => {
