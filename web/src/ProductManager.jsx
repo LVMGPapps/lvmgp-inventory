@@ -200,7 +200,7 @@ export default function App() {
 
   if (loading) return <div className="pm"><style>{STYLE}</style><div className="wrap" style={{ padding: 60, textAlign: "center", color: "#71757E" }}>Loading…</div></div>;
 
-  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["waste", "Waste"], ["reports", "Dashboard"], ["users", "Users"]];
+  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["prep", "Prep"], ["waste", "Waste"], ["reports", "Dashboard"], ["users", "Users"]];
 
   return (
     <div className="pm">
@@ -226,6 +226,7 @@ export default function App() {
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} locations={locations} />}
         {tab === "waste" && <Waste products={products} locations={locations} reload={reload} />}
+        {tab === "prep" && <PrepSheet products={products} reload={reload} />}
         {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
       </div>
@@ -1995,6 +1996,122 @@ function Waste({ products, locations, reload }) {
                 </div>
               );})}
               <button className="btn btn-primary" disabled={busy} style={{ marginTop: 10 }} onClick={saveAll}>Log {rows.length} waste item{rows.length === 1 ? "" : "s"}</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PrepSheet({ products, reload }) {
+  const HANDOFFS = [["open", "Open"], ["mid", "Shift change"], ["close", "Close"]];
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [handoff, setHandoff] = useState("open");
+  const [pars, setPars] = useState({});
+  const [log, setLog] = useState({});
+  const [draft, setDraft] = useState({});
+  const [view, setView] = useState("today");   // today | print | history
+  const [hist, setHist] = useState([]);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+  const wd = new Date(date + "T00:00:00").getDay();
+  const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][wd];
+  const handoffName = Object.fromEntries(HANDOFFS)[handoff];
+
+  useEffect(() => { db.getPrepPars().then(setPars).catch(() => {}); }, []);
+  useEffect(() => { db.getPrepLog(date, handoff).then((m) => { setLog(m); setDraft({}); }).catch(() => {}); }, [date, handoff]);
+  useEffect(() => { if (view === "history") db.getPrepHistory(60).then(setHist).catch(() => {}); }, [view]);
+
+  const items = products.filter((p) => (pars[p.product_id]?.[wd] || 0) > 0)
+    .map((p) => ({ p, par: Number(pars[p.product_id][wd]) || 0, unit: p.prep_unit || "each" }))
+    .sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
+
+  const val = (pid, k) => draft[pid]?.[k] ?? (log[pid]?.[k] ?? "");
+  const setV = (pid, k, v) => setDraft((s) => ({ ...s, [pid]: { ...(s[pid] || {}), [k]: v } }));
+  const toPull = (it) => { const oh = Number(val(it.p.product_id, "on_hand")); return Math.max(0, it.par - (isNaN(oh) ? 0 : oh)); };
+  const unitLabel = (it) => it.unit === "each" ? (measure(it.p) || "each") : it.unit === "package" ? pkgName(it.p, 2) : "cases";
+
+  async function saveDay() {
+    const entries = items.filter((it) => draft[it.p.product_id]).map((it) => ({ product_id: it.p.product_id, ...draft[it.p.product_id] }));
+    if (!entries.length) { setMsg("No changes to save."); return; }
+    setBusy(true);
+    try { await db.savePrepLog(date, handoff, entries); setMsg(`${handoffName} prep saved.`); setLog(await db.getPrepLog(date, handoff)); setDraft({}); }
+    catch (e) { setMsg("Couldn't save: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+
+  function printSheet() {
+    const rows = items.map((it) => `<tr><td>${it.p.name}</td><td class=c>${it.par} ${unitLabel(it)}</td><td class=c></td><td class=c></td><td></td></tr>`).join("");
+    const html = `<html><head><title>Prep — ${dayName} ${handoffName}</title><style>
+      body{font-family:Arial,Helvetica,sans-serif;padding:20px;color:#111}
+      h1{font-size:20px;margin:0 0 2px} .sub{color:#555;margin:0 0 14px;font-size:13px}
+      table{width:100%;border-collapse:collapse} th,td{border:1px solid #bbb;padding:7px 8px;font-size:13px;text-align:left}
+      th{background:#f0f0f0} .c{text-align:center;width:96px} td:nth-child(5){width:90px}
+      tr{page-break-inside:avoid}</style></head><body>
+      <h1>Prep Sheet — ${dayName} · ${handoffName}</h1>
+      <p class=sub>${date} · count what's in the fridge, then pull freezer&rarr;fridge up to par. Initial when done.</p>
+      <table><thead><tr><th>Item</th><th class=c>Par</th><th class=c>In fridge now</th><th class=c>Pull to par</th><th>By</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan=5 style="text-align:center;color:#888">No prep items with a par for ' + dayName + '</td></tr>'}</tbody></table>
+      </body></html>`;
+    const w = window.open("", "_blank"); if (!w) { alert("Allow pop-ups to print."); return; }
+    w.document.write(html); w.document.close(); w.focus(); setTimeout(() => w.print(), 300);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <span className="bchip">{dayName}</span>
+        <div style={{ flex: 1 }} />
+        {[["today", "Log"], ["print", "Print"], ["history", "History"]].map(([k, t]) => (
+          <button key={k} className="mini" onClick={() => setView(k)} style={{ fontWeight: view === k ? 700 : 500, background: view === k ? "#191B1F" : "#fff", color: view === k ? "#fff" : "#191B1F", borderColor: view === k ? "#191B1F" : "#E6E1D6" }}>{t}</button>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        {HANDOFFS.map(([k, t]) => (
+          <button key={k} className="mini" onClick={() => setHandoff(k)} style={{ flex: "1 1 auto", fontWeight: handoff === k ? 700 : 500, background: handoff === k ? "#0E7C6B" : "#fff", color: handoff === k ? "#fff" : "#191B1F", borderColor: handoff === k ? "#0E7C6B" : "#E6E1D6" }}>{t}</button>
+        ))}
+      </div>
+      {msg && <div className="ok" style={{ marginBottom: 10 }}>{msg}</div>}
+
+      {view === "print" ? (
+        <div>
+          <div className="stat" style={{ marginBottom: 8 }}>Blank-fill sheet for <b>{dayName} · {handoffName}</b>: Item · Par · In fridge now · Pull to par · By. The outgoing team counts the fridge and pulls up to par.</div>
+          <button className="btn btn-primary" onClick={printSheet}>🖨 Print {handoffName} sheet</button>
+          <div className="secthead" style={{ marginTop: 16 }}>Preview ({items.length} items)</div>
+          {items.map((it) => <div key={it.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto" }}><div><b>{it.p.name}</b><div className="stat">{it.p.category || "—"}</div></div><div className="fig">par {it.par} {unitLabel(it)}</div></div>)}
+        </div>
+      ) : view === "history" ? (
+        <div>
+          <div className="stat" style={{ marginBottom: 8 }}>Last 60 days of prep handoffs.</div>
+          {hist.length === 0 ? <div className="note">Nothing logged yet.</div> : hist.map((r) => { const p = byId[r.product_id]; if (!p) return null; const hn = Object.fromEntries(HANDOFFS)[r.handoff] || r.handoff; return (
+            <div key={r.prep_log_id} className="crow" style={{ gridTemplateColumns: "1fr auto" }}>
+              <div><b>{p.name}</b><div className="stat">{new Date(r.prep_date + "T00:00:00").toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })} · {hn}{r.by_who ? ` · ${r.by_who}` : ""}</div></div>
+              <div className="fig" style={{ textAlign: "right" }}>pulled {r.pulled ?? "—"}<div className="stat">fridge {r.on_hand ?? "—"}</div></div>
+            </div>
+          );})}
+        </div>
+      ) : (
+        <div>
+          {items.length === 0 ? <div className="note">No items have a prep par for {dayName}. Set daily prep pars in an item's Catalog editor.</div> : (
+            <div>
+              <div className="stat" style={{ marginBottom: 8 }}>At <b>{handoffName}</b>: count what's in the fridge. <b>Pull to par</b> = par − in fridge — move that much freezer&rarr;fridge for the next shift.</div>
+              {items.map((it) => (
+                <div key={it.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto", alignItems: "flex-start", gap: 8 }}>
+                  <div style={{ width: "100%" }}>
+                    <b>{it.p.name}</b> <span className="stat">· par {it.par} {unitLabel(it)}</span>
+                    <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
+                      <label style={{ width: 84, fontSize: 12, color: "#71757E" }}>In fridge<input className="fig" type="number" min="0" value={val(it.p.product_id, "on_hand")} onChange={(e) => setV(it.p.product_id, "on_hand", e.target.value)} /></label>
+                      <span className="fig" style={{ paddingBottom: 6, color: "#B0271B" }}>&rarr; pull {toPull(it)}</span>
+                      <label style={{ width: 78, fontSize: 12, color: "#71757E" }}>Pulled<input className="fig" type="number" min="0" value={val(it.p.product_id, "pulled")} onChange={(e) => setV(it.p.product_id, "pulled", e.target.value)} /></label>
+                      <label style={{ width: 88, fontSize: 12, color: "#71757E" }}>By<input value={val(it.p.product_id, "by_who")} onChange={(e) => setV(it.p.product_id, "by_who", e.target.value)} /></label>
+                    </div>
+                  </div>
+                </div>
+              ))}
+              <button className="btn btn-primary" disabled={busy} style={{ marginTop: 10 }} onClick={saveDay}>Save {handoffName} prep</button>
             </div>
           )}
         </div>
