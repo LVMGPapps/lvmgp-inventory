@@ -184,7 +184,7 @@ export default function App() {
 
   if (loading) return <div className="pm"><style>{STYLE}</style><div className="wrap" style={{ padding: 60, textAlign: "center", color: "#71757E" }}>Loading…</div></div>;
 
-  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["reports", "Dashboard"], ["users", "Users"]];
+  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["waste", "Waste"], ["reports", "Dashboard"], ["users", "Users"]];
 
   return (
     <div className="pm">
@@ -209,6 +209,7 @@ export default function App() {
         {tab === "organize" && <Organize products={products} locations={locations} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} locations={locations} />}
+        {tab === "waste" && <Waste products={products} locations={locations} reload={reload} />}
         {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
       </div>
@@ -233,6 +234,14 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
   const [sortBy, setSortBy] = useState("az");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [showNotStocked, setShowNotStocked] = useState(false);
+  const [showDiscontinued, setShowDiscontinued] = useState(false);
+  const [discList, setDiscList] = useState(null);
+  useEffect(() => {
+    if (!showDiscontinued) return;
+    let live = true;
+    db.listDiscontinued().then((d) => { if (live) setDiscList(d); }).catch(() => { if (live) setDiscList([]); });
+    return () => { live = false; };
+  }, [showDiscontinued]);
   // Clone: copy an item's setup as a brand-new product (no counts/history), ready to tweak.
   const cloneProduct = (p) => {
     const c = JSON.parse(JSON.stringify(p));
@@ -308,9 +317,31 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
         <span className="stat" style={{ alignSelf: "center" }}>{list.length} item{list.length === 1 ? "" : "s"}</span>
         <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : (flaggedCount ? { borderColor: "#E0392B", color: "#E0392B" } : undefined)}>🚩 Needs recount{flaggedCount ? ` (${flaggedCount})` : ""}</button>
         {notStockedCount > 0 && <button className="mini" onClick={() => setShowNotStocked((v) => !v)} style={showNotStocked ? { background: "#3A3D44", color: "#fff", borderColor: "#3A3D44" } : undefined}>{showNotStocked ? "Hide" : "Show"} not-stocked ({notStockedCount})</button>}
+        <button className="mini" onClick={() => setShowDiscontinued((v) => !v)} style={showDiscontinued ? { background: "#7a5b00", color: "#fff", borderColor: "#7a5b00" } : undefined}>{showDiscontinued ? "← Back to catalog" : "Discontinued"}</button>
         {(locFilter || venFilter || q || flaggedOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); setFlaggedOnly(false); }}>Clear</button>}
       </div>
-      {list.length === 0 ? <div className="empty">No items match. Try clearing the filters.</div> : (
+      {showDiscontinued ? (
+        <div>
+          <div className="note" style={{ borderColor: "#7a5b00", background: "#FFF8E9", marginBottom: 10 }}>Discontinued items — hidden from counts, shopping, and reports, but kept on record. <b>Restore</b> brings one back into the catalog.</div>
+          {discList === null ? <div className="empty">Loading…</div> : discList.length === 0 ? <div className="empty">Nothing discontinued.</div> : (
+            <div className="grid">
+              {discList.map((p) => (
+                <div className="card" key={p.product_id} style={{ opacity: 0.85 }}>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    {p.image_url ? <img src={p.image_url} alt="" style={{ width: 54, height: 54, objectFit: "contain", borderRadius: 8, background: "#F4F1EA", flex: "0 0 auto" }} /> : <div style={{ width: 54, height: 54, borderRadius: 8, background: "#F4F1EA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flex: "0 0 auto" }}>📦</div>}
+                    <div style={{ minWidth: 0, flex: 1 }}><div className="tag">{p.category || "Uncategorized"}</div><div className="card-name">{p.name}</div>{p.brand && <div className="stat">{p.brand}{p.supc ? ` · #${p.supc}` : ""}</div>}</div>
+                  </div>
+                  <div className="stat" style={{ marginTop: 6 }}>🛒 {(p.vendors || []).map((v) => v.name).join(", ") || "no vendor"}{(p.vendors || [])[0]?.price != null ? ` · ${money((p.vendors || [])[0].price)}/case` : ""}</div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button className="mini" onClick={async () => { await db.setDiscontinued(p.product_id, false); setDiscList((d) => d.filter((x) => x.product_id !== p.product_id)); reload(); }}>↩ Restore</button>
+                    <button className="mini" onClick={() => setEdit(JSON.parse(JSON.stringify(p)))}>View / edit</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : list.length === 0 ? <div className="empty">No items match. Try clearing the filters.</div> : (
         <div className="grid">
           {list.map((p) => {
             const lc = lastCount[p.product_id];
@@ -483,6 +514,21 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             </select>
           )}
           {isBackup && <div className="stat" style={{ marginTop: 6 }}>Counted together with its main item, and shown as “Alternate for …” on the order list.</div>}
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginTop: 10 }}>
+            <input type="checkbox" checked={!!p.needs_thaw} onChange={(e) => set("needs_thaw", e.target.checked)} />
+            Must be thawed (moved freezer → fridge before use)
+          </label>
+          {p.needs_thaw && (
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
+              <div className="field" style={{ flex: "1 1 120px" }}><label>Thaw lead time (hours)</label><input type="number" min="0" step="1" placeholder="e.g. 24" value={p.thaw_hours ?? ""} onChange={(e) => set("thaw_hours", e.target.value)} /></div>
+              <div className="field" style={{ flex: "1 1 160px" }}><label>Thaws into (fridge)</label>
+                <select value={p.thaw_location_id ?? ""} onChange={(e) => set("thaw_location_id", e.target.value ? Number(e.target.value) : null)}>
+                  <option value="">— pick fridge —</option>
+                  {(locations || []).map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
+                </select>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="group">
@@ -1779,6 +1825,113 @@ function computeUsage(products, counts, receipts) {
   }
   rows.sort((a, b) => (b.cost || 0) - (a.cost || 0));
   return { rows, totalCost, interval };
+}
+
+function Waste({ products, locations, reload }) {
+  const [rows, setRows] = useState([]);          // items being logged now: {product_id, cases, packages, reason, note}
+  const [recent, setRecent] = useState([]);
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [tab, setTab] = useState("log");         // log | eod | report
+  const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+  const REASONS = ["spoiled", "expired", "dropped", "overprep", "prep-loss", "other"];
+
+  async function load() { try { setRecent(await db.getWaste(120)); } catch {} }
+  useEffect(() => { load(); }, []);
+
+  const addRow = (p) => { if (rows.some((r) => r.product_id === p.product_id)) return; setRows((s) => [...s, { product_id: p.product_id, cases: "", packages: "", reason: "spoiled", note: "" }]); };
+  const setRow = (pid, patch) => setRows((s) => s.map((r) => r.product_id === pid ? { ...r, ...patch } : r));
+  const delRow = (pid) => setRows((s) => s.filter((r) => r.product_id !== pid));
+
+  function rowUnits(r) {
+    const p = byId[r.product_id]; if (!p) return 0;
+    return (Number(r.cases) || 0) * usagePerCase(p) + (Number(r.packages) || 0) * usagePerPack(p);
+  }
+  async function saveAll() {
+    const entries = rows.map((r) => ({ product_id: r.product_id, qty: rowUnits(r), cases: Number(r.cases) || 0, reason: r.reason, note: r.note }))
+      .filter((e) => e.qty > 0 || e.cases > 0);
+    if (!entries.length) { setMsg("Enter a quantity for at least one item."); return; }
+    setBusy(true);
+    try { await db.logWaste(entries); setMsg(`Logged ${entries.length} waste entr${entries.length === 1 ? "y" : "ies"}.`); setRows([]); await load(); reload && reload(); }
+    catch (e) { setMsg("Couldn't save: " + (e.message || e)); }
+    finally { setBusy(false); }
+  }
+
+  // ---- Report: totals by item and by reason over the window ----
+  const byItem = {}, byReason = {};
+  for (const w of recent) {
+    const p = byId[w.product_id]; if (!p) continue;
+    (byItem[w.product_id] ||= { p, units: 0, n: 0 });
+    byItem[w.product_id].units += Number(w.qty) || 0; byItem[w.product_id].n += 1;
+    const rk = w.reason || "other"; byReason[rk] = (byReason[rk] || 0) + (Number(w.qty) || 0);
+  }
+  const itemRows = Object.values(byItem).sort((a, b) => b.units - a.units);
+  const label = (d) => new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+        {[["log", "Log waste"], ["eod", "End of day"], ["report", "Waste report"]].map(([k, t]) => (
+          <button key={k} className="mini" onClick={() => setTab(k)} style={{ fontWeight: tab === k ? 700 : 500, background: tab === k ? "#191B1F" : "#fff", color: tab === k ? "#fff" : "#191B1F", borderColor: tab === k ? "#191B1F" : "#E6E1D6" }}>{t}</button>
+        ))}
+      </div>
+      {msg && <div className="ok" style={{ marginBottom: 10 }}>{msg}</div>}
+
+      {tab === "report" ? (
+        <div>
+          <div className="stat" style={{ marginBottom: 8 }}>Waste logged in the last 120 days.</div>
+          {itemRows.length === 0 ? <div className="note">Nothing logged yet.</div> : (
+            <>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                {Object.entries(byReason).sort((a, b) => b[1] - a[1]).map(([r, u]) => <span key={r} className="bchip">{r}: {itemRows.length ? "" : ""}{Math.round(u * 10) / 10}</span>)}
+              </div>
+              {itemRows.map(({ p, units, n }) => (
+                <div key={p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto", alignItems: "center" }}>
+                  <div><b>{p.name}</b><div className="stat">{n} entr{n === 1 ? "y" : "ies"}</div></div>
+                  <div className="fig">{fmtQty(p, units)}</div>
+                </div>
+              ))}
+              <div className="secthead" style={{ marginTop: 16 }}>Recent entries</div>
+              {recent.slice(0, 40).map((w) => { const p = byId[w.product_id]; if (!p) return null; return (
+                <div key={w.waste_id} className="crow" style={{ gridTemplateColumns: "1fr auto auto", alignItems: "center", gap: 8 }}>
+                  <div><b>{p.name}</b><div className="stat">{label(w.wasted_at)} · {w.reason || "—"}{w.note ? ` · ${w.note}` : ""}</div></div>
+                  <div className="fig">{fmtQty(p, Number(w.qty) || 0)}</div>
+                  <button className="mini mini-danger" onClick={async () => { if (confirm("Delete this waste entry?")) { await db.deleteWaste(w.waste_id); load(); reload && reload(); } }}>✕</button>
+                </div>
+              );})}
+            </>
+          )}
+        </div>
+      ) : (
+        <div>
+          {tab === "eod"
+            ? <div className="stat" style={{ marginBottom: 8 }}>End-of-day sweep: add everything you tossed today, set amounts and reasons, then save once.</div>
+            : <div className="stat" style={{ marginBottom: 8 }}>Log waste as it happens: add the item, how much, and why.</div>}
+          <Picker products={products} exclude={rows.map((r) => r.product_id)} onPick={addRow} />
+          {rows.length === 0 ? <div className="note" style={{ marginTop: 10 }}>Add an item above to start.</div> : (
+            <div style={{ marginTop: 10 }}>
+              {rows.map((r) => { const p = byId[r.product_id]; if (!p) return null; const showCase = (Number(p.packages_per_case) || 1) > 1; return (
+                <div key={r.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto", alignItems: "flex-start", gap: 8 }}>
+                  <div style={{ width: "100%" }}>
+                    <b>{p.name}</b>
+                    <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
+                      {showCase && <label style={{ width: 60 }}>Cases<input className="fig" type="number" min="0" value={r.cases} onChange={(e) => setRow(r.product_id, { cases: e.target.value })} /></label>}
+                      <label style={{ width: 72 }}>{pkgName(p, 2)}<input className="fig" type="number" min="0" value={r.packages} onChange={(e) => setRow(r.product_id, { packages: e.target.value })} /></label>
+                      <select value={r.reason} onChange={(e) => setRow(r.product_id, { reason: e.target.value })}>{REASONS.map((x) => <option key={x} value={x}>{x}</option>)}</select>
+                      <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(p, rowUnits(r))}</span>
+                    </div>
+                    <input style={{ width: "100%", marginTop: 6 }} placeholder="note (optional)" value={r.note} onChange={(e) => setRow(r.product_id, { note: e.target.value })} />
+                  </div>
+                  <button className="mini mini-danger" onClick={() => delRow(r.product_id)}>✕</button>
+                </div>
+              );})}
+              <button className="btn btn-primary" disabled={busy} style={{ marginTop: 10 }} onClick={saveAll}>Log {rows.length} waste item{rows.length === 1 ? "" : "s"}</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload, openItem }) {
