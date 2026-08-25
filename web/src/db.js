@@ -334,8 +334,13 @@ export async function listActiveBatches() {
   if (error) throw error;
   return data ?? [];
 }
-export async function useBatch(batch_id, amount) {
-  // subtract from remaining; mark used when depleted
+export async function setBatchRemaining(batch_id, remaining) {
+  const rem = Math.max(0, Number(remaining) || 0);
+  const patch = { remaining: rem }; if (rem <= 0.0001) patch.status = "used";
+  const { error } = await supabase.from("thaw_batch").update(patch).eq("batch_id", batch_id);
+  if (error) throw error;
+}
+export async function useBatch(batch_id, amount) {  // subtract from remaining; mark used when depleted
   const { data, error } = await supabase.from("thaw_batch").select("remaining").eq("batch_id", batch_id).single();
   if (error) throw error;
   const rem = Math.max(0, (Number(data.remaining) || 0) - (Number(amount) || 0));
