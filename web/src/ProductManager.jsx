@@ -2069,7 +2069,7 @@ function PrepSheet({ products, reload }) {
         const pulled = d.pulled === "" || d.pulled == null ? 0 : Number(d.pulled);
         if (!batchEdits.length && !d.pulled && !d.by_who) continue;
         entries.push({ product_id: it.p.product_id, on_hand: inFridge, pulled: pulled || null, by_who: d.by_who });
-        if (pulled > 0) await db.createBatch({ product_id: it.p.product_id, qty: pulled, shelf_days: it.p.fridge_shelf_days, pulled_by: d.by_who, thawed_on: d.batch_date || date });
+        if (pulled > 0) await db.createBatch({ product_id: it.p.product_id, qty: pulled, shelf_days: it.p.fridge_shelf_days, thaw_hours: it.p.thaw_hours, pulled_by: d.by_who, thawed_on: d.batch_date || date });
       }
       if (entries.length) await db.savePrepLog(date, handoff, entries);
       setMsg(`${handoffName} prep saved.`);
@@ -2129,15 +2129,19 @@ function PrepSheet({ products, reload }) {
             return Object.entries(byProd).map(([pid, list]) => { const p = byId[pid]; if (!p) return null; const u = (p.prep_unit === "each" ? (measure(p) || "each") : p.prep_unit === "package" ? pkgName(p, 2) : "cases"); return (
               <div key={pid} style={{ marginBottom: 12 }}>
                 <div style={{ fontWeight: 700 }}>{p.name}</div>
-                {list.map((b, idx) => { const expired = b.expires_on && b.expires_on < today2; const dueToday = b.expires_on === today2; return (
-                  <div key={b.batch_id} className="crow" style={{ gridTemplateColumns: "1fr auto auto", alignItems: "center", gap: 8, background: expired ? "#FFF1F0" : (idx === 0 ? "#F1FAF7" : undefined), borderRadius: 8 }}>
+                {list.map((b, idx) => { const expired = b.expires_on && b.expires_on < today2; const dueToday = b.expires_on === today2; const inProcess = b.ready_on && b.ready_on > today2 && !b.ready_early; return (
+                  <div key={b.batch_id} className="crow" style={{ gridTemplateColumns: "1fr auto auto", alignItems: "center", gap: 8, background: expired ? "#FFF1F0" : (inProcess ? "#F5F3FF" : (idx === 0 ? "#F1FAF7" : undefined)), borderRadius: 8 }}>
                     <div>
-                      <span className="fig">{r1(b.remaining)} {u}</span> {idx === 0 && !expired && <span className="bchip" style={{ background: "#E6F4F0", borderColor: "#0E7C6B", color: "#0a5c50" }}>use first</span>}
+                      <span className="fig">{r1(b.remaining)} {u}</span>
+                      {inProcess && <span className="bchip" style={{ background: "#EEE9FF", borderColor: "#6A54C7", color: "#4a3a9c" }}>in process · ready {b.ready_on}</span>}
+                      {!inProcess && idx === 0 && !expired && <span className="bchip" style={{ background: "#E6F4F0", borderColor: "#0E7C6B", color: "#0a5c50" }}>use first</span>}
                       {expired && <span className="bchip" style={{ background: "#FDE7E5", borderColor: "#E0392B", color: "#B0271B" }}>expired</span>}
                       {dueToday && !expired && <span className="bchip" style={{ background: "#FFF4E5", borderColor: "#B26A00", color: "#B26A00" }}>use today</span>}
-                      <div className="stat">thawed {b.thawed_on} · expires {b.expires_on}{b.pulled_by ? ` · ${b.pulled_by}` : ""}</div>
+                      <div className="stat">thawed {b.thawed_on} · ready {b.ready_on || b.thawed_on} · expires {b.expires_on}{b.pulled_by ? ` · ${b.pulled_by}` : ""}</div>
                     </div>
-                    <button className="mini" onClick={() => useUp(b, b.remaining)} title="Mark this batch used up">Used</button>
+                    {inProcess
+                      ? <button className="mini" onClick={async () => { await db.markReady(b.batch_id); loadBatches(); }} title="It thawed faster — mark ready now">Ready now</button>
+                      : <button className="mini" onClick={() => useUp(b, b.remaining)} title="Mark this batch used up">Used</button>}
                     <button className="mini mini-danger" onClick={() => discard(b)} title="Discard & log waste">Discard</button>
                   </div>
                 );})}
