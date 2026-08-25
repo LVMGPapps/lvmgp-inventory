@@ -315,21 +315,30 @@ export async function getPrepHistory(days = 60) {
 
 // ---- FIFO thaw batches ----
 const DEFAULT_SHELF_DAYS = 3;
-export async function createBatch({ product_id, qty, shelf_days, pulled_by, note, thawed_on }) {
+export async function createBatch({ product_id, qty, shelf_days, thaw_hours, pulled_by, note, thawed_on }) {
   const on = thawed_on || new Date().toISOString().slice(0, 10);
   const days = (shelf_days == null || shelf_days === "") ? DEFAULT_SHELF_DAYS : Number(shelf_days);
   const exp = new Date(on + "T00:00:00"); exp.setDate(exp.getDate() + days);
+  // ready_on = pull date + ceil(thaw hours / 24). Short-lead (<24h) is ready same day.
+  const leadDays = Math.ceil((Number(thaw_hours) || 0) / 24);
+  const rdy = new Date(on + "T00:00:00"); rdy.setDate(rdy.getDate() + leadDays);
   const row = { product_id: Number(product_id), qty: Number(qty) || 0, remaining: Number(qty) || 0,
-    thawed_on: on, expires_on: exp.toISOString().slice(0, 10), status: "active",
-    pulled_by: pulled_by || null, note: note || null };
+    thawed_on: on, ready_on: rdy.toISOString().slice(0, 10), expires_on: exp.toISOString().slice(0, 10),
+    status: "active", pulled_by: pulled_by || null, note: note || null };
   if (!(row.qty > 0)) return null;
   const { data, error } = await supabase.from("thaw_batch").insert(row).select("batch_id").single();
   if (error) throw error;
   return data?.batch_id;
 }
+export async function markReady(batch_id) {
+  const { error } = await supabase.from("thaw_batch")
+    .update({ ready_early: true, ready_on: new Date().toISOString().slice(0, 10) })
+    .eq("batch_id", batch_id);
+  if (error) throw error;
+}
 export async function listActiveBatches() {
   const { data, error } = await supabase.from("thaw_batch")
-    .select("batch_id, product_id, qty, remaining, thawed_on, expires_on, status, pulled_by, note")
+    .select("batch_id, product_id, qty, remaining, thawed_on, ready_on, ready_early, expires_on, status, pulled_by, note")
     .eq("status", "active").order("thawed_on", { ascending: true }).limit(100000);   // oldest first = FIFO
   if (error) throw error;
   return data ?? [];
