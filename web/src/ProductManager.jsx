@@ -416,6 +416,15 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
   const [busy, setBusy] = useState(false);
   const [bc, setBc] = useState("");
   const [isBackup, setIsBackup] = useState(!!product.backup_for);
+  const [prepUnit, setPrepUnit] = useState(product.prep_unit || "each");
+  const [prep, setPrep] = useState({});          // { 0..6: amount }
+  const [prepOn, setPrepOn] = useState(false);
+  useEffect(() => {
+    if (!product.product_id) return;
+    let live = true;
+    db.getPrepPars().then((m) => { if (!live) return; const mine = m[product.product_id] || {}; setPrep(mine); if (Object.values(mine).some((v) => Number(v) > 0)) setPrepOn(true); }).catch(() => {});
+    return () => { live = false; };
+  }, [product.product_id]);
   const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
   const isNew = !p.product_id;
 
@@ -439,7 +448,10 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
   async function save() {
     setBusy(true);
     try {
-      if (isNew) await db.createProduct(p); else await db.updateProduct(p);
+      let pid = p.product_id;
+      if (isNew) { pid = await db.createProduct(p); }
+      else await db.updateProduct(p);
+      if (prepOn && pid) { try { await db.setPrepPar(pid, prepUnit, prep); } catch (e) { /* non-fatal */ } }
       onSaved();
     } catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
   }
@@ -540,6 +552,36 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
                   <option value="">— pick fridge —</option>
                   {(locations || []).map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
                 </select>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="group">
+          <div className="group-t">Daily prep par</div>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+            <input type="checkbox" checked={prepOn} onChange={(e) => setPrepOn(e.target.checked)} />
+            Set how much to have prepped per day
+          </label>
+          {prepOn && (
+            <div style={{ marginTop: 8 }}>
+              <div className="field" style={{ maxWidth: 200 }}><label>Prep unit</label>
+                <select value={prepUnit} onChange={(e) => setPrepUnit(e.target.value)}>
+                  <option value="each">{measure(p) || "each"} (pieces)</option>
+                  <option value="package">{pkgName(p, 2)}</option>
+                  <option value="case">cases</option>
+                </select>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d, i) => (
+                  <label key={i} style={{ width: 62, fontSize: 12, color: "#71757E" }}>{d}
+                    <input className="fig" type="number" min="0" step="0.1" value={prep[i] ?? ""} onChange={(e) => setPrep((s) => ({ ...s, [i]: e.target.value }))} />
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button className="mini" type="button" onClick={() => { const v = prep[1] ?? prep[0] ?? ""; setPrep({ 0: v, 1: v, 2: v, 3: v, 4: v, 5: v, 6: v }); }}>Same every day</button>
+                <span className="stat" style={{ alignSelf: "center" }}>Amounts are in {prepUnit === "each" ? (measure(p) || "each") : prepUnit === "package" ? pkgName(p, 2) : "cases"}.</span>
               </div>
             </div>
           )}
