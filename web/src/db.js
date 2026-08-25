@@ -50,7 +50,7 @@ export async function createProduct(p) {
     usage_per_package: Number(p.usage_per_package) || 1,
     use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
-    needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null,
+    needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null, fridge_shelf_days: (p.fridge_shelf_days === "" || p.fridge_shelf_days == null) ? null : Number(p.fridge_shelf_days),
   }).select("product_id").single();
   if (error) throw error;
   const id = data.product_id;
@@ -83,7 +83,7 @@ export async function updateProduct(p) {
     usage_per_package: Number(p.usage_per_package) || 1,
     use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
-    needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null,
+    needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null, fridge_shelf_days: (p.fridge_shelf_days === "" || p.fridge_shelf_days == null) ? null : Number(p.fridge_shelf_days),
     updated_at: new Date().toISOString(),
   }).eq("product_id", id);
   if (error) throw error;
@@ -312,6 +312,51 @@ export async function getPrepHistory(days = 60) {
   if (error) throw error;
   return data ?? [];
 }
+
+// ---- FIFO thaw batches ----
+const DEFAULT_SHELF_DAYS = 3;
+export async function createBatch({ product_id, qty, shelf_days, pulled_by, note, thawed_on }) {
+  const on = thawed_on || new Date().toISOString().slice(0, 10);
+  const days = (shelf_days == null || shelf_days === "") ? DEFAULT_SHELF_DAYS : Number(shelf_days);
+  const exp = new Date(on + "T00:00:00"); exp.setDate(exp.getDate() + days);
+  const row = { product_id: Number(product_id), qty: Number(qty) || 0, remaining: Number(qty) || 0,
+    thawed_on: on, expires_on: exp.toISOString().slice(0, 10), status: "active",
+    pulled_by: pulled_by || null, note: note || null };
+  if (!(row.qty > 0)) return null;
+  const { data, error } = await supabase.from("thaw_batch").insert(row).select("batch_id").single();
+  if (error) throw error;
+  return data?.batch_id;
+}
+export async function listActiveBatches() {
+  const { data, error } = await supabase.from("thaw_batch")
+    .select("batch_id, product_id, qty, remaining, thawed_on, expires_on, status, pulled_by, note")
+    .eq("status", "active").order("thawed_on", { ascending: true }).limit(100000);   // oldest first = FIFO
+  if (error) throw error;
+  return data ?? [];
+}
+export async function useBatch(batch_id, amount) {
+  // subtract from remaining; mark used when depleted
+  const { data, error } = await supabase.from("thaw_batch").select("remaining").eq("batch_id", batch_id).single();
+  if (error) throw error;
+  const rem = Math.max(0, (Number(data.remaining) || 0) - (Number(amount) || 0));
+  const patch = { remaining: rem }; if (rem <= 0.0001) patch.status = "used";
+  const { error: e2 } = await supabase.from("thaw_batch").update(patch).eq("batch_id", batch_id);
+  if (e2) throw e2;
+}
+export async function discardBatch(batch_id, amount, reason = "expired") {
+  // log the discarded amount to waste, then close the batch
+  const { data, error } = await supabase.from("thaw_batch").select("product_id, remaining").eq("batch_id", batch_id).single();
+  if (error) throw error;
+  const amt = amount == null ? (Number(data.remaining) || 0) : Number(amount) || 0;
+  if (amt > 0) {
+    await supabase.from("waste_log").insert({ product_id: data.product_id, qty: amt, cases: 0, reason, note: "discarded thawed batch", wasted_at: new Date().toISOString() });
+  }
+  const rem = Math.max(0, (Number(data.remaining) || 0) - amt);
+  const patch = { remaining: rem, status: rem <= 0.0001 ? "discarded" : "active" };
+  const { error: e2 } = await supabase.from("thaw_batch").update(patch).eq("batch_id", batch_id);
+  if (e2) throw e2;
+}
+
 
 
 export async function getItemCounts(productId, days = 400) {
