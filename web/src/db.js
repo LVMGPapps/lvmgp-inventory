@@ -8,7 +8,7 @@ async function uid() {
 }
 
 // ---- Catalog ----
-export async function getCatalog(domain = "fnb") {
+export async function getCatalog(domain = "fnb", activeVal = true) {
   const { data, error } = await supabase
     .from("product")
     .select(
@@ -17,7 +17,7 @@ export async function getCatalog(domain = "fnb") {
       " product_barcode(code)",
     )
     .eq("domain", domain)
-    .eq("active", true)
+    .eq("active", activeVal)
     .order("category")
     .order("name");
   if (error) throw error;
@@ -50,6 +50,7 @@ export async function createProduct(p) {
     usage_per_package: Number(p.usage_per_package) || 1,
     use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
+    needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null,
   }).select("product_id").single();
   if (error) throw error;
   const id = data.product_id;
@@ -82,6 +83,7 @@ export async function updateProduct(p) {
     usage_per_package: Number(p.usage_per_package) || 1,
     use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
+    needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null,
     updated_at: new Date().toISOString(),
   }).eq("product_id", id);
   if (error) throw error;
@@ -190,6 +192,12 @@ export async function deleteProduct(id) {
   const { error } = await supabase.from("product").update({ active: false }).eq("product_id", id);
   if (error) throw error;
 }
+// Discontinue = soft-hide but keep the record; restore brings it back.
+export async function setDiscontinued(id, discontinued) {
+  const { error } = await supabase.from("product").update({ active: !discontinued }).eq("product_id", id);
+  if (error) throw error;
+}
+export async function listDiscontinued(domain = "fnb") { return getCatalog(domain, false); }
 
 // ---- Locations / vendors ----
 export async function listLocations() {
@@ -221,7 +229,40 @@ export async function postCounts(entries) {
   return rows.length;
 }
 
-// ---- Edit / fix individual counts ----
+// ---- Waste logging ----
+export async function logWaste(entries) {
+  const rows = (Array.isArray(entries) ? entries : [entries]).map((e) => ({
+    product_id: Number(e.product_id), location_id: e.location_id ? Number(e.location_id) : null,
+    qty: Number(e.qty) || 0, cases: Number(e.cases) || 0,
+    reason: e.reason || null, note: e.note || null,
+    wasted_at: e.wasted_at || new Date().toISOString(),
+  })).filter((r) => r.product_id && (r.qty > 0 || r.cases > 0));
+  if (!rows.length) return 0;
+  const { error } = await supabase.from("waste_log").insert(rows);
+  if (error) throw error;
+  return rows.length;
+}
+export async function getWaste(days = 120) {
+  const since = new Date(Date.now() - days * 864e5).toISOString();
+  const { data, error } = await supabase.from("waste_log")
+    .select("waste_id, product_id, location_id, qty, cases, reason, note, wasted_at")
+    .gte("wasted_at", since).order("wasted_at", { ascending: false }).limit(100000);
+  if (error) throw error;
+  return data ?? [];
+}
+export async function deleteWaste(id) {
+  const { error } = await supabase.from("waste_log").delete().eq("waste_id", id);
+  if (error) throw error;
+}
+export async function setThaw(productId, { needs_thaw, thaw_hours, thaw_location_id }) {
+  const patch = {};
+  if (needs_thaw !== undefined) patch.needs_thaw = !!needs_thaw;
+  if (thaw_hours !== undefined) patch.thaw_hours = thaw_hours === "" || thaw_hours == null ? null : Number(thaw_hours);
+  if (thaw_location_id !== undefined) patch.thaw_location_id = thaw_location_id ? Number(thaw_location_id) : null;
+  const { error } = await supabase.from("product").update(patch).eq("product_id", productId);
+  if (error) throw error;
+}
+
 export async function getItemCounts(productId, days = 400) {
   const since = new Date(Date.now() - days * 864e5).toISOString();
   const { data, error } = await supabase.from("stock_count")
