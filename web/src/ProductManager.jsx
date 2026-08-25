@@ -2026,7 +2026,7 @@ function PrepSheet({ products, reload }) {
   useEffect(() => { db.getPrepLog(date, handoff).then((m) => { setLog(m); setDraft({}); }).catch(() => {}); }, [date, handoff]);
   useEffect(() => { if (view === "history") db.getPrepHistory(60).then(setHist).catch(() => {}); }, [view]);
   const loadBatches = () => db.listActiveBatches().then(setBatches).catch(() => {});
-  useEffect(() => { if (view === "fridge") loadBatches(); }, [view]);
+  useEffect(() => { if (view === "fridge" || view === "today") loadBatches(); }, [view]);
 
   const items = products.filter((p) => (pars[p.product_id]?.[wd] || 0) > 0)
     .map((p) => ({ p, par: Number(pars[p.product_id][wd]) || 0, unit: p.prep_unit || "each" }))
@@ -2038,19 +2038,26 @@ function PrepSheet({ products, reload }) {
   const unitLabel = (it) => it.unit === "each" ? (measure(it.p) || "each") : it.unit === "package" ? pkgName(it.p, 2) : "cases";
 
   async function saveDay() {
-    const entries = items.filter((it) => draft[it.p.product_id]).map((it) => ({ product_id: it.p.product_id, ...draft[it.p.product_id] }));
-    if (!entries.length) { setMsg("No changes to save."); return; }
     setBusy(true);
     try {
-      await db.savePrepLog(date, handoff, entries);
-      // Each amount pulled creates a dated FIFO batch in the fridge.
-      for (const e of entries) {
-        const amt = Number(e.pulled);
-        if (amt > 0) { const p = byId[e.product_id]; await db.createBatch({ product_id: e.product_id, qty: amt, shelf_days: p?.fridge_shelf_days, pulled_by: e.by_who, thawed_on: date }); }
+      // 1) save any recounted batch remainings
+      const batchEdits = Object.keys(draft).filter((k) => k.startsWith("b"));
+      for (const k of batchEdits) { const id = Number(k.slice(1)); await db.setBatchRemaining(id, Number(draft[k]) || 0); }
+      // 2) per item: record the handoff (on_hand = counted fridge total, pulled), and create a batch for the pull
+      const entries = [];
+      for (const it of items) {
+        const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id));
+        const inFridge = mine.reduce((a, b) => { const v = draft[`b${b.batch_id}`]; return a + (v === undefined ? (Number(b.remaining) || 0) : (Number(v) || 0)); }, 0);
+        const d = draft[it.p.product_id] || {};
+        const pulled = d.pulled === "" || d.pulled == null ? 0 : Number(d.pulled);
+        if (!batchEdits.length && !d.pulled && !d.by_who) continue;   // nothing touched for this item
+        entries.push({ product_id: it.p.product_id, on_hand: inFridge, pulled: pulled || null, by_who: d.by_who });
+        if (pulled > 0) await db.createBatch({ product_id: it.p.product_id, qty: pulled, shelf_days: it.p.fridge_shelf_days, pulled_by: d.by_who, thawed_on: date });
       }
-      setMsg(`${handoffName} prep saved.`); setLog(await db.getPrepLog(date, handoff)); setDraft({}); loadBatches();
-    }
-    catch (e) { setMsg("Couldn't save: " + (e.message || e)); }
+      if (entries.length) await db.savePrepLog(date, handoff, entries);
+      setMsg(`${handoffName} prep saved.`);
+      setDraft({}); setLog(await db.getPrepLog(date, handoff)); await loadBatches();
+    } catch (e) { setMsg("Couldn't save: " + (e.message || e)); }
     finally { setBusy(false); }
   }
   async function useUp(b, amt) { try { await db.useBatch(b.batch_id, amt); loadBatches(); } catch (e) { alert(e.message || e); } }
@@ -2142,20 +2149,32 @@ function PrepSheet({ products, reload }) {
         <div>
           {items.length === 0 ? <div className="note">No items have a prep par for {dayName}. Set daily prep pars in an item's Catalog editor.</div> : (
             <div>
-              <div className="stat" style={{ marginBottom: 8 }}>At <b>{handoffName}</b>: count what's in the fridge. <b>Pull to par</b> = par − in fridge — move that much freezer&rarr;fridge for the next shift.</div>
-              {items.map((it) => (
-                <div key={it.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr auto", alignItems: "flex-start", gap: 8 }}>
+              <div className="stat" style={{ marginBottom: 8 }}>At <b>{handoffName}</b>: for each item, count what's left in each dated batch. <b>Pull to par</b> = par − total in fridge — enter that under Pull to make a new dated batch.</div>
+              {items.map((it) => {
+                const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id));
+                const today3 = new Date().toISOString().slice(0, 10);
+                const inFridge = mine.reduce((a, b) => { const v = draft[`b${b.batch_id}`]; return a + (v === undefined ? (Number(b.remaining) || 0) : (Number(v) || 0)); }, 0);
+                const pull = Math.max(0, it.par - inFridge);
+                return (
+                <div key={it.p.product_id} className="crow" style={{ gridTemplateColumns: "1fr", alignItems: "flex-start", gap: 6 }}>
                   <div style={{ width: "100%" }}>
-                    <b>{it.p.name}</b> <span className="stat">· par {it.par} {unitLabel(it)}</span>
-                    <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
-                      <label style={{ width: 84, fontSize: 12, color: "#71757E" }}>In fridge<input className="fig" type="number" min="0" value={val(it.p.product_id, "on_hand")} onChange={(e) => setV(it.p.product_id, "on_hand", e.target.value)} /></label>
-                      <span className="fig" style={{ paddingBottom: 6, color: "#B0271B" }}>&rarr; pull {toPull(it)}</span>
-                      <label style={{ width: 78, fontSize: 12, color: "#71757E" }}>Pulled<input className="fig" type="number" min="0" value={val(it.p.product_id, "pulled")} onChange={(e) => setV(it.p.product_id, "pulled", e.target.value)} /></label>
+                    <b>{it.p.name}</b> <span className="stat">· par {it.par} {unitLabel(it)} · in fridge {r1(inFridge)}</span>
+                    {mine.length === 0 && <div className="stat" style={{ marginTop: 2 }}>No dated batches yet.</div>}
+                    {mine.map((b) => { const expired = b.expires_on && b.expires_on < today3; return (
+                      <div key={b.batch_id} style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 4 }}>
+                        <span className="stat" style={{ width: 168, color: expired ? "#B0271B" : "#71757E" }}>thawed {b.thawed_on} · exp {b.expires_on}{expired ? " ⚠" : ""}</span>
+                        <label style={{ fontSize: 12, color: "#71757E" }}>left <input className="fig" type="number" min="0" style={{ width: 64 }} value={draft[`b${b.batch_id}`] ?? b.remaining} onChange={(e) => setDraft((s) => ({ ...s, [`b${b.batch_id}`]: e.target.value }))} /></label>
+                        {expired && <button className="mini mini-danger" onClick={() => discard(b)}>Discard</button>}
+                      </div>
+                    );})}
+                    <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 6 }}>
+                      <span className="fig" style={{ paddingBottom: 6, color: "#B0271B" }}>&rarr; pull {r1(pull)} {unitLabel(it)}</span>
+                      <label style={{ width: 78, fontSize: 12, color: "#71757E" }}>Pull<input className="fig" type="number" min="0" placeholder={String(r1(pull))} value={val(it.p.product_id, "pulled")} onChange={(e) => setV(it.p.product_id, "pulled", e.target.value)} /></label>
                       <label style={{ width: 88, fontSize: 12, color: "#71757E" }}>By<input value={val(it.p.product_id, "by_who")} onChange={(e) => setV(it.p.product_id, "by_who", e.target.value)} /></label>
                     </div>
                   </div>
                 </div>
-              ))}
+              );})}
               <button className="btn btn-primary" disabled={busy} style={{ marginTop: 10 }} onClick={saveDay}>Save {handoffName} prep</button>
             </div>
           )}
