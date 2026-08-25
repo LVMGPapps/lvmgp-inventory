@@ -1861,16 +1861,17 @@ function Waste({ products, locations, reload }) {
   async function load() { try { setRecent(await db.getWaste(120)); } catch {} }
   useEffect(() => { load(); }, []);
 
-  const addRow = (p) => { if (rows.some((r) => r.product_id === p.product_id)) return; setRows((s) => [...s, { product_id: p.product_id, cases: "", packages: "", reason: "spoiled", note: "" }]); };
+  const today0 = new Date().toISOString().slice(0, 10);
+  const addRow = (p) => { if (rows.some((r) => r.product_id === p.product_id)) return; setRows((s) => [...s, { product_id: p.product_id, cases: "", packages: "", each: "", reason: "spoiled", note: "", date: today0 }]); };
   const setRow = (pid, patch) => setRows((s) => s.map((r) => r.product_id === pid ? { ...r, ...patch } : r));
   const delRow = (pid) => setRows((s) => s.filter((r) => r.product_id !== pid));
 
   function rowUnits(r) {
     const p = byId[r.product_id]; if (!p) return 0;
-    return (Number(r.cases) || 0) * usagePerCase(p) + (Number(r.packages) || 0) * usagePerPack(p);
+    return (Number(r.cases) || 0) * usagePerCase(p) + (Number(r.packages) || 0) * usagePerPack(p) + (Number(r.each) || 0);
   }
   async function saveAll() {
-    const entries = rows.map((r) => ({ product_id: r.product_id, qty: rowUnits(r), cases: Number(r.cases) || 0, reason: r.reason, note: r.note }))
+    const entries = rows.map((r) => ({ product_id: r.product_id, qty: rowUnits(r), cases: Number(r.cases) || 0, reason: r.reason, note: r.note, wasted_at: r.date ? new Date(r.date + "T12:00:00").toISOString() : undefined }))
       .filter((e) => e.qty > 0 || e.cases > 0);
     if (!entries.length) { setMsg("Enter a quantity for at least one item."); return; }
     setBusy(true);
@@ -1939,10 +1940,14 @@ function Waste({ products, locations, reload }) {
                     <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
                       {showCase && <label style={{ width: 60 }}>Cases<input className="fig" type="number" min="0" value={r.cases} onChange={(e) => setRow(r.product_id, { cases: e.target.value })} /></label>}
                       <label style={{ width: 72 }}>{pkgName(p, 2)}<input className="fig" type="number" min="0" value={r.packages} onChange={(e) => setRow(r.product_id, { packages: e.target.value })} /></label>
+                      {!wholeOnly(p) && <label style={{ width: 66 }}>{measure(p)}<input className="fig" type="number" min="0" step="0.01" value={r.each} onChange={(e) => setRow(r.product_id, { each: e.target.value })} /></label>}
                       <select value={r.reason} onChange={(e) => setRow(r.product_id, { reason: e.target.value })}>{REASONS.map((x) => <option key={x} value={x}>{x}</option>)}</select>
                       <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(p, rowUnits(r))}</span>
                     </div>
-                    <input style={{ width: "100%", marginTop: 6 }} placeholder="note (optional)" value={r.note} onChange={(e) => setRow(r.product_id, { note: e.target.value })} />
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 6 }}>
+                      <label style={{ fontSize: 12, color: "#71757E" }}>Date wasted <input type="date" max={today0} value={r.date} onChange={(e) => setRow(r.product_id, { date: e.target.value })} /></label>
+                      <input style={{ flex: "1 1 140px", minWidth: 120 }} placeholder="note (optional)" value={r.note} onChange={(e) => setRow(r.product_id, { note: e.target.value })} />
+                    </div>
                   </div>
                   <button className="mini mini-danger" onClick={() => delRow(r.product_id)}>✕</button>
                 </div>
