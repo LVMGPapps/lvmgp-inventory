@@ -279,6 +279,41 @@ export async function setPrepPar(productId, prepUnit, byWeekday) {
   if (error) throw error;
 }
 
+// ---- Daily prep log (per handoff: open / mid / close) ----
+export async function getPrepLog(date, handoff) {
+  let q = supabase.from("prep_log")
+    .select("prep_log_id, product_id, prep_date, handoff, on_hand, pulled, made, by_who, note")
+    .eq("prep_date", date);
+  if (handoff) q = q.eq("handoff", handoff);
+  const { data, error } = await q;
+  if (error) throw error;
+  const map = {};
+  for (const r of data ?? []) map[r.product_id] = r;
+  return map;   // { product_id: row } for the given handoff
+}
+export async function savePrepLog(date, handoff, entries) {
+  const rows = entries.map((e) => ({
+    product_id: Number(e.product_id), prep_date: date, handoff: handoff || "close",
+    on_hand: e.on_hand === "" || e.on_hand == null ? null : Number(e.on_hand),
+    pulled: e.pulled === "" || e.pulled == null ? null : Number(e.pulled),
+    made: e.made === "" || e.made == null ? null : Number(e.made),
+    by_who: e.by_who || null, note: e.note || null,
+  }));
+  if (!rows.length) return 0;
+  const { error } = await supabase.from("prep_log").upsert(rows, { onConflict: "product_id,prep_date,handoff" });
+  if (error) throw error;
+  return rows.length;
+}
+export async function getPrepHistory(days = 60) {
+  const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
+  const { data, error } = await supabase.from("prep_log")
+    .select("prep_log_id, product_id, prep_date, handoff, on_hand, pulled, made, by_who, note")
+    .gte("prep_date", since).order("prep_date", { ascending: false }).limit(100000);
+  if (error) throw error;
+  return data ?? [];
+}
+
+
 export async function getItemCounts(productId, days = 400) {
   const since = new Date(Date.now() - days * 864e5).toISOString();
   const { data, error } = await supabase.from("stock_count")
