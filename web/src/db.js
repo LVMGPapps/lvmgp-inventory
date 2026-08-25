@@ -255,12 +255,27 @@ export async function deleteWaste(id) {
   const { error } = await supabase.from("waste_log").delete().eq("waste_id", id);
   if (error) throw error;
 }
-export async function setThaw(productId, { needs_thaw, thaw_hours, thaw_location_id }) {
-  const patch = {};
+export async function setThaw(productId, { needs_thaw, thaw_hours, thaw_location_id }) {  const patch = {};
   if (needs_thaw !== undefined) patch.needs_thaw = !!needs_thaw;
   if (thaw_hours !== undefined) patch.thaw_hours = thaw_hours === "" || thaw_hours == null ? null : Number(thaw_hours);
   if (thaw_location_id !== undefined) patch.thaw_location_id = thaw_location_id ? Number(thaw_location_id) : null;
   const { error } = await supabase.from("product").update(patch).eq("product_id", productId);
+  if (error) throw error;
+}
+
+// ---- Daily prep par (per weekday) ----
+export async function getPrepPars() {
+  const { data, error } = await supabase.from("prep_par").select("product_id, weekday, amount").limit(100000);
+  if (error) throw error;
+  const map = {};
+  for (const r of data ?? []) { (map[r.product_id] ||= {})[r.weekday] = Number(r.amount) || 0; }
+  return map;   // { product_id: { 0:amt, 1:amt, … } }
+}
+export async function setPrepPar(productId, prepUnit, byWeekday) {
+  await supabase.from("product").update({ prep_unit: prepUnit || null }).eq("product_id", productId);
+  const rows = [];
+  for (let d = 0; d < 7; d++) rows.push({ product_id: Number(productId), weekday: d, amount: Number(byWeekday?.[d]) || 0 });
+  const { error } = await supabase.from("prep_par").upsert(rows, { onConflict: "product_id,weekday" });
   if (error) throw error;
 }
 
