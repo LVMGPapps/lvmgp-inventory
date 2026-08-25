@@ -307,11 +307,50 @@ export async function savePrepLog(date, handoff, entries) {
 export async function getPrepHistory(days = 60) {
   const since = new Date(Date.now() - days * 864e5).toISOString().slice(0, 10);
   const { data, error } = await supabase.from("prep_log")
-    .select("prep_log_id, product_id, prep_date, handoff, on_hand, pulled, made, by_who, note")
+    .select("prep_log_id, product_id, prep_date, handoff, on_hand, pulled, made, used, ready_snap, wip_snap, by_who, note")
     .gte("prep_date", since).order("prep_date", { ascending: false }).limit(100000);
   if (error) throw error;
   return data ?? [];
 }
+
+// Expected daily usage per product, from logged 'used' — same-weekday average, else overall.
+export async function getUsageModel(days = 56) {
+  const rows = await getPrepHistory(days);
+  const byDay = {};      // product_id -> { date -> summed used }
+  for (const r of rows) {
+    if (r.used == null) continue;
+    (byDay[r.product_id] ||= {});
+    byDay[r.product_id][r.prep_date] = (byDay[r.product_id][r.prep_date] || 0) + (Number(r.used) || 0);
+  }
+  const model = {};      // product_id -> { overall, byWeekday: {0..6} }
+  for (const pid of Object.keys(byDay)) {
+    const days2 = Object.entries(byDay[pid]);
+    const all = days2.map(([, v]) => v);
+    const overall = all.length ? all.reduce((a, b) => a + b, 0) / all.length : 0;
+    const wk = {}; const wkc = {};
+    for (const [d, v] of days2) { const w = new Date(d + "T00:00:00").getDay(); wk[w] = (wk[w] || 0) + v; wkc[w] = (wkc[w] || 0) + 1; }
+    const byWeekday = {}; for (let w = 0; w < 7; w++) byWeekday[w] = wkc[w] ? wk[w] / wkc[w] : overall;
+    model[pid] = { overall, byWeekday };
+  }
+  return model;
+}
+
+// Save one shift handoff (open confirms counts; mid/close record used).
+export async function saveShift(date, handoff, entries) {
+  const rows = entries.map((e) => ({
+    product_id: Number(e.product_id), prep_date: date, handoff: handoff || "close",
+    used: e.used === "" || e.used == null ? null : Number(e.used),
+    pulled: e.pulled === "" || e.pulled == null ? null : Number(e.pulled),
+    ready_snap: e.ready_snap === "" || e.ready_snap == null ? null : Number(e.ready_snap),
+    wip_snap: e.wip_snap === "" || e.wip_snap == null ? null : Number(e.wip_snap),
+    by_who: e.by_who || null,
+  }));
+  if (!rows.length) return 0;
+  const { error } = await supabase.from("prep_log").upsert(rows, { onConflict: "product_id,prep_date,handoff" });
+  if (error) throw error;
+  return rows.length;
+}
+
 
 // ---- FIFO thaw batches ----
 const DEFAULT_SHELF_DAYS = 3;
@@ -330,8 +369,7 @@ export async function createBatch({ product_id, qty, shelf_days, thaw_hours, pul
   if (error) throw error;
   return data?.batch_id;
 }
-export async function markReady(batch_id) {
-  const { error } = await supabase.from("thaw_batch")
+export async function markReady(batch_id) {  const { error } = await supabase.from("thaw_batch")
     .update({ ready_early: true, ready_on: new Date().toISOString().slice(0, 10) })
     .eq("batch_id", batch_id);
   if (error) throw error;
