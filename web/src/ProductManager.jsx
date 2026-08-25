@@ -554,6 +554,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
                   {(locations || []).map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
                 </select>
               </div>
+              <div className="field" style={{ flex: "1 1 120px" }}><label>Fridge shelf life (days)</label><input type="number" min="0" step="0.5" placeholder="default 3" value={p.fridge_shelf_days ?? ""} onChange={(e) => set("fridge_shelf_days", e.target.value)} /></div>
             </div>
           )}
         </div>
@@ -2013,6 +2014,7 @@ function PrepSheet({ products, reload }) {
   const [draft, setDraft] = useState({});
   const [view, setView] = useState("today");   // today | print | history
   const [hist, setHist] = useState([]);
+  const [batches, setBatches] = useState([]);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
@@ -2023,6 +2025,8 @@ function PrepSheet({ products, reload }) {
   useEffect(() => { db.getPrepPars().then(setPars).catch(() => {}); }, []);
   useEffect(() => { db.getPrepLog(date, handoff).then((m) => { setLog(m); setDraft({}); }).catch(() => {}); }, [date, handoff]);
   useEffect(() => { if (view === "history") db.getPrepHistory(60).then(setHist).catch(() => {}); }, [view]);
+  const loadBatches = () => db.listActiveBatches().then(setBatches).catch(() => {});
+  useEffect(() => { if (view === "fridge") loadBatches(); }, [view]);
 
   const items = products.filter((p) => (pars[p.product_id]?.[wd] || 0) > 0)
     .map((p) => ({ p, par: Number(pars[p.product_id][wd]) || 0, unit: p.prep_unit || "each" }))
@@ -2037,9 +2041,24 @@ function PrepSheet({ products, reload }) {
     const entries = items.filter((it) => draft[it.p.product_id]).map((it) => ({ product_id: it.p.product_id, ...draft[it.p.product_id] }));
     if (!entries.length) { setMsg("No changes to save."); return; }
     setBusy(true);
-    try { await db.savePrepLog(date, handoff, entries); setMsg(`${handoffName} prep saved.`); setLog(await db.getPrepLog(date, handoff)); setDraft({}); }
+    try {
+      await db.savePrepLog(date, handoff, entries);
+      // Each amount pulled creates a dated FIFO batch in the fridge.
+      for (const e of entries) {
+        const amt = Number(e.pulled);
+        if (amt > 0) { const p = byId[e.product_id]; await db.createBatch({ product_id: e.product_id, qty: amt, shelf_days: p?.fridge_shelf_days, pulled_by: e.by_who, thawed_on: date }); }
+      }
+      setMsg(`${handoffName} prep saved.`); setLog(await db.getPrepLog(date, handoff)); setDraft({}); loadBatches();
+    }
     catch (e) { setMsg("Couldn't save: " + (e.message || e)); }
     finally { setBusy(false); }
+  }
+  async function useUp(b, amt) { try { await db.useBatch(b.batch_id, amt); loadBatches(); } catch (e) { alert(e.message || e); } }
+  async function discard(b) {
+    const def = Number(b.remaining) || 0;
+    const ans = prompt(`Discard how much of ${byId[b.product_id]?.name || "this batch"}? (thawed ${b.thawed_on}, expires ${b.expires_on})\nThis logs to waste as expired.`, String(def));
+    if (ans === null) return;
+    try { await db.discardBatch(b.batch_id, Number(ans) || 0, "expired"); loadBatches(); reload && reload(); } catch (e) { alert(e.message || e); }
   }
 
   function printSheet() {
@@ -2065,7 +2084,7 @@ function PrepSheet({ products, reload }) {
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <span className="bchip">{dayName}</span>
         <div style={{ flex: 1 }} />
-        {[["today", "Log"], ["print", "Print"], ["history", "History"]].map(([k, t]) => (
+        {[["today", "Log"], ["fridge", "Fridge (FIFO)"], ["print", "Print"], ["history", "History"]].map(([k, t]) => (
           <button key={k} className="mini" onClick={() => setView(k)} style={{ fontWeight: view === k ? 700 : 500, background: view === k ? "#191B1F" : "#fff", color: view === k ? "#fff" : "#191B1F", borderColor: view === k ? "#191B1F" : "#E6E1D6" }}>{t}</button>
         ))}
       </div>
@@ -2076,7 +2095,33 @@ function PrepSheet({ products, reload }) {
       </div>
       {msg && <div className="ok" style={{ marginBottom: 10 }}>{msg}</div>}
 
-      {view === "print" ? (
+      {view === "fridge" ? (
+        <div>
+          <div className="stat" style={{ marginBottom: 8 }}>Thawed batches in the fridge, <b>oldest first</b>. Use the top one first; discard anything past its date (logs to waste).</div>
+          {batches.length === 0 ? <div className="note">No active thawed batches. Pull items on the Log tab to create them.</div> : (() => {
+            const today2 = new Date().toISOString().slice(0, 10);
+            const byProd = {};
+            for (const b of batches) (byProd[b.product_id] ||= []).push(b);
+            return Object.entries(byProd).map(([pid, list]) => { const p = byId[pid]; if (!p) return null; const u = (p.prep_unit === "each" ? (measure(p) || "each") : p.prep_unit === "package" ? pkgName(p, 2) : "cases"); return (
+              <div key={pid} style={{ marginBottom: 12 }}>
+                <div style={{ fontWeight: 700 }}>{p.name}</div>
+                {list.map((b, idx) => { const expired = b.expires_on && b.expires_on < today2; const dueToday = b.expires_on === today2; return (
+                  <div key={b.batch_id} className="crow" style={{ gridTemplateColumns: "1fr auto auto", alignItems: "center", gap: 8, background: expired ? "#FFF1F0" : (idx === 0 ? "#F1FAF7" : undefined), borderRadius: 8 }}>
+                    <div>
+                      <span className="fig">{r1(b.remaining)} {u}</span> {idx === 0 && !expired && <span className="bchip" style={{ background: "#E6F4F0", borderColor: "#0E7C6B", color: "#0a5c50" }}>use first</span>}
+                      {expired && <span className="bchip" style={{ background: "#FDE7E5", borderColor: "#E0392B", color: "#B0271B" }}>expired</span>}
+                      {dueToday && !expired && <span className="bchip" style={{ background: "#FFF4E5", borderColor: "#B26A00", color: "#B26A00" }}>use today</span>}
+                      <div className="stat">thawed {b.thawed_on} · expires {b.expires_on}{b.pulled_by ? ` · ${b.pulled_by}` : ""}</div>
+                    </div>
+                    <button className="mini" onClick={() => useUp(b, b.remaining)} title="Mark this batch used up">Used</button>
+                    <button className="mini mini-danger" onClick={() => discard(b)} title="Discard & log waste">Discard</button>
+                  </div>
+                );})}
+              </div>
+            );});
+          })()}
+        </div>
+      ) : view === "print" ? (
         <div>
           <div className="stat" style={{ marginBottom: 8 }}>Blank-fill sheet for <b>{dayName} · {handoffName}</b>: Item · Par · In fridge now · Pull to par · By. The outgoing team counts the fridge and pulls up to par.</div>
           <button className="btn btn-primary" onClick={printSheet}>🖨 Print {handoffName} sheet</button>
