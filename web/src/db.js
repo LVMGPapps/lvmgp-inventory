@@ -130,10 +130,11 @@ export async function deleteUser(email) {
 
 // ---- Product photos (Supabase Storage) ----
 export async function uploadProductImage(file, productId) {
+  // Resized blobs come in as image/jpeg with no name — default to jpg.
   const ext = (String(file.name || "").split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
-  const path = `${productId || "new"}/${Date.now()}.${ext}`;
+  const path = `${productId || "new"}/${Date.now()}.${ext === "jpeg" ? "jpg" : ext}`;
   const { error } = await supabase.storage.from("product-photos")
-    .upload(path, file, { upsert: true, contentType: file.type || "image/jpeg" });
+    .upload(path, file, { upsert: true, contentType: file.type || "image/jpeg", cacheControl: "31536000" });
   if (error) throw error;
   const { data } = supabase.storage.from("product-photos").getPublicUrl(path);
   return data.publicUrl;
