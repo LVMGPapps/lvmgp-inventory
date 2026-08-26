@@ -541,50 +541,92 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             </select>
           )}
           {isBackup && <div className="stat" style={{ marginTop: 6 }}>Counted together with its main item, and shown as “Alternate for …” on the order list.</div>}
-          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginTop: 10 }}>
-            <input type="checkbox" checked={!!p.needs_thaw} onChange={(e) => set("needs_thaw", e.target.checked)} />
-            Must be thawed (moved freezer → fridge before use)
-          </label>
-          {p.needs_thaw && (
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
-              <div className="field" style={{ flex: "1 1 120px" }}><label>Thaw lead time (hours)</label><input type="number" min="0" step="1" placeholder="e.g. 24" value={p.thaw_hours ?? ""} onChange={(e) => set("thaw_hours", e.target.value)} /></div>
-              <div className="field" style={{ flex: "1 1 160px" }}><label>Thaws into (fridge)</label>
-                <select value={p.thaw_location_id ?? ""} onChange={(e) => set("thaw_location_id", e.target.value ? Number(e.target.value) : null)}>
-                  <option value="">— pick fridge —</option>
-                  {(locations || []).map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
-                </select>
-              </div>
-              <div className="field" style={{ flex: "1 1 120px" }}><label>Fridge shelf life (days)</label><input type="number" min="0" step="0.5" placeholder="default 3" value={p.fridge_shelf_days ?? ""} onChange={(e) => set("fridge_shelf_days", e.target.value)} /></div>
-            </div>
-          )}
         </div>
 
         <div className="group">
-          <div className="group-t">Daily prep par</div>
+          <div className="group-t">Prep</div>
+
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
-            <input type="checkbox" checked={prepOn} onChange={(e) => setPrepOn(e.target.checked)} />
-            Set how much to have prepped per day
+            <input type="checkbox" checked={!!p.needs_prep} onChange={(e) => set("needs_prep", e.target.checked)} />
+            This item needs prep (directions, timing, and/or pars)
           </label>
-          {prepOn && (
+
+          {p.needs_prep && (
             <div style={{ marginTop: 8 }}>
-              <div className="field" style={{ maxWidth: 200 }}><label>Prep unit</label>
-                <select value={prepUnit} onChange={(e) => setPrepUnit(e.target.value)}>
-                  <option value="each">{measure(p) || "each"} (pieces)</option>
-                  <option value="package">{pkgName(p, 2)}</option>
-                  <option value="case">cases</option>
-                </select>
+              {/* Directions / SOP */}
+              <div className="field"><label>Prep directions / SOP</label>
+                <textarea rows={3} style={{ width: "100%", fontFamily: "inherit", fontSize: 13 }} placeholder="e.g. Lay dogs on a tray not touching, freeze solid ~1–2h, then combine into a labeled freezer container (item + date). Oldest date used first."
+                  value={p.prep_notes ?? ""} onChange={(e) => set("prep_notes", e.target.value)} />
               </div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
-                {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d, i) => (
-                  <label key={i} style={{ width: 62, fontSize: 12, color: "#71757E" }}>{d}
-                    <input className="fig" type="number" min="0" step="0.1" value={prep[i] ?? ""} onChange={(e) => setPrep((s) => ({ ...s, [i]: e.target.value }))} />
+
+              {/* Where it's kept after prep */}
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", margin: "8px 0 4px" }}>
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+                  <input type="radio" name={`prepdest-${p.product_id ?? "new"}`} checked={!p.prep_to_freezer && !p.needs_thaw} onChange={() => setP((s) => ({ ...s, prep_to_freezer: false, needs_thaw: false }))} />
+                  Prep on the day (no advance storage)
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+                  <input type="radio" name={`prepdest-${p.product_id ?? "new"}`} checked={!!p.needs_thaw} onChange={() => setP((s) => ({ ...s, needs_thaw: true, prep_to_freezer: false }))} />
+                  Thawed freezer → fridge before use
+                </label>
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+                  <input type="radio" name={`prepdest-${p.product_id ?? "new"}`} checked={!!p.prep_to_freezer} onChange={() => setP((s) => ({ ...s, prep_to_freezer: true, needs_thaw: false }))} />
+                  Prepped &amp; kept in the freezer
+                </label>
+              </div>
+
+              {/* Thaw settings — only when it thaws into a fridge */}
+              {p.needs_thaw && (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 8 }}>
+                  <div className="field" style={{ flex: "1 1 120px" }}><label>Thaw lead time (hours)</label><input type="number" min="0" step="1" placeholder="e.g. 48" value={p.thaw_hours ?? ""} onChange={(e) => set("thaw_hours", e.target.value)} /></div>
+                  <div className="field" style={{ flex: "1 1 160px" }}><label>Thaws into (fridge)</label>
+                    <select value={p.thaw_location_id ?? ""} onChange={(e) => set("thaw_location_id", e.target.value ? Number(e.target.value) : null)}>
+                      <option value="">— pick fridge —</option>
+                      {(locations || []).map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="field" style={{ flex: "1 1 120px" }}><label>Fridge shelf life (days)</label><input type="number" min="0" step="0.5" placeholder="default 3" value={p.fridge_shelf_days ?? ""} onChange={(e) => set("fridge_shelf_days", e.target.value)} /></div>
+                </div>
+              )}
+
+              {/* Advance-prep timeframe for non-thaw prep (optional) */}
+              {!p.needs_thaw && (
+                <div className="field" style={{ maxWidth: 220, marginTop: 4 }}><label>Advance prep time (hours, optional)</label><input type="number" min="0" step="1" placeholder="e.g. 2" value={p.prep_advance_hours ?? ""} onChange={(e) => set("prep_advance_hours", e.target.value)} /></div>
+              )}
+
+              {/* Daily pars — NOT for freezer-kept prep items */}
+              {p.prep_to_freezer ? (
+                <div className="stat" style={{ marginTop: 8 }}>Kept frozen after prep — no daily pars. Prep to build freezer stock; use oldest first.</div>
+              ) : (
+                <div style={{ marginTop: 10 }}>
+                  <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
+                    <input type="checkbox" checked={prepOn} onChange={(e) => setPrepOn(e.target.checked)} />
+                    Set daily prep pars (how much ready per day)
                   </label>
-                ))}
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                <button className="mini" type="button" onClick={() => { const v = prep[1] ?? prep[0] ?? ""; setPrep({ 0: v, 1: v, 2: v, 3: v, 4: v, 5: v, 6: v }); }}>Same every day</button>
-                <span className="stat" style={{ alignSelf: "center" }}>Amounts are in {prepUnit === "each" ? (measure(p) || "each") : prepUnit === "package" ? pkgName(p, 2) : "cases"}.</span>
-              </div>
+                  {prepOn && (
+                    <div style={{ marginTop: 8 }}>
+                      <div className="field" style={{ maxWidth: 200 }}><label>Prep unit</label>
+                        <select value={prepUnit} onChange={(e) => setPrepUnit(e.target.value)}>
+                          <option value="each">{measure(p) || "each"} (pieces)</option>
+                          <option value="package">{pkgName(p, 2)}</option>
+                          <option value="case">cases</option>
+                        </select>
+                      </div>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d, i) => (
+                          <label key={i} style={{ width: 62, fontSize: 12, color: "#71757E" }}>{d}
+                            <input className="fig" type="number" min="0" step="0.1" value={prep[i] ?? ""} onChange={(e) => setPrep((s) => ({ ...s, [i]: e.target.value }))} />
+                          </label>
+                        ))}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                        <button className="mini" type="button" onClick={() => { const v = prep[1] ?? prep[0] ?? ""; setPrep({ 0: v, 1: v, 2: v, 3: v, 4: v, 5: v, 6: v }); }}>Same every day</button>
+                        <span className="stat" style={{ alignSelf: "center" }}>Amounts are in {prepUnit === "each" ? (measure(p) || "each") : prepUnit === "package" ? pkgName(p, 2) : "cases"}.</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
