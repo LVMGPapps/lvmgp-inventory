@@ -200,7 +200,7 @@ export default function App() {
 
   if (loading) return <div className="pm"><style>{STYLE}</style><div className="wrap" style={{ padding: 60, textAlign: "center", color: "#71757E" }}>Loading…</div></div>;
 
-  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["prep", "Prep"], ["waste", "Waste"], ["reports", "Dashboard"], ["users", "Users"]];
+  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["prep", "Prep"], ["waste", "Waste"], ["recipes", "Recipes"], ["reports", "Dashboard"], ["users", "Users"]];
 
   return (
     <div className="pm">
@@ -227,6 +227,7 @@ export default function App() {
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} locations={locations} />}
         {tab === "waste" && <Waste products={products} locations={locations} reload={reload} />}
         {tab === "prep" && <PrepSheet products={products} reload={reload} />}
+        {tab === "recipes" && <Recipes products={products} reload={reload} />}
         {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
       </div>
@@ -2373,6 +2374,98 @@ function PrepSheet({ products, reload }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function Recipes({ products, reload }) {
+  const [q, setQ] = useState("");
+  const [edit, setEdit] = useState(null);   // product being edited
+  const withCook = products.filter((p) => p.cook_directions || p.cook_temp || p.cook_time || p.cook_image_url);
+  const list = (q ? products.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())) : withCook)
+    .slice().sort((a, b) => (a.category || "~").localeCompare(b.category || "~") || a.name.localeCompare(b.name));
+
+  return (
+    <div>
+      <div className="toolbar" style={{ marginBottom: 12 }}>
+        <input placeholder="Search all items to add directions…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
+      </div>
+      {!q && withCook.length === 0 && <div className="note">No cooking directions yet. Search an item above to add its directions and a photo.</div>}
+      {list.length === 0 ? (q ? <div className="empty">No items match “{q}”.</div> : null) : (
+        <div className="grid">
+          {list.map((p) => {
+            const has = p.cook_directions || p.cook_temp || p.cook_time || p.cook_image_url;
+            return (
+              <div className="card" key={p.product_id}>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <Thumb url={p.cook_image_url} size={64} />
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="tag">{p.category || "Uncategorized"}</div>
+                    <div className="card-name">{p.name}</div>
+                    {(p.cook_temp || p.cook_time) && <div className="stat">{[p.cook_temp, p.cook_time].filter(Boolean).join(" · ")}</div>}
+                  </div>
+                </div>
+                {p.cook_directions && <div style={{ fontSize: 13, marginTop: 8, whiteSpace: "pre-wrap" }}>{p.cook_directions}</div>}
+                <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                  <button className="mini" onClick={() => setEdit(JSON.parse(JSON.stringify(p)))}>{has ? "Edit directions" : "Add directions"}</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {edit && <RecipeEditor product={edit} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
+    </div>
+  );
+}
+
+function RecipeEditor({ product, onClose, onSaved }) {
+  const [p, setP] = useState(product);
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setP((s) => ({ ...s, [k]: v }));
+  async function uploadCookPhoto(e) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setBusy(true);
+    try { const small = await downscaleImage(f, 700, 0.82); const url = await db.uploadProductImage(small, p.product_id); set("cook_image_url", url); }
+    catch (err) { alert("Photo upload failed: " + (err.message || err)); }
+    finally { setBusy(false); e.target.value = ""; }
+  }
+  async function save() {
+    setBusy(true);
+    try { await db.updateProduct(p); onSaved(); }
+    catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
+  }
+  return (
+    <div className="overlay">
+      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px,100%)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <h2 style={{ marginBottom: 2 }}>{p.name}</h2>
+          <button className="mini" onClick={onClose}>✕</button>
+        </div>
+        <div className="group">
+          <div className="group-t">Cooking directions</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <div className="field" style={{ flex: "1 1 130px" }}><label>Cook temp</label><input placeholder="e.g. 135°F / 550°F oven" value={p.cook_temp ?? ""} onChange={(e) => set("cook_temp", e.target.value)} /></div>
+            <div className="field" style={{ flex: "1 1 130px" }}><label>Cook time</label><input placeholder="e.g. 8 min / from frozen +50%" value={p.cook_time ?? ""} onChange={(e) => set("cook_time", e.target.value)} /></div>
+          </div>
+          <div className="field"><label>Directions</label>
+            <textarea rows={5} style={{ width: "100%", fontFamily: "inherit", fontSize: 13 }} placeholder="Step-by-step: method, temps, doneness cues, plating…" value={p.cook_directions ?? ""} onChange={(e) => set("cook_directions", e.target.value)} />
+          </div>
+          <div className="field"><label>Finished photo</label>
+            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+              {p.cook_image_url ? <img src={p.cook_image_url} alt="" width="84" height="84" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 8, background: "#F4F1EA" }} /> : <div style={{ width: 84, height: 84, borderRadius: 8, background: "#F4F1EA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>🍽️</div>}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label className="mini" style={{ cursor: "pointer" }}>📷 {p.cook_image_url ? "Replace" : "Add"} photo<input type="file" accept="image/*" style={{ display: "none" }} onChange={uploadCookPhoto} /></label>
+                {p.cook_image_url && <button className="mini mini-danger" onClick={() => set("cook_image_url", null)}>Remove</button>}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button className="btn btn-primary" disabled={busy} onClick={save}>Save</button>
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancel</button>
+        </div>
+      </div>
     </div>
   );
 }
