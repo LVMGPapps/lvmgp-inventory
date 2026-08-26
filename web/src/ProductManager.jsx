@@ -2074,7 +2074,7 @@ function PrepSheet({ products, reload }) {
   useEffect(() => { if (view === "fridge" || view === "today" || view === "shift") loadBatches(); }, [view]);
   useEffect(() => { if (view === "shift") { db.getUsageModel().then(setUsage).catch(() => {}); setSdraft({}); } }, [view, date, handoff]);
 
-  const items = products.filter((p) => (pars[p.product_id]?.[wd] || 0) > 0)
+  const items = products.filter((p) => !p.prep_to_freezer && (pars[p.product_id]?.[wd] || 0) > 0)
     .map((p) => ({ p, par: Number(pars[p.product_id][wd]) || 0, unit: p.prep_unit || "each" }))
     .sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
 
@@ -2285,7 +2285,7 @@ function PrepSheet({ products, reload }) {
           {batches.length === 0 ? <div className="note">No active thawed batches. Pull items on the Log tab to create them.</div> : (() => {
             const today2 = new Date().toISOString().slice(0, 10);
             const byProd = {};
-            for (const b of batches) (byProd[b.product_id] ||= []).push(b);
+            for (const b of batches) { const bp = byId[b.product_id]; if (bp?.prep_to_freezer) continue; (byProd[b.product_id] ||= []).push(b); }
             return Object.entries(byProd).map(([pid, list]) => { const p = byId[pid]; if (!p) return null; const u = (p.prep_unit === "each" ? (measure(p) || "each") : p.prep_unit === "package" ? pkgName(p, 2) : "cases"); return (
               <div key={pid} style={{ marginBottom: 12 }}>
                 <div style={{ fontWeight: 700 }}>{p.name}</div>
