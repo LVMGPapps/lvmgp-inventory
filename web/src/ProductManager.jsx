@@ -2207,7 +2207,7 @@ function PrepSheet({ products, reload }) {
         <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         <span className="bchip">{dayName}</span>
         <div style={{ flex: 1 }} />
-        {[["shift", "Shift"], ["today", "Log"], ["fridge", "Fridge (FIFO)"], ["print", "Print"], ["history", "History"]].map(([k, t]) => (
+        {[["shift", "Shift"], ["today", "Log"], ["fridge", "Fridge (FIFO)"], ["guide", "Prep guide"], ["print", "Print"], ["history", "History"]].map(([k, t]) => (
           <button key={k} className="mini" onClick={() => setView(k)} style={{ fontWeight: view === k ? 700 : 500, background: view === k ? "#191B1F" : "#fff", color: view === k ? "#fff" : "#191B1F", borderColor: view === k ? "#191B1F" : "#E6E1D6" }}>{t}</button>
         ))}
       </div>
@@ -2307,6 +2307,72 @@ function PrepSheet({ products, reload }) {
                 );})}
               </div>
             );});
+          })()}
+        </div>
+      ) : view === "guide" ? (
+        <div>
+          {(() => {
+            const prep = products.filter((p) => p.needs_prep || p.prep_notes || p.prep_to_freezer || p.needs_thaw);
+            const groups = { freezer: [], thaw: [], sameday: [] };
+            for (const p of prep) {
+              if (p.prep_to_freezer) groups.freezer.push(p);
+              else if (p.needs_thaw) groups.thaw.push(p);
+              else groups.sameday.push(p);
+            }
+            for (const k of Object.keys(groups)) groups[k].sort((a, b) => (a.category || "~").localeCompare(b.category || "~") || a.name.localeCompare(b.name));
+            const unit = (p) => p.prep_unit === "each" ? (measure(p) || "each") : p.prep_unit === "package" ? pkgName(p, 2) : "cases";
+            const parsLine = (p) => { const m = pars[p.product_id]; if (!m) return null; const days = ["Su", "M", "Tu", "W", "Th", "F", "Sa"].map((d, i) => (Number(m[i]) || 0) > 0 ? `${d} ${r1(m[i])}` : null).filter(Boolean); return days.length ? `Par: ${days.join(" · ")} ${unit(p)}` : null; };
+
+            function printGuide() {
+              const sec = (title, items, kind) => {
+                if (!items.length) return "";
+                const rows = items.map((p) => {
+                  const bits = [];
+                  if (kind === "thaw") { const lead = p.thaw_hours ? `${p.thaw_hours}h ahead` : ""; const shelf = p.fridge_shelf_days ? `${p.fridge_shelf_days}d fridge life` : ""; bits.push([lead, shelf].filter(Boolean).join(" · ")); }
+                  if (p.cook_temp || p.cook_time) bits.push("Cook: " + [p.cook_temp, p.cook_time].filter(Boolean).join(" · "));
+                  const par = parsLine(p);
+                  return `<tr><td><b>${p.name}</b>${par ? `<div class=s>${par}</div>` : ""}${bits.filter(Boolean).length ? `<div class=s>${bits.filter(Boolean).join(" · ")}</div>` : ""}</td><td>${(p.prep_notes || "").replace(/</g, "&lt;").replace(/\n/g, "<br>") || "<span class=s>—</span>"}</td></tr>`;
+                }).join("");
+                return `<h2>${title}</h2><table><thead><tr><th style="width:38%">Item</th><th>Directions</th></tr></thead><tbody>${rows}</tbody></table>`;
+              };
+              const html = `<html><head><title>Prep Guide</title><style>
+                body{font-family:Arial,Helvetica,sans-serif;padding:20px;color:#111}
+                h1{font-size:22px;margin:0 0 12px} h2{font-size:15px;margin:16px 0 6px;border-bottom:2px solid #111;padding-bottom:3px}
+                table{width:100%;border-collapse:collapse;margin-bottom:6px} th,td{border:1px solid #bbb;padding:6px 8px;font-size:12.5px;text-align:left;vertical-align:top}
+                th{background:#f0f0f0} .s{color:#666;font-size:11px;margin-top:2px} tr{page-break-inside:avoid}
+                @media print{*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body>
+                <h1>Prep Guide</h1>${sec("❄ Freezer Prep — prep &amp; keep frozen", groups.freezer, "freezer")}${sec("🧊 Thawing Prep — pull freezer → fridge ahead", groups.thaw, "thaw")}${sec("🔪 Same-Day Prep", groups.sameday, "sameday")}</body></html>`;
+              const w = window.open("", "_blank"); if (!w) { alert("Allow pop-ups to print."); return; }
+              w.document.write(html); w.document.close(); w.focus(); setTimeout(() => w.print(), 300);
+            }
+
+            const card = (p, kind) => (
+              <div key={p.product_id} className="crow" style={{ gridTemplateColumns: "1fr", gap: 4 }}>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <Thumb url={p.cook_image_url} size={54} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <b>{p.name}</b> <span className="stat">· {p.category || "—"}</span>
+                    {kind === "thaw" && <div className="stat">{[p.thaw_hours ? `${p.thaw_hours}h ahead` : null, p.fridge_shelf_days ? `${p.fridge_shelf_days}d fridge life` : null].filter(Boolean).join(" · ")}</div>}
+                    {(p.cook_temp || p.cook_time) && <div className="stat">Cook: {[p.cook_temp, p.cook_time].filter(Boolean).join(" · ")}</div>}
+                    {parsLine(p) && <div className="stat">{parsLine(p)}</div>}
+                  </div>
+                </div>
+                {p.prep_notes && <div style={{ fontSize: 13, whiteSpace: "pre-wrap", marginTop: 2 }}>{p.prep_notes}</div>}
+              </div>
+            );
+
+            if (!prep.length) return <div className="note">No prep items yet. Set up prep on an item in the Catalog editor.</div>;
+            return (
+              <div>
+                <button className="btn btn-primary" style={{ marginBottom: 12 }} onClick={printGuide}>🖨 Print prep guide</button>
+                <div className="secthead" style={{ borderLeft: "4px solid #6A54C7", paddingLeft: 8 }}>❄ Freezer Prep <span className="stat">— prep &amp; keep frozen ({groups.freezer.length})</span></div>
+                {groups.freezer.length ? groups.freezer.map((p) => card(p, "freezer")) : <div className="note">None.</div>}
+                <div className="secthead" style={{ borderLeft: "4px solid #0E7C6B", paddingLeft: 8, marginTop: 14 }}>🧊 Thawing Prep <span className="stat">— pull freezer → fridge ahead ({groups.thaw.length})</span></div>
+                {groups.thaw.length ? groups.thaw.map((p) => card(p, "thaw")) : <div className="note">None.</div>}
+                <div className="secthead" style={{ borderLeft: "4px solid #B26A00", paddingLeft: 8, marginTop: 14 }}>🔪 Same-Day Prep <span className="stat">({groups.sameday.length})</span></div>
+                {groups.sameday.length ? groups.sameday.map((p) => card(p, "sameday")) : <div className="note">None.</div>}
+              </div>
+            );
           })()}
         </div>
       ) : view === "print" ? (
