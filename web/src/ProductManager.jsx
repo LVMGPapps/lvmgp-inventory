@@ -526,6 +526,10 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             Count whole units only — no partial/each (e.g. fountain BIBs)
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
+            <input type="checkbox" checked={!!p.continuous_use} onChange={(e) => set("continuous_use", e.target.checked)} />
+            Continuous use — counted whole but used steadily (smooths lumpy usage in reports, e.g. BIBs/syrup)
+          </label>
+          <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
             <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => setP((s) => ({ ...s, not_stocked: e.target.checked, ...(e.target.checked ? { par_level: 0 } : {}) }))} />
             Not stocked — we don't normally carry this (hidden from counts)
           </label>
@@ -1925,11 +1929,27 @@ function computeUsage(products, counts, receipts) {
       for (const e of evs) if (e.d <= day && (!latest[e.loc] || e.t >= latest[e.loc].t)) latest[e.loc] = e;
       return Object.values(latest).reduce((a, e) => a + e.qty, 0);
     };
-    const recd = (recByProd[p.product_id] || []).filter((x) => x.d >= d1 && x.d < d2).reduce((a, x) => a + x.units, 0);
-    let used = ohAt(d1) + recd - ohAt(d2); if (used < 0) used = 0;
+    const recdBetween = (a, b) => (recByProd[p.product_id] || []).filter((x) => x.d >= a && x.d < b).reduce((s, x) => s + x.units, 0);
+
+    let used, smoothed = false, perWeekNote = null;
+    if (p.continuous_use) {
+      // Smooth over the whole counted span, normalized to the length of the most recent interval.
+      // This averages out the "full for weeks then empty" spike across the weeks it actually spanned.
+      const first = days[0], last = days[days.length - 1];
+      const totalRecd = recdBetween(first, last);
+      let spanUsed = ohAt(first) + totalRecd - ohAt(last); if (spanUsed < 0) spanUsed = 0;
+      const spanDays = Math.max(1, (new Date(last + "T00:00:00") - new Date(first + "T00:00:00")) / 864e5);
+      const intervalDays = Math.max(1, (new Date(d2 + "T00:00:00") - new Date(d1 + "T00:00:00")) / 864e5);
+      used = spanUsed * (intervalDays / spanDays);   // per-interval average rate
+      smoothed = true;
+      perWeekNote = `avg over ${Math.round(spanDays)}d`;
+    } else {
+      const recd = recdBetween(d1, d2);
+      used = ohAt(d1) + recd - ohAt(d2); if (used < 0) used = 0;
+    }
     const cpc = costPerCount(p); const cost = cpc != null ? used * cpc : null;
     if (cost != null) totalCost += cost;
-    rows.push({ id: p.product_id, name: p.name, used, unit: p.count_unit, cost });
+    rows.push({ id: p.product_id, name: p.name, used, unit: p.count_unit, cost, smoothed, perWeekNote });
     interval = interval || [d1, d2];
   }
   rows.sort((a, b) => (b.cost || 0) - (a.cost || 0));
@@ -2541,15 +2561,25 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   const [open, setOpen] = useState("attention");
   const [spendDays, setSpendDays] = useState(7);
   const [detail, setDetail] = useState(null);   // product whose count history is open
+  const [rq, setRq] = useState("");             // report search: product name or category
 
   useEffect(() => { db.shoppingCounts().then(setShip).catch(() => {}); }, []);
 
+  // Filter the data feeding every report by product name or category.
+  const rqn = rq.trim().toLowerCase();
+  const matchP = (p) => !rqn || (p.name || "").toLowerCase().includes(rqn) || (p.category || "").toLowerCase().includes(rqn);
+  const fProducts = rqn ? products.filter(matchP) : products;
+  const okIds = rqn ? new Set(fProducts.map((p) => p.product_id)) : null;
+  const fOnhand = rqn ? Object.fromEntries(Object.entries(onhand).filter(([id]) => okIds.has(Number(id)) || okIds.has(id))) : onhand;
+  const fCounts = rqn ? (counts || []).filter((c) => okIds.has(c.product_id)) : counts;
+  const fReceipts = rqn && receipts ? receipts.map((r) => ({ ...r, receipt_line: (r.receipt_line || []).filter((l) => okIds.has(l.product_id)) })).filter((r) => (r.receipt_line || []).length) : receipts;
+
   const vName = Object.fromEntries(vendors.map((v) => [v.vendor_id, v.name]));
-  const recs = receipts || [];
+  const recs = fReceipts || [];
 
   let invValue = 0; const valByCat = {};
-  for (const p of products) {
-    const cpc = costPerCount(p); const oh = onhand[p.product_id]?.total || 0;
+  for (const p of fProducts) {
+    const cpc = costPerCount(p); const oh = fOnhand[p.product_id]?.total || 0;
     if (cpc != null && oh) { const val = cpc * oh; invValue += val; const c = p.category || "Uncategorized"; valByCat[c] = (valByCat[c] || 0) + val; }
   }
 
@@ -2602,18 +2632,18 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   const staleLocs = Object.values(_latest).filter((r) => { const p = products.find((x) => x.product_id === r.pid); return p && !p.not_stocked && p.menu !== "events" && !p.backup_for && r.qty > 0 && r.d < wkStartISO && (_newest[r.pid] || "") >= wkStartISO; }).length;
 
   const reports = [
-    ["notcounted", `Not counted this week (${notCountedStocked})`, <NotCountedReport products={products} counts={counts} locations={locations} onOpen={setDetail} reload={reload} />],
-    ["stale", `Stray stock by location (${staleLocs})`, <StaleLocationsReport products={products} counts={counts} locations={locations} onOpen={setDetail} reload={reload} />],
+    ["notcounted", `Not counted this week (${notCountedStocked})`, <NotCountedReport products={fProducts} counts={fCounts} locations={locations} onOpen={setDetail} reload={reload} />],
+    ["stale", `Stray stock by location (${staleLocs})`, <StaleLocationsReport products={fProducts} counts={fCounts} locations={locations} onOpen={setDetail} reload={reload} />],
     ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} openItem={openItem} />],
-    ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={counts} receipts={recs} products={products} onOpen={setDetail} reload={reload} />],
-    ["onhand", "On hand — by location", <OnHandReport products={products} onhand={onhand} />],
+    ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={fCounts} receipts={recs} products={fProducts} onOpen={setDetail} reload={reload} />],
+    ["onhand", "On hand — by location", <OnHandReport products={fProducts} onhand={fOnhand} />],
     ["value", "Inventory value — by category", <ValueReport valByCat={valByCat} total={invValue} />],
-    ["valitem", "Inventory value — by item", <ValueByItemReport products={products} onhand={onhand} openItem={openItem} />],
+    ["valitem", "Inventory value — by item", <ValueByItemReport products={fProducts} onhand={fOnhand} openItem={openItem} />],
     ["spend", "Purchasing — by vendor", <SpendReport recs={recs} vName={vName} days={spendDays} setDays={setSpendDays} />],
     ["foodcost", "Weekly food cost & usage", <UsageReport usage={usage} />],
-    ["counts", "Counts by week", <CountsByWeekReport counts={counts} products={products} onOpen={setDetail} />],
-    ["complete", "Catalog completeness", <CompletenessReport products={products} />],
-    ["menu", "Everyday vs Events", <MenuReport products={products} />],
+    ["counts", "Counts by week", <CountsByWeekReport counts={fCounts} products={fProducts} onOpen={setDetail} />],
+    ["complete", "Catalog completeness", <CompletenessReport products={fProducts} />],
+    ["menu", "Everyday vs Events", <MenuReport products={fProducts} />],
   ];
 
   if (receipts === null) return <div className="empty">Loading…</div>;
@@ -2644,6 +2674,10 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
           </div>}
 
       <div className="secthead">Reports</div>
+      <div style={{ marginBottom: 8 }}>
+        <input placeholder="🔍 Filter reports by product or category…" value={rq} onChange={(e) => setRq(e.target.value)} style={{ width: "100%" }} />
+        {rqn && <div className="stat" style={{ marginTop: 4 }}>Showing {fProducts.length} item{fProducts.length === 1 ? "" : "s"} matching “{rq}”. <button className="mini" style={{ marginLeft: 6 }} onClick={() => setRq("")}>Clear</button></div>}
+      </div>
       <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "2px 0 10px", WebkitOverflowScrolling: "touch" }}>
         {reports.map(([key, label]) => (
           <button key={key} className="mini" onClick={() => setOpen(key)}
@@ -2886,7 +2920,8 @@ function UsageReport({ usage }) {
     <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 22, marginBottom: 4 }}>{money(usage.totalCost)} <span style={{ fontSize: 13, color: "#71757E" }}>cost of goods used</span></div>
     <div className="stat" style={{ marginBottom: 10 }}>between {a} and {b}, most recent count interval</div>
     <table className="tbl" style={{ border: "none" }}><thead><tr><th>Item</th><th>Used</th><th>Cost</th></tr></thead>
-      <tbody>{usage.rows.slice(0, 40).map((r) => <tr key={r.id}><td>{r.name}</td><td className="fig">{r.used} {r.unit}</td><td className="fig">{r.cost != null ? money(r.cost) : "—"}</td></tr>)}</tbody></table>
+      <tbody>{usage.rows.slice(0, 40).map((r) => <tr key={r.id}><td>{r.name}{r.smoothed && <span className="bchip" style={{ marginLeft: 6, background: "#EEF4FF", borderColor: "#3a6ea5", color: "#2c5580" }} title={`Smoothed ${r.perWeekNote} — continuous-use item`}>smoothed</span>}</td><td className="fig">{Math.round(r.used * 10) / 10} {r.unit}</td><td className="fig">{r.cost != null ? money(r.cost) : "—"}</td></tr>)}</tbody></table>
+    {usage.rows.some((r) => r.smoothed) && <div className="stat" style={{ marginTop: 8 }}>“Smoothed” items (BIBs/fountain) are averaged across their full count span, so a container that reads full for weeks then empties doesn't spike one week's cost.</div>}
   </div>);
 }
 
