@@ -52,6 +52,7 @@ export async function createProduct(p) {
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
     needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null, fridge_shelf_days: (p.fridge_shelf_days === "" || p.fridge_shelf_days == null) ? null : Number(p.fridge_shelf_days),
     needs_prep: !!p.needs_prep, prep_notes: p.prep_notes || null, prep_advance_hours: (p.prep_advance_hours === "" || p.prep_advance_hours == null) ? null : Number(p.prep_advance_hours), prep_to_freezer: !!p.prep_to_freezer,
+    cook_directions: p.cook_directions || null, cook_temp: p.cook_temp || null, cook_time: p.cook_time || null, cook_image_url: p.cook_image_url ?? null,
   }).select("product_id").single();
   if (error) throw error;
   const id = data.product_id;
@@ -86,6 +87,7 @@ export async function updateProduct(p) {
     backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
     needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null, fridge_shelf_days: (p.fridge_shelf_days === "" || p.fridge_shelf_days == null) ? null : Number(p.fridge_shelf_days),
     needs_prep: !!p.needs_prep, prep_notes: p.prep_notes || null, prep_advance_hours: (p.prep_advance_hours === "" || p.prep_advance_hours == null) ? null : Number(p.prep_advance_hours), prep_to_freezer: !!p.prep_to_freezer,
+    cook_directions: p.cook_directions || null, cook_temp: p.cook_temp || null, cook_time: p.cook_time || null, cook_image_url: p.cook_image_url ?? null,
     updated_at: new Date().toISOString(),
   }).eq("product_id", id);
   if (error) throw error;
