@@ -3059,10 +3059,13 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
   function rowFields(r) {
     const upc = usagePerCase(product), upp = usagePerPack(product);
     const showCase = (Number(product.packages_per_case) || 1) > 1;
-    const dC = r._c != null ? (Number(r._c) || 0) : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
-    const remA = (r.qty || 0) - dC * upc;
-    const dP = r._p != null ? (Number(r._p) || 0) : Math.floor(remA / upp + 1e-9);
-    const dX = r._x != null ? (Number(r._x) || 0) : Math.round((remA - dP * upp) * 100) / 100;
+    const baseC = showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0;
+    const baseRem = (r.qty || 0) - baseC * upc;
+    const baseP = Math.floor(baseRem / upp + 1e-9);
+    const baseX = Math.round((baseRem - baseP * upp) * 100) / 100;
+    const dC = r._c != null ? (Number(r._c) || 0) : baseC;
+    const dP = r._p != null ? (Number(r._p) || 0) : baseP;
+    const dX = r._x != null ? (Number(r._x) || 0) : baseX;
     const total = dC * upc + dP * upp + dX;
     const fields = { qty: total, cases: dC, loose: total - dC * upc };
     if (r._date) fields.counted_at = new Date(r._date + "T12:00:00").toISOString();
@@ -3142,10 +3145,17 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
               const upc = usagePerCase(product), upp = usagePerPack(product);
               const whole = wholeOnly(product);
               const showCase = (Number(product.packages_per_case) || 1) > 1;   // cases are whole units — always show when a case holds >1 package
-              const dC = r._c != null ? r._c : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
-              const remA = (r.qty || 0) - (Number(dC) || 0) * upc;
-              const dP = r._p != null ? r._p : Math.floor(remA / upp + 1e-9);
-              const dX = r._x != null ? r._x : Math.round((remA - (Number(dP) || 0) * upp) * 100) / 100;
+              // Decompose the stored qty ONLY for fields the user hasn't touched. Once any of
+              // cases/packages/partial is edited, unedited siblings hold at their decomposed
+              // value from the ORIGINAL qty — they must not recompute off each other (that bug
+              // made the partial go negative and cancel an edited packages entry).
+              const baseC = showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0;
+              const baseRem = (r.qty || 0) - baseC * upc;
+              const baseP = Math.floor(baseRem / upp + 1e-9);
+              const baseX = Math.round((baseRem - baseP * upp) * 100) / 100;
+              const dC = r._c != null ? r._c : baseC;
+              const dP = r._p != null ? r._p : baseP;
+              const dX = r._x != null ? r._x : baseX;
               const tot = (Number(dC) || 0) * upc + (Number(dP) || 0) * upp + (Number(dX) || 0);
               const edited = ["_c", "_p", "_x", "_date", "_loc"].some((k) => r[k] !== undefined);
               return (
