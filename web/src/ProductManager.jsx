@@ -3159,7 +3159,6 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
                   <label style={{ width: 72 }}>{pkgName(product, 2)}<input className="fig" type="number" min="0" value={dP} onChange={(e) => setField(r.stock_count_id, "_p", e.target.value)} /></label>
                   {!whole && <label style={{ width: 68 }}>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={dX} onChange={(e) => setField(r.stock_count_id, "_x", e.target.value)} /></label>}
                   <span className="stat" style={{ paddingBottom: 6 }}>= {fmtQty(product, tot)}{edited ? " ·edited" : ""}</span>
-                  {edited && <span className="stat" style={{ paddingBottom: 6, color: "#B0271B", fontSize: 10 }}>[dbg dP={String(dP)} upp={String(upp)} upc={String(upc)} tot={String(tot)}]</span>}
                 </div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <button className="mini mini-danger" disabled={busy} onClick={() => delCount(r)}>✕</button>
