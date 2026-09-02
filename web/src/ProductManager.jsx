@@ -865,11 +865,11 @@ function Count({ products, locations, onhand, reload }) {
     const uMeas = measure(p);
     const upc = usagePerCase(p), upp = usagePerPack(p);
     const whole = wholeOnly(p);
-    const showCase = !whole && (num(p.packages_per_case) || 1) > 1;    // show a Cases box only when a case holds >1 package
+    const showCase = (num(p.packages_per_case) || 1) > 1;    // cases are whole units — always show when a case holds >1 package
     const counted = ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== "");
     const partial = (num(e.cases) || 0) * upc + (num(e.packages) || 0) * upp + (num(e.units) || 0) + (num(e.loose) || 0);
     const hot = focusId === p.product_id;
-    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: whole ? "1fr 72px 96px" : showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
+    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: whole ? (showCase ? "1fr 46px 60px 84px" : "1fr 72px 96px") : showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
     return (
       <div className="crow" key={p.product_id} style={style}>
         <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{whole ? `count whole ${pkgName(p, 2)}` : (showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : "") + `1 ${p.package_unit || "package"} = ${upp} ${uMeas}`} · here {fmtQty(p, here)}</div></div>
@@ -3058,7 +3058,7 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
   // Rebuild a row's fields from cases/packages/partial, keeping unedited sub-fields at their decomposed value.
   function rowFields(r) {
     const upc = usagePerCase(product), upp = usagePerPack(product);
-    const showCase = !wholeOnly(product) && (Number(product.packages_per_case) || 1) > 1;
+    const showCase = (Number(product.packages_per_case) || 1) > 1;
     const dC = r._c != null ? (Number(r._c) || 0) : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
     const remA = (r.qty || 0) - dC * upc;
     const dP = r._p != null ? (Number(r._p) || 0) : Math.floor(remA / upp + 1e-9);
@@ -3141,7 +3141,7 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
             {rows.map((r) => {
               const upc = usagePerCase(product), upp = usagePerPack(product);
               const whole = wholeOnly(product);
-              const showCase = !whole && (Number(product.packages_per_case) || 1) > 1;
+              const showCase = (Number(product.packages_per_case) || 1) > 1;   // cases are whole units — always show when a case holds >1 package
               const dC = r._c != null ? r._c : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
               const remA = (r.qty || 0) - (Number(dC) || 0) * upc;
               const dP = r._p != null ? r._p : Math.floor(remA / upp + 1e-9);
