@@ -380,6 +380,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
         <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : (flaggedCount ? { borderColor: "#E0392B", color: "#E0392B" } : undefined)}>🚩 Needs recount{flaggedCount ? ` (${flaggedCount})` : ""}</button>
         {notStockedCount > 0 && <button className="mini" onClick={() => setShowNotStocked((v) => !v)} style={showNotStocked ? { background: "#3A3D44", color: "#fff", borderColor: "#3A3D44" } : undefined}>{showNotStocked ? "Hide" : "Show"} not-stocked ({notStockedCount})</button>}
         <button className="mini" onClick={() => setShowDiscontinued((v) => !v)} style={showDiscontinued ? { background: "#7a5b00", color: "#fff", borderColor: "#7a5b00" } : undefined}>{showDiscontinued ? "← Back to catalog" : "Discontinued"}</button>
+        <button className="mini" title="Print the case → package → size unit math for every item" onClick={() => printUnitMath(products, vendors)}>📐 Unit math</button>
         {(locFilter || venFilter || q || flaggedOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); setFlaggedOnly(false); }}>Clear</button>}
       </div>
       {showDiscontinued ? (
@@ -741,6 +742,77 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
       </div>
     </div>
   );
+}
+
+// Unit math report — the case → package → size-unit chain for every item, so the
+// conversions behind costing and counting can be checked at a glance.
+function printUnitMath(products, vendors) {
+  const esc = (t) => String(t == null ? "" : t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  const nz = (n) => { const v = Number(n); return Number.isFinite(v) && v > 0 ? v : null; };
+  const trim = (n) => (Math.round(n * 1000) / 1000).toLocaleString();
+  const vById = Object.fromEntries((vendors || []).map((v) => [v.vendor_id, v]));
+
+  const live = products.filter((p) => !p.discontinued).slice()
+    .sort((a, b) => (a.category || "~").localeCompare(b.category || "~") || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
+
+  const rows = live.map((p) => {
+    const ppc = nz(p.packages_per_case), upp = nz(p.usage_per_package);
+    const pkg = p.package_unit || "package", meas = p.usage_measure || "each";
+    const perCase = (ppc || 1) * (upp || 1);
+    const flags = [];
+    if (!ppc) flags.push(`no packages-per-case (assuming 1)`);
+    if (!upp) flags.push(`no ${meas}-per-${pkg} (assuming 1)`);
+    if (!p.usage_measure) flags.push("no size unit set");
+    // A vendor whose case holds a different amount silently changes $/unit.
+    for (const v of (p.vendors || [])) {
+      const vp = nz(v.packages_per_case), vu = nz(v.usage_per_package);
+      if ((vp && ppc && vp !== ppc) || (vu && upp && vu !== upp)) {
+        const name = vById[v.vendor_id]?.name || "a vendor";
+        flags.push(`${name} case = ${trim((vp || ppc || 1) * (vu || upp || 1))} ${meas}`);
+      }
+    }
+    const countIn = ["cases", pkg + "s"].concat(wholeOnly(p) ? [] : [meas]).join(" + ");
+    return { p, ppc, upp, pkg, meas, perCase, flags, countIn };
+  });
+
+  const body = rows.map((r) => `<tr${r.flags.length ? ' class="warn"' : ""}>
+      <td class="nm">${esc(r.p.name)}${r.p.brand ? `<div class="hint">${esc(r.p.brand)}</div>` : ""}</td>
+      <td>${esc(r.p.category || "")}</td>
+      <td>${esc(r.p.buy_by || r.p.purchase_unit || "Case")}</td>
+      <td class="m">1 case = <b>${trim(r.ppc || 1)}</b> ${esc(r.pkg)}${(r.ppc || 1) === 1 ? "" : "s"}</td>
+      <td class="m">1 ${esc(r.pkg)} = <b>${trim(r.upp || 1)}</b> ${esc(r.meas)}</td>
+      <td class="m tot">${trim(r.ppc || 1)} × ${trim(r.upp || 1)} = <b>${trim(r.perCase)}</b> ${esc(r.meas)}</td>
+      <td>${esc(r.countIn)}</td>
+      <td class="hint">${esc(r.flags.join("; "))}</td>
+    </tr>`).join("");
+
+  const problems = rows.filter((r) => r.flags.length).length;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Unit math — full case</title><style>
+    @page { size: landscape; margin: 12mm; }
+    body { font: 11px/1.35 Inter, system-ui, sans-serif; color: #101012; }
+    h1 { font-family: 'Barlow Condensed', sans-serif; text-transform: uppercase; letter-spacing: .05em; margin: 0 0 2px; }
+    .sub { color: #71757E; margin-bottom: 10px; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #71757E; border-bottom: 1.5px solid #101012; padding: 4px 6px; }
+    td { border-bottom: 1px solid #E6E1D6; padding: 4px 6px; vertical-align: top; }
+    td.nm { font-weight: 600; width: 22%; }
+    td.m { white-space: nowrap; }
+    td.tot { background: #FAF8F3; }
+    tr.warn td { background: #FFF8E1; }
+    .hint { color: #9a5b00; font-size: 10px; }
+    td.nm .hint { color: #71757E; }
+    tfoot td { border: none; padding-top: 10px; color: #71757E; }
+  </style></head><body>
+    <h1>Unit math — full case</h1>
+    <div class="sub">${live.length} active items · ${problems} with something to check · ${new Date().toLocaleString()}</div>
+    <table><thead><tr>
+      <th>Item</th><th>Category</th><th>Buy by</th><th>Case → ${"package"}</th><th>Package → size unit</th><th>Full case</th><th>Counted in</th><th>Check</th>
+    </tr></thead><tbody>${body}</tbody>
+    <tfoot><tr><td colspan="8">Highlighted rows are missing a conversion or have a vendor whose case differs from the item default. Both change $/unit and on-hand math.</td></tr></tfoot></table>
+  </body></html>`;
+  const w = window.open("", "_blank");
+  if (!w) { alert("Allow pop-ups to open the report."); return; }
+  w.document.write(html); w.document.close();
 }
 
 function printCountSheet(products, locations, areaId, az = false) {
