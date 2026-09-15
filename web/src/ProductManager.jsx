@@ -752,9 +752,24 @@ function printCountSheet(products, locations, areaId, az = false) {
   setTimeout(() => { try { w.print(); } catch {} }, 350);
 }
 
+const COUNT_DRAFT_KEY = "lvmgp_count_drafts";
+
 function Count({ products, locations, onhand, reload }) {
   const [locId, setLocId] = useState("");
-  const [draft, setDraft] = useState({});
+  // Typed-but-unsaved counts, kept per location and mirrored to localStorage so
+  // leaving the tab (or the whole app) doesn't throw away a half-finished walk.
+  const [drafts, setDrafts] = useState(() => { try { return JSON.parse(localStorage.getItem(COUNT_DRAFT_KEY) || "{}"); } catch { return {}; } });
+  const locKey = locId || "all";
+  const draft = drafts[locKey] || {};
+  // Same signature as the old useState setter (value or updater) so every call site still works,
+  // but it only ever touches the location you're currently looking at.
+  const setDraft = (v) => setDrafts((all) => {
+    const nextLocal = typeof v === "function" ? v(all[locKey] || {}) : v;
+    const next = { ...all };
+    if (!nextLocal || !Object.keys(nextLocal).length) delete next[locKey]; else next[locKey] = nextLocal;
+    try { localStorage.setItem(COUNT_DRAFT_KEY, JSON.stringify(next)); } catch {}
+    return next;
+  });
   const [note, setNote] = useState(0);
   const [q, setQ] = useState("");
   const [finding, setFinding] = useState(false);
@@ -806,6 +821,11 @@ function Count({ products, locations, onhand, reload }) {
     ? [["A\u2013Z", { sort: 0, items: heads.slice().sort(byName) }]]
     : Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
   const entered = Object.entries(draft).filter(([k, e]) => ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== ""));
+  // Other locations you've typed into but not saved yet — so a half-done walk is visible, not lost.
+  const filled = (d) => Object.values(d || {}).filter((e) => ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== "")).length;
+  const pendingElsewhere = Object.entries(drafts)
+    .filter(([k, d]) => k !== locKey && filled(d) > 0)
+    .map(([k, d]) => ({ key: k, n: filled(d), name: k === "all" ? "All locations" : (locations.find((l) => String(l.location_id) === k)?.name || k) }));
 
   // What you actually typed, turned into count rows.
   function draftEntries() {
@@ -869,7 +889,7 @@ function Count({ products, locations, onhand, reload }) {
     const hasLoc = loc && (p.locations || []).some((l) => l.location_id === loc.location_id);
     if (!hasLoc) {
       const target = (p.locations || []).find((l) => l.primary) || (p.locations || [])[0];
-      if (target) { setLocId(String(target.location_id)); setDraft({}); }
+      if (target) { setLocId(String(target.location_id)); }
     }
     setQ(p.name); setFocusId(p.product_id);
   }
@@ -900,7 +920,7 @@ function Count({ products, locations, onhand, reload }) {
   return (
     <div>
       <div className="toolbar">
-        <select value={locId} onChange={(e) => { setLocId(e.target.value); setDraft({}); setQ(""); setFocusId(null); }}>
+        <select value={locId} onChange={(e) => { setLocId(e.target.value); setQ(""); setFocusId(null); }}>
           <option value="">All locations (count in place)</option>
           {locations.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
         </select>
@@ -924,7 +944,7 @@ function Count({ products, locations, onhand, reload }) {
           </div>
           <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
             {locations.map((l) => { const d = (weekly.done || {})[l.location_id]; return (
-              <button key={l.location_id} className="bchip" onClick={() => { setLocId(String(l.location_id)); setDraft({}); setQ(""); }}
+              <button key={l.location_id} className="bchip" onClick={() => { setLocId(String(l.location_id)); setQ(""); }}
                 style={{ cursor: "pointer", background: d ? "#E6F4F0" : "#fff", borderColor: d ? "#0E7C6B" : "#E6E1D6", color: d ? "#0a5c50" : "#555" }}>
                 {d ? "✓ " : ""}{l.name}
               </button>
@@ -941,6 +961,19 @@ function Count({ products, locations, onhand, reload }) {
 
       <p className="stat" style={{ margin: "0 2px 12px" }}>{sortAZ ? "Items list A–Z in one flat list; the grey chip is the shelf. " : "Items list in shelf order (A1, A2, …). "}Count cases and loose separately — the total is figured for you. Each location is a partial count; on-hand sums across locations.</p>
       {note > 0 && <div className="ok">Saved {note} count{note === 1 ? "" : "s"}. On-hand updated.</div>}
+      {pendingElsewhere.length > 0 && (
+        <div className="note" style={{ marginBottom: 12 }}>
+          <b>Unsaved counts waiting elsewhere</b> — they're kept on this device until you save them.
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>
+            {pendingElsewhere.map((x) => (
+              <button key={x.key} className="bchip" style={{ cursor: "pointer", background: "#FFF8E1", borderColor: "#E68A00", color: "#9a5b00" }}
+                onClick={() => { setLocId(x.key === "all" ? "" : x.key); setQ(""); setFocusId(null); }}>
+                {x.name} · {x.n}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {!loc && <div className="note" style={{ marginBottom: 14 }}>Pick a location above to count the items stored there — they'll be sorted by shelf.</div>}
 
       {review && (
