@@ -160,6 +160,8 @@ export default function App() {
   const [staleAt, setStaleAt] = useState(0);        // >0 = showing a cached catalog
   const [reportKey, setReportKey] = useState(null); // which report the Reporting tab is showing
   const openReport = (k) => { setReportKey(k); setTab("reporting"); };
+  const [gapFilter, setGapFilter] = useState(null);   // Catalog filtered to items missing a detail
+  const openCatalogGaps = (key) => { setGapFilter(key); setTab("catalog"); };
 
   async function reload() {
     setError("");
@@ -266,7 +268,7 @@ export default function App() {
             </div>
           </div>
         )}
-        {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} counts={counts} receipts={receipts} reload={reload} jumpTo={jumpTo} clearJump={() => setJumpTo(null)} />}
+        {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} counts={counts} receipts={receipts} reload={reload} jumpTo={jumpTo} clearJump={() => setJumpTo(null)} gapFilter={gapFilter} clearGap={() => setGapFilter(null)} />}
         {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} onPending={() => setPending(db.pendingCount())} />}
         {tab === "organize" && <Organize products={products} locations={locations} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
@@ -274,8 +276,8 @@ export default function App() {
         {tab === "waste" && <Waste products={products} locations={locations} reload={reload} />}
         {tab === "prep" && <PrepSheet products={products} reload={reload} />}
         {tab === "recipes" && <Recipes products={products} reload={reload} />}
-        {tab === "reports" && <Dashboard mode="dashboard" openReport={openReport} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
-        {tab === "reporting" && <Dashboard mode="reports" reportKey={reportKey} setReportKey={setReportKey} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
+        {tab === "reports" && <Dashboard mode="dashboard" openReport={openReport} openCatalogGaps={openCatalogGaps} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
+        {tab === "reporting" && <Dashboard mode="reports" reportKey={reportKey} setReportKey={setReportKey} openCatalogGaps={openCatalogGaps} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
       </div>
     </div>
@@ -290,7 +292,7 @@ function blankProduct() {
     barcodes: [], vendors: [], locations: [] };
 }
 
-function Catalog({ products, vendors, locations, units, onhand, counts, receipts, reload, jumpTo, clearJump }) {
+function Catalog({ products, vendors, locations, units, onhand, counts, receipts, reload, jumpTo, clearJump, gapFilter, clearGap }) {
   const [q, setQ] = useState("");
   const [edit, setEdit] = useState(null);
   const [finding, setFinding] = useState(false);
@@ -346,6 +348,11 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
     if (q && !(p.name.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     if (locFilter && !(p.locations || []).some((l) => String(l.location_id) === locFilter)) return false;
     if (venFilter && !(p.vendors || []).some((v) => String(v.vendor_id) === venFilter)) return false;
+    if (gapFilter) {
+      const g = gapsFor(p);
+      if (!g.length) return false;
+      if (gapFilter !== "any" && !g.some((x) => x.key === gapFilter)) return false;
+    }
     return true;
   });
   const oh = (p) => onhand[p.product_id]?.total ?? 0;
@@ -386,8 +393,15 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
         {notStockedCount > 0 && <button className="mini" onClick={() => setShowNotStocked((v) => !v)} style={showNotStocked ? { background: "#3A3D44", color: "#fff", borderColor: "#3A3D44" } : undefined}>{showNotStocked ? "Hide" : "Show"} not-stocked ({notStockedCount})</button>}
         <button className="mini" onClick={() => setShowDiscontinued((v) => !v)} style={showDiscontinued ? { background: "#7a5b00", color: "#fff", borderColor: "#7a5b00" } : undefined}>{showDiscontinued ? "← Back to catalog" : "Discontinued"}</button>
         <button className="mini" title="Check the case → package → size unit math for every item" onClick={() => setUnitMath(true)}>📐 Unit math</button>
+
         {(locFilter || venFilter || q || flaggedOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); setFlaggedOnly(false); }}>Clear</button>}
       </div>
+      {gapFilter && (
+        <div className="note" style={{ borderColor: "#E68A00", background: "#FFF8E1", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span>Showing <b>{list.length}</b> item{list.length === 1 ? "" : "s"} {gapFilter === "any" ? "missing something" : `with no ${(GAPS.find((g) => g[0] === gapFilter) || [, gapFilter])[1]}`}. Each card shows what's missing.</span>
+          <button className="mini" onClick={() => clearGap && clearGap()}>Show all items</button>
+        </div>
+      )}
       {showDiscontinued ? (
         <div>
           <div className="note" style={{ borderColor: "#7a5b00", background: "#FFF8E9", marginBottom: 10 }}>Discontinued items — hidden from counts, shopping, and reports, but kept on record. <b>Restore</b> brings one back into the catalog.</div>
@@ -435,6 +449,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
                 {p.not_stocked && <span className="bchip" style={{ background: "#EEE", borderColor: "#B7BBC4", color: "#555" }}>Not stocked</span>}
                 {p.needs_recount && <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || ""}>🚩 Recount{p.recount_note ? ` · ${p.recount_note}` : ""}</span>}
                 {p.backup_for && <span className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>✳ Alt for {products.find((x) => x.product_id === p.backup_for)?.name || "item"}</span>}
+                {gapsFor(p).map((g) => <span key={g.key} className="bchip" style={{ background: "#FFF8E1", borderColor: "#E68A00", color: "#9a5b00" }} title="Missing — the numbers aren't reliable until this is filled in">⚠ No {g.label}</span>)}
               </div>
 
               <div style={{ fontSize: 15, fontWeight: 700, color: "#191B1F" }}>On hand: {fmtQty(p, onhand[p.product_id]?.total ?? 0)}</div>
@@ -2846,7 +2861,7 @@ const REPORT_INFO = {
 };
 
 function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload, openItem,
-                    mode = "dashboard", openReport, reportKey, setReportKey }) {
+                    mode = "dashboard", openReport, reportKey, setReportKey, openCatalogGaps }) {
   const [ship, setShip] = useState({ open: 0, purchased: 0 });
   // In "reports" mode the open report is owned by App, so the tab remembers where you were.
   const [openLocal, setOpenLocal] = useState("attention");
@@ -2936,7 +2951,7 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
     ["spend", "Purchasing — by vendor", <SpendReport recs={recs} vName={vName} days={spendDays} setDays={setSpendDays} />],
     ["foodcost", "Weekly food cost & usage", <UsageReport usage={usage} />],
     ["counts", "Counts by week", <CountsByWeekReport counts={fCounts} products={fProducts} onOpen={setDetail} />],
-    ["complete", "Catalog completeness", <CompletenessReport products={fProducts} />],
+    ["complete", "Catalog completeness", <CompletenessReport products={fProducts} onOpenCatalog={openCatalogGaps} />],
     ["menu", "Everyday vs Events", <MenuReport products={fProducts} />],
   ];
 
@@ -3569,23 +3584,41 @@ function CountsByWeekReport({ counts, products, onOpen }) {
   );
 }
 
-function CompletenessReport({ products }) {
-  const noPrice = products.filter((p) => !(p.vendors || []).some((v) => v.price != null));
-  const noCat = products.filter((p) => !p.category);
-  const noVendor = products.filter((p) => !(p.vendors || []).length);
-  const needsCount = products.filter((p) => p.count_unit === "each" && (p.count_per_case == p.pack));
-  const block = (title, list) => (
-    <div style={{ marginBottom: 12 }}>
-      <div style={{ display: "flex", justifyContent: "space-between" }}><b>{title}</b><span className="fig" style={{ color: list.length ? "#E0392B" : "#0E7C6B" }}>{list.length}</span></div>
-      {list.length > 0 && <div className="stat" style={{ marginTop: 3 }}>{list.slice(0, 12).map((p) => p.name).join(", ")}{list.length > 12 ? `, +${list.length - 12} more` : ""}</div>}
-    </div>
-  );
+// What's still missing on an item. One definition, used by the completeness report,
+// the catalog filter and the chips on each card — so they can never disagree.
+const GAPS = [
+  ["price",      "vendor price", (p) => !(p.vendors || []).some((v) => v.price != null)],
+  ["category",   "category",     (p) => !p.category],
+  ["vendor",     "vendor",       (p) => !(p.vendors || []).length],
+  ["location",   "location",     (p) => !(p.locations || []).length],
+  ["conversion", "case conversion", (p) => !(Number(p.packages_per_case) > 0) || !(Number(p.usage_per_package) > 0)],
+  ["measure",    "size unit",    (p) => !p.usage_measure],
+];
+const gapsFor = (p) => GAPS.filter(([, , test]) => test(p)).map(([key, label]) => ({ key, label }));
+
+function CompletenessReport({ products, onOpenCatalog }) {
+  const rows = GAPS.map(([key, label, test]) => ({ key, label, list: products.filter(test) }));
+  const clean = products.filter((p) => gapsFor(p).length === 0).length;
   return (<div>
-    <div className="stat" style={{ marginBottom: 12 }}>Items that still need a detail filled in before the numbers are fully reliable.</div>
-    {block("No vendor price", noPrice)}
-    {block("No category", noCat)}
-    {block("No vendor linked", noVendor)}
-    {block("Count conversion still default", needsCount)}
+    <div className="stat" style={{ marginBottom: 12 }}>
+      Items that still need a detail filled in before the numbers are fully reliable.
+      <b> {clean}</b> of {products.length} are complete.
+    </div>
+    {rows.map((r) => (
+      <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F0EDE6" }}>
+        <div>
+          <b>Missing {r.label}</b>
+          {r.list.length > 0 && <div className="stat" style={{ marginTop: 2 }}>{r.list.slice(0, 8).map((p) => p.name).join(", ")}{r.list.length > 8 ? `, +${r.list.length - 8} more` : ""}</div>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "0 0 auto" }}>
+          <span className="fig" style={{ color: r.list.length ? "#E0392B" : "#0E7C6B" }}>{r.list.length}</span>
+          {r.list.length > 0 && <button className="mini" onClick={() => onOpenCatalog && onOpenCatalog(r.key)}>Fix these →</button>}
+        </div>
+      </div>
+    ))}
+    <div style={{ marginTop: 12 }}>
+      <button className="mini" onClick={() => onOpenCatalog && onOpenCatalog("any")}>Show every incomplete item in Catalog →</button>
+    </div>
   </div>);
 }
 
