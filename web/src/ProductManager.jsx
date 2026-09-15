@@ -298,6 +298,8 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
   const [showNotStocked, setShowNotStocked] = useState(false);
   const [showDiscontinued, setShowDiscontinued] = useState(false);
   const [discList, setDiscList] = useState(null);
+  const [unitMath, setUnitMath] = useState(false);          // unit-math report open
+  const mathReturn = useRef(null);                          // {scroll, product_id} — where to land after a fix
   useEffect(() => {
     if (!showDiscontinued) return;
     let live = true;
@@ -380,7 +382,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
         <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : (flaggedCount ? { borderColor: "#E0392B", color: "#E0392B" } : undefined)}>🚩 Needs recount{flaggedCount ? ` (${flaggedCount})` : ""}</button>
         {notStockedCount > 0 && <button className="mini" onClick={() => setShowNotStocked((v) => !v)} style={showNotStocked ? { background: "#3A3D44", color: "#fff", borderColor: "#3A3D44" } : undefined}>{showNotStocked ? "Hide" : "Show"} not-stocked ({notStockedCount})</button>}
         <button className="mini" onClick={() => setShowDiscontinued((v) => !v)} style={showDiscontinued ? { background: "#7a5b00", color: "#fff", borderColor: "#7a5b00" } : undefined}>{showDiscontinued ? "← Back to catalog" : "Discontinued"}</button>
-        <button className="mini" title="Print the case → package → size unit math for every item" onClick={() => printUnitMath(products, vendors)}>📐 Unit math</button>
+        <button className="mini" title="Check the case → package → size unit math for every item" onClick={() => setUnitMath(true)}>📐 Unit math</button>
         {(locFilter || venFilter || q || flaggedOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); setFlaggedOnly(false); }}>Clear</button>}
       </div>
       {showDiscontinued ? (
@@ -452,7 +454,12 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
           );})}
         </div>
       )}
-      {edit && <Editor key={edit.product_id ?? "new"} product={edit} products={products} vendors={vendors} locations={locations} units={units} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload(); }} />}
+      {unitMath && <UnitMath products={products} vendors={vendors} resume={mathReturn}
+        onFix={(p, scroll) => { mathReturn.current = { scroll, product_id: p.product_id }; setEdit(JSON.parse(JSON.stringify(p))); }}
+        onClose={() => { mathReturn.current = null; setUnitMath(false); }} />}
+      {edit && <Editor key={edit.product_id ?? "new"} product={edit} products={products} vendors={vendors} locations={locations} units={units}
+        onClose={() => setEdit(null)}
+        onSaved={() => { setEdit(null); reload(); }} />}
       {finding && <Finder products={products} onClose={() => setFinding(false)} onFound={(p) => { setQ(p.name); setFinding(false); }} />}
     </div>
   );
@@ -744,36 +751,118 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
   );
 }
 
+// One source of truth for the unit-math rows — the panel and the printout share it.
+function unitMathRows(products, vendors) {
+  const nz = (n) => { const v = Number(n); return Number.isFinite(v) && v > 0 ? v : null; };
+  const trim = (n) => (Math.round(n * 1000) / 1000).toLocaleString();
+  const vById = Object.fromEntries((vendors || []).map((v) => [v.vendor_id, v]));
+  return products.filter((p) => !p.discontinued).slice()
+    .sort((a, b) => (a.category || "~").localeCompare(b.category || "~") || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }))
+    .map((p) => {
+      const ppc = nz(p.packages_per_case), upp = nz(p.usage_per_package);
+      const pkg = p.package_unit || "package", meas = p.usage_measure || "each";
+      const flags = [];
+      if (!ppc) flags.push("no packages-per-case (assuming 1)");
+      if (!upp) flags.push(`no ${meas}-per-${pkg} (assuming 1)`);
+      if (!p.usage_measure) flags.push("no size unit set");
+      // A vendor whose case holds a different amount silently changes $/unit.
+      for (const v of (p.vendors || [])) {
+        const vp = nz(v.packages_per_case), vu = nz(v.usage_per_package);
+        if ((vp && ppc && vp !== ppc) || (vu && upp && vu !== upp)) {
+          flags.push(`${vById[v.vendor_id]?.name || "a vendor"} case = ${trim((vp || ppc || 1) * (vu || upp || 1))} ${meas}`);
+        }
+      }
+      return { p, ppc, upp, pkg, meas, perCase: (ppc || 1) * (upp || 1), flags,
+        countIn: ["cases", pkg + "s"].concat(wholeOnly(p) ? [] : [meas]).join(" + ") };
+    });
+}
+
+// Unit math — the case → package → size-unit chain for every item, on screen so a
+// problem can be fixed where it's spotted. Stays mounted while the editor is open,
+// so scroll position survives a fix; the fixed row is scrolled to and flashed.
+function UnitMath({ products, vendors, onFix, onClose, resume }) {
+  const [q, setQ] = useState("");
+  const [only, setOnly] = useState(false);
+  const [hit, setHit] = useState(null);
+  const scroller = useRef(null);
+
+  const rows = unitMathRows(products, vendors);
+  const problems = rows.filter((r) => r.flags.length).length;
+  const shown = rows.filter((r) => (!only || r.flags.length)
+    && (!q.trim() || (r.p.name + " " + (r.p.category || "") + " " + (r.p.brand || "")).toLowerCase().includes(q.trim().toLowerCase())));
+
+  // Came back from a fix: land on that row and flash it.
+  useEffect(() => {
+    const back = resume?.current;
+    if (!back) return;
+    const el = scroller.current?.querySelector(`[data-pid="${back.product_id}"]`);
+    if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    else if (scroller.current && back.scroll != null) scroller.current.scrollTop = back.scroll;
+    setHit(back.product_id);
+    resume.current = null;
+    const t = setTimeout(() => setHit(null), 2200);
+    return () => clearTimeout(t);
+  }, [products]);
+
+  const trim = (n) => (Math.round(n * 1000) / 1000).toLocaleString();
+
+  return (
+    <div className="overlay">
+      <div className="sheet" style={{ maxWidth: 1100 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <h2 style={{ marginBottom: 2 }}>Unit math — full case</h2>
+          <button className="mini" title="Close" onClick={onClose}>✕</button>
+        </div>
+        <p className="stat" style={{ marginTop: 0 }}>
+          {rows.length} active items · <b style={{ color: problems ? "#9a5b00" : "#0E7C6B" }}>{problems}</b> with something to check.
+          Fix an item and you'll come straight back here.
+        </p>
+        <div className="toolbar" style={{ marginBottom: 8 }}>
+          <input className="grow" placeholder="Search items…" value={q} onChange={(e) => setQ(e.target.value)} />
+          <button className="mini" onClick={() => setOnly((v) => !v)}
+            style={only ? { background: "#E68A00", color: "#fff", borderColor: "#E68A00" } : (problems ? { borderColor: "#E68A00", color: "#9a5b00" } : undefined)}>
+            {only ? "Showing problems" : `Problems only (${problems})`}
+          </button>
+          <button className="mini" onClick={() => printUnitMath(products, vendors)}>🖨 Print</button>
+        </div>
+
+        <div ref={scroller} style={{ maxHeight: "62vh", overflowY: "auto", border: "1px solid #E6E1D6", borderRadius: 8 }}>
+          {shown.length === 0 && <div className="stat" style={{ padding: 18, textAlign: "center" }}>Nothing to show.</div>}
+          {shown.map((r) => (
+            <div key={r.p.product_id} data-pid={r.p.product_id}
+              style={{
+                display: "grid", gridTemplateColumns: "minmax(150px,1.4fr) 1fr 1fr 1fr 78px",
+                gap: 8, alignItems: "center", padding: "8px 10px", borderBottom: "1px solid #F0EDE6",
+                background: hit === r.p.product_id ? "#E6F6F2" : (r.flags.length ? "#FFF8E1" : "transparent"),
+                transition: "background .4s ease",
+              }}>
+              <div>
+                <b>{r.p.name}</b>
+                <div className="stat">{[r.p.category, r.p.brand].filter(Boolean).join(" · ")}</div>
+                {r.flags.length > 0 && <div className="stat" style={{ color: "#9a5b00" }}>{r.flags.join("; ")}</div>}
+              </div>
+              <div className="stat">1 case = <b>{trim(r.ppc || 1)}</b> {r.pkg}{(r.ppc || 1) === 1 ? "" : "s"}</div>
+              <div className="stat">1 {r.pkg} = <b>{trim(r.upp || 1)}</b> {r.meas}</div>
+              <div className="stat" style={{ background: "#FAF8F3", borderRadius: 6, padding: "4px 6px" }}>
+                {trim(r.ppc || 1)} × {trim(r.upp || 1)} = <b>{trim(r.perCase)}</b> {r.meas}
+                <div>counted in {r.countIn}</div>
+              </div>
+              <button className="mini" onClick={() => onFix(r.p, scroller.current?.scrollTop ?? 0)}>Fix</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Unit math report — the case → package → size-unit chain for every item, so the
 // conversions behind costing and counting can be checked at a glance.
 function printUnitMath(products, vendors) {
   const esc = (t) => String(t == null ? "" : t).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-  const nz = (n) => { const v = Number(n); return Number.isFinite(v) && v > 0 ? v : null; };
   const trim = (n) => (Math.round(n * 1000) / 1000).toLocaleString();
-  const vById = Object.fromEntries((vendors || []).map((v) => [v.vendor_id, v]));
-
-  const live = products.filter((p) => !p.discontinued).slice()
-    .sort((a, b) => (a.category || "~").localeCompare(b.category || "~") || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
-
-  const rows = live.map((p) => {
-    const ppc = nz(p.packages_per_case), upp = nz(p.usage_per_package);
-    const pkg = p.package_unit || "package", meas = p.usage_measure || "each";
-    const perCase = (ppc || 1) * (upp || 1);
-    const flags = [];
-    if (!ppc) flags.push(`no packages-per-case (assuming 1)`);
-    if (!upp) flags.push(`no ${meas}-per-${pkg} (assuming 1)`);
-    if (!p.usage_measure) flags.push("no size unit set");
-    // A vendor whose case holds a different amount silently changes $/unit.
-    for (const v of (p.vendors || [])) {
-      const vp = nz(v.packages_per_case), vu = nz(v.usage_per_package);
-      if ((vp && ppc && vp !== ppc) || (vu && upp && vu !== upp)) {
-        const name = vById[v.vendor_id]?.name || "a vendor";
-        flags.push(`${name} case = ${trim((vp || ppc || 1) * (vu || upp || 1))} ${meas}`);
-      }
-    }
-    const countIn = ["cases", pkg + "s"].concat(wholeOnly(p) ? [] : [meas]).join(" + ");
-    return { p, ppc, upp, pkg, meas, perCase, flags, countIn };
-  });
+  const rows = unitMathRows(products, vendors);
+  const live = rows;
 
   const body = rows.map((r) => `<tr${r.flags.length ? ' class="warn"' : ""}>
       <td class="nm">${esc(r.p.name)}${r.p.brand ? `<div class="hint">${esc(r.p.brand)}</div>` : ""}</td>
