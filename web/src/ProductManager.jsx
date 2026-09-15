@@ -1,160 +1,130 @@
---- orig/lvmgp-inventory-main/web/src/ProductManager.tsx	2026-09-02 08:16:36.000000000 +0000
-+++ inv/lvmgp-inventory-main/web/src/ProductManager.tsx	2026-09-15 00:49:42.544661281 +0000
-@@ -451,7 +451,7 @@
-           <div className="group-t">Backup / alternate</div>
-           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
-             <input type="checkbox" checked={!!p.count_whole_only} onChange={(e) => set("count_whole_only", e.target.checked)} />
--            Count whole units only — no partial/each (e.g. fountain BIBs)
-+            Don't count in {p.usage_measure || "each"} — count cases and {(p.package_unit || "package") + "s"} only. The size unit still drives costing.
-           </label>
-           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginBottom: 8 }}>
-             <input type="checkbox" checked={!!p.not_stocked} onChange={(e) => setP((s) => ({ ...s, not_stocked: e.target.checked, ...(e.target.checked ? { par_level: 0 } : {}) }))} />
-@@ -534,7 +534,7 @@
-   );
- }
- 
--function printCountSheet(products, locations, areaId) {
-+function printCountSheet(products, locations, areaId, az = false) {
-   const esc = (s) => String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-   const areas = areaId ? locations.filter((l) => String(l.location_id) === String(areaId)) : locations;
-   let body = "";
-@@ -548,11 +548,16 @@
-       const sort = a?.unit_sort ?? 9e9;
-       (groups[code] = groups[code] || { sort, items: [] }).items.push(p);
-     }
--    const ordered = Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
-+    const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-+    const shelfLabel = {};
-+    for (const [code, g] of Object.entries(groups)) for (const it of g.items) shelfLabel[it.product_id] = code;
-+    const ordered = az
-+      ? [["A\u2013Z", { sort: 0, items: items.slice().sort(byName) }]]
-+      : Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
-     body += `<div class="area"><h2>${esc(loc.name)}</h2><div class="meta">Counted by ________________________    Date ______________    Page counts on-hand only</div>`;
-     for (const [code, g] of ordered) {
--      g.items.sort((a, b) => a.name.localeCompare(b.name));
--      body += `<h3>${esc(code)}</h3><table><thead><tr><th class="nm">Item</th><th>Cases</th><th>Pkgs</th><th>Loose</th></tr></thead><tbody>`;
-+      g.items.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
-+      body += `<h3>${esc(code)}</h3><table><thead><tr><th class="nm">Item</th>${az ? "<th>Shelf</th>" : ""}<th>Cases</th><th>Pkgs</th><th>Loose</th></tr></thead><tbody>`;
-       for (const p of g.items) {
-         const ppc = Number(p.packages_per_case) || 1;
-         const upp = Number(p.usage_per_package) || 1;
-@@ -561,7 +566,7 @@
-         const hint = ppc > 1
-           ? `1 case = ${ppc} ${pkg}${ppc === 1 ? "" : "s"}${upp > 1 ? ` · 1 ${pkg} = ${upp} ${meas}` : ""}`
-           : (upp > 1 ? `1 ${pkg} = ${upp} ${meas}` : "");
--        body += `<tr><td class="nm">${esc(p.name)}${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</td><td class="box"></td><td class="box"></td><td class="box">${esc(meas)}</td></tr>`;
-+        body += `<tr><td class="nm">${esc(p.name)}${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</td>${az ? `<td>${esc(shelfLabel[p.product_id] || "")}</td>` : ""}<td class="box"></td><td class="box"></td><td class="box">${esc(meas)}</td></tr>`;
-       }
-       body += `</tbody></table>`;
-     }
-@@ -590,6 +595,10 @@
-   const [finding, setFinding] = useState(false);
-   const [focusId, setFocusId] = useState(null);
-   const [flaggedOnly, setFlaggedOnly] = useState(false);
-+  // Shelf order (default — matches the physical walk) vs one flat A–Z list across the whole section.
-+  const [sortAZ, setSortAZ] = useState(() => { try { return localStorage.getItem("lvmgp_count_sort") === "az"; } catch { return false; } });
-+  const setSort = (v) => { setSortAZ(v); try { localStorage.setItem("lvmgp_count_sort", v ? "az" : "shelf"); } catch {} };
-+  const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" });
-   // Weekly count = a complete statement of a section (blanks become 0).
-   // Spot count = a single-item correction (nothing else is touched).
-   const [weekly, setWeekly] = useState(() => { try { return JSON.parse(localStorage.getItem("lvmgp_weekly") || "null"); } catch { return null; } });
-@@ -602,6 +611,10 @@
-   const loc = locations.find((l) => String(l.location_id) === String(locId));
-   const unitFor = (p) => (p.locations || []).find((l) => l.location_id === loc?.location_id);
-   const inLoc = (p) => (p.locations || []).some((l) => l.location_id === loc?.location_id);
-+  // In A–Z mode the shelf grouping disappears, so each row carries its shelf (or location) as a chip.
-+  const shelfOf = (p) => loc
-+    ? (unitFor(p)?.unit_code || "")
-+    : ((p.locations || []).find((l) => l.primary)?.name || (p.locations || [])[0]?.name || "");
-   const backupsBy = {};
-   for (const p of products) if (p.backup_for) (backupsBy[p.backup_for] ||= []).push(p);
- 
-@@ -623,8 +636,10 @@
-     else { gname = (p.locations || []).find((l) => l.primary)?.name || (p.locations || [])[0]?.name || "Unassigned"; gsort = 0; }
-     (groups[gname] = groups[gname] || { sort: gsort, items: [] }).items.push(p);
-   }
--  for (const g of Object.values(groups)) g.items.sort((a, b) => a.name.localeCompare(b.name));
--  const orderedGroups = Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
-+  for (const g of Object.values(groups)) g.items.sort(byName);
-+  const orderedGroups = sortAZ
-+    ? [["A–Z", { sort: 0, items: heads.slice().sort(byName) }]]
-+    : Object.entries(groups).sort((a, b) => (a[1].sort - b[1].sort) || a[0].localeCompare(b[0]));
-   const entered = Object.entries(draft).filter(([k, e]) => ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== ""));
- 
-   // What you actually typed, turned into count rows.
-@@ -701,14 +716,15 @@
-     const uMeas = measure(p);
-     const upc = usagePerCase(p), upp = usagePerPack(p);
-     const whole = wholeOnly(p);
--    const showCase = !whole && (num(p.packages_per_case) || 1) > 1;    // show a Cases box only when a case holds >1 package
-+    const showCase = (num(p.packages_per_case) || 1) > 1;    // show a Cases box whenever a case holds >1 package
-     const counted = ["cases", "packages", "units", "loose"].some((f) => e[f] !== undefined && e[f] !== "");
-     const partial = (num(e.cases) || 0) * upc + (num(e.packages) || 0) * upp + (num(e.units) || 0) + (num(e.loose) || 0);
-     const hot = focusId === p.product_id;
--    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: whole ? "1fr 72px 96px" : showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
-+    const shelf = sortAZ ? shelfOf(p) : "";
-+    const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: whole ? (showCase ? "1fr 52px 66px 90px" : "1fr 72px 96px") : showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
-     return (
-       <div className="crow" key={p.product_id} style={style}>
--        <div>{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{whole ? `count whole ${pkgName(p, 2)}` : (showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : "") + `1 ${p.package_unit || "package"} = ${upp} ${uMeas}`} · here {fmtQty(p, here)}</div></div>
-+        <div>{shelf && <span className="bchip" style={{ marginRight: 6, background: "#F2F4F8", borderColor: "#C9CCD2", color: "#4a4f57" }} title="Shelf">{shelf}</span>}{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{whole ? `count whole ${pkgName(p, 2)}` + (showCase ? ` · 1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)}` : "") : (showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : "") + `1 ${p.package_unit || "package"} = ${upp} ${uMeas}`} · here {fmtQty(p, here)}</div></div>
-         {showCase && <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>}
-         <label>{pkgName(p, 2)}<input className="fig" type="number" min="0" value={e.packages ?? ""} onChange={(ev) => setRow(key, "packages", ev.target.value)} /></label>
-         {!whole && <label>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>}
-@@ -726,7 +742,10 @@
-         </select>
-         <input className="grow" placeholder={loc ? "Search this location…" : "Search all items…"} value={q} onChange={(e) => setQ(e.target.value)} />
-         {flaggedCount > 0 && <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : { borderColor: "#E0392B", color: "#E0392B" }}>🚩 {flaggedCount}</button>}
--        <button className="mini" title={loc ? `Print a blank count sheet for ${loc.name}` : "Print blank count sheets for all areas"} onClick={() => printCountSheet(products, locations, locId)}>🖨 Print{loc ? "" : " all"}</button>
-+        <button className="mini" onClick={() => setSort(!sortAZ)}
-+          title={sortAZ ? "Sorted A–Z — switch back to shelf order" : "Sorted by shelf — switch to one flat A–Z list"}
-+          style={sortAZ ? { background: "#243B6B", color: "#fff", borderColor: "#243B6B" } : undefined}>{sortAZ ? "A–Z" : "⇅ Shelf"}</button>
-+        <button className="mini" title={loc ? `Print a blank count sheet for ${loc.name}` : "Print blank count sheets for all areas"} onClick={() => printCountSheet(products, locations, locId, sortAZ)}>🖨 Print{loc ? "" : " all"}</button>
-         <button className="mini" onClick={() => setFinding(true)}>📷 Find</button>
-         {weekly && loc
-           ? <button className="btn btn-primary" disabled={busy} onClick={submitSection}>Submit {loc.name} ›</button>
-@@ -756,7 +775,7 @@
-         </div>
-       )}
- 
--      <p className="stat" style={{ margin: "0 2px 12px" }}>Items list in shelf order (A1, A2, …). Count cases and loose separately — the total is figured for you. Each location is a partial count; on-hand sums across locations.</p>
-+      <p className="stat" style={{ margin: "0 2px 12px" }}>{sortAZ ? "Items list A–Z in one flat list; the grey chip is the shelf." : "Items list in shelf order (A1, A2, …)."} Count cases and loose separately — the total is figured for you. Each location is a partial count; on-hand sums across locations.</p>
-       {note > 0 && <div className="ok">Saved {note} count{note === 1 ? "" : "s"}. On-hand updated.</div>}
-       {!loc && <div className="note" style={{ marginBottom: 14 }}>Pick a location above to count the items stored there — they'll be sorted by shelf.</div>}
- 
-@@ -805,7 +824,7 @@
- 
-       {orderedGroups.map(([g, grp]) => (
-         <div className="vgroup" key={g}>
--          <div className="vgroup-h"><span className="vname">{loc ? "▸ " + g : "📍 " + g}</span><span className="stat">{grp.items.length} items</span></div>
-+          <div className="vgroup-h"><span className="vname">{sortAZ ? "🔤 A–Z" : loc ? "▸ " + g : "📍 " + g}</span><span className="stat">{grp.items.length} items</span></div>
-           {grp.items.map((head) => {
-             const backups = backupsBy[head.product_id] || [];
-             if (!backups.length) return renderRow(head, false);
-@@ -2190,7 +2209,7 @@
-   // Rebuild a row's fields from cases/packages/partial, keeping unedited sub-fields at their decomposed value.
-   function rowFields(r) {
-     const upc = usagePerCase(product), upp = usagePerPack(product);
--    const showCase = !wholeOnly(product) && (Number(product.packages_per_case) || 1) > 1;
-+    const showCase = (Number(product.packages_per_case) || 1) > 1;
-     const dC = r._c != null ? (Number(r._c) || 0) : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
-     const remA = (r.qty || 0) - dC * upc;
-     const dP = r._p != null ? (Number(r._p) || 0) : Math.floor(remA / upp + 1e-9);
-@@ -2261,7 +2280,7 @@
-           <span className="stat">·</span>
-           <input type="number" step="0.001" value={perPkg} onChange={(e) => setPerPkg(e.target.value)} style={{ width: 70 }} />
-           <span className="stat">per {product.package_unit || "package"}</span>
--          <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 13 }}><input type="checkbox" checked={wholeChk} onChange={(e) => setWholeChk(e.target.checked)} />whole only</label>
-+          <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 13 }}><input type="checkbox" checked={wholeChk} onChange={(e) => setWholeChk(e.target.checked)} title={`Cost in ${meas || "each"}, but don't count in it`} />don't count in {meas || "each"}</label>
-           <button className="mini" disabled={busy} onClick={saveMeasure}>Save measure</button>
-         </div>
-         <div className="stat" style={{ marginBottom: 10 }}>Edit the <b>date</b>, cases/loose, or delete any entry. Deliveries for this item are below — fix their date, qty, or cost here too. Everything recalculates on-hand and usage.</div>
-@@ -2273,7 +2292,7 @@
-             {rows.map((r) => {
-               const upc = usagePerCase(product), upp = usagePerPack(product);
-               const whole = wholeOnly(product);
--              const showCase = !whole && (Number(product.packages_per_case) || 1) > 1;
-+              const showCase = (Number(product.packages_per_case) || 1) > 1;
-               const dC = r._c != null ? r._c : (showCase ? Math.floor((r.qty || 0) / upc + 1e-9) : 0);
-               const remA = (r.qty || 0) - (Number(dC) || 0) * upc;
-               const dP = r._p != null ? r._p : Math.floor(remA / upp + 1e-9);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>LVMGP — Daily Freezer Pull Plan</title>
+<style>
+  :root{ --ink:#1a1c20; --line:#9aa0a8; --line2:#c9ccd2; --head:#243b6b; --par:#eef3fb; --amber:#8a5a00; }
+  *{ box-sizing:border-box; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  @page{ size:letter landscape; margin:0.3in; }
+  body{ font-family:Arial,Helvetica,sans-serif; color:var(--ink); margin:0; padding:12px 14px; }
+  h1{ font-size:18px; margin:0 0 1px; }
+  .sub{ color:#5b5f66; font-size:11px; margin:0 0 8px; }
+  .banner{ border:2px solid var(--head); background:#eef3fb; border-radius:7px; padding:7px 11px; font-size:12px; margin:0 0 11px; }
+  .banner b{ color:var(--head); }
+  .bar{ margin:0 0 10px; }
+  .bar button{ font-family:inherit; font-size:12px; padding:6px 12px; margin-right:8px; border:1px solid var(--head); background:var(--head); color:#fff; border-radius:6px; cursor:pointer; }
+  .bar button.ghost{ background:#fff; color:var(--head); }
+  .bar .msg{ font-size:11px; color:#0a5c50; margin-left:6px; }
+  h2{ font-size:13px; margin:16px 0 5px; padding-bottom:3px; border-bottom:2px solid var(--ink); }
+  h2.morn{ border-color:var(--amber); color:var(--amber); }
+  .mornnote{ font-size:11px; color:var(--amber); margin:0 0 6px; font-weight:bold; }
+  table{ width:100%; border-collapse:collapse; table-layout:fixed; margin-bottom:4px; }
+  th,td{ border:1px solid var(--line2); font-size:10px; text-align:center; }
+  thead .day{ background:var(--head); color:#fff; font-size:11px; padding:4px 2px; border-color:var(--head); }
+  thead .sub3{ background:#f0f0f0; padding:3px 1px; font-size:9px; font-weight:bold; }
+  .itemcol{ width:150px; text-align:left; padding:5px 7px; font-weight:bold; background:#fafafa; }
+  thead .itemhead{ background:#e9e9e9; text-align:left; padding:5px 7px; font-size:11px; vertical-align:bottom; }
+  tbody td{ height:30px; }
+  td.par{ background:var(--par); padding:0; }
+  .parin{ width:100%; height:100%; border:0; background:transparent; text-align:center; font-family:inherit; font-size:12px; font-weight:bold; color:var(--ink); padding:2px 0; }
+  .parin:focus{ outline:2px solid var(--head); background:#fff; }
+  .dayEnd{ border-right:2px solid var(--line); }
+  tbody tr:nth-child(even) td.itemcol{ background:#f2f2f2; }
+  /* morning table: amber-tint par cells to distinguish */
+  table.morn thead .day{ background:var(--amber); border-color:var(--amber); }
+  table.morn td.par{ background:#fdf6e9; }
+  .legend{ margin-top:6px; font-size:10px; color:#5b5f66; }
+  .legend b{ color:var(--ink); }
+  @media print{ .bar{ display:none; } tr{ page-break-inside:avoid; } h2{ page-break-after:avoid; } }
+</style>
+</head>
+<body>
+<h1>Daily Freezer Pull Plan</h1>
+<p class="sub">Las Vegas Mini Grand Prix &middot; type <b>Par</b> in the blue cells &middot; write <b>Events</b> + <b>Total</b> by hand each day &middot; pull oldest first</p>
+
+<div class="banner">
+  <b>Before you leave each night:</b> make sure <b>TOMORROW's Total</b> for every item below is already in the fridge. This sheet is <b>nightly prep for the next day</b> &mdash; pull tonight so the morning crew opens ready.
+</div>
+
+<div class="bar">
+  <button onclick="savePlan()">Save pars</button>
+  <button class="ghost" onclick="window.print()">Print</button>
+  <button class="ghost" onclick="clearPlan()">Clear all pars</button>
+  <span class="msg" id="msg"></span>
+</div>
+
+<h2>Nightly pull &mdash; for tomorrow</h2>
+<table><colgroup>
+    <col style="width:150px" />
+    <col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" />
+    <col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" /><col /><col /><col />
+  </colgroup><thead>
+    <tr>
+      <th class="itemhead" rowspan="2">Item</th>
+      <th class="day" colspan="3">MON</th><th class="day" colspan="3">TUE</th><th class="day" colspan="3">WED</th>
+      <th class="day" colspan="3">THU</th><th class="day" colspan="3">FRI</th><th class="day" colspan="3">SAT</th><th class="day" colspan="3">SUN</th>
+    </tr>
+    <tr>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3">Tot</th>
+    </tr>
+  </thead><tbody>
+    <tr><td class="itemcol">Pizza Dough</td><td class="par"><input class="parin" data-k="n-0-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-0-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-0-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-0-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-0-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-0-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-0-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Chicken Tenders</td><td class="par"><input class="parin" data-k="n-1-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-1-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-1-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-1-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-1-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-1-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-1-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Wings</td><td class="par"><input class="parin" data-k="n-2-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-2-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-2-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-2-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-2-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-2-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-2-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Fajita Chicken Strips</td><td class="par"><input class="parin" data-k="n-3-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-3-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-3-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-3-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-3-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-3-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-3-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">French Fries</td><td class="par"><input class="parin" data-k="n-4-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-4-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-4-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-4-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-4-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-4-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-4-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Mozzarella Sticks</td><td class="par"><input class="parin" data-k="n-5-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-5-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-5-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-5-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-5-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-5-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-5-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Large Hot Dog</td><td class="par"><input class="parin" data-k="n-6-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-6-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-6-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-6-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-6-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-6-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-6-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Burger Patty</td><td class="par"><input class="parin" data-k="n-7-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-7-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-7-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-7-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-7-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-7-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="n-7-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+  </tbody></table>
+
+<h2 class="morn">Pulled the morning of &mdash; never in advance</h2>
+<p class="mornnote">Do NOT pull these ahead. Pull the morning they're needed, up to the day's Total.</p>
+<table class="morn"><colgroup>
+    <col style="width:150px" />
+    <col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" />
+    <col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" /><col /><col /><col class="dayEnd" /><col /><col /><col />
+  </colgroup><thead>
+    <tr>
+      <th class="itemhead" rowspan="2">Item</th>
+      <th class="day" colspan="3">MON</th><th class="day" colspan="3">TUE</th><th class="day" colspan="3">WED</th>
+      <th class="day" colspan="3">THU</th><th class="day" colspan="3">FRI</th><th class="day" colspan="3">SAT</th><th class="day" colspan="3">SUN</th>
+    </tr>
+    <tr>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3 dayEnd">Tot</th>
+      <th class="sub3">Par</th><th class="sub3">Ev</th><th class="sub3">Tot</th>
+    </tr>
+  </thead><tbody>
+    <tr><td class="itemcol">Pepperoni</td><td class="par"><input class="parin" data-k="m-0-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-0-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-0-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-0-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-0-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-0-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-0-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Sausage</td><td class="par"><input class="parin" data-k="m-1-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-1-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-1-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-1-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-1-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-1-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-1-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Hot Dog Buns</td><td class="par"><input class="parin" data-k="m-2-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-2-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-2-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-2-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-2-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-2-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-2-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+    <tr><td class="itemcol">Burger Buns</td><td class="par"><input class="parin" data-k="m-3-0" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-3-1" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-3-2" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-3-3" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-3-4" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-3-5" inputmode="numeric" /></td><td class="ev"></td><td class="tot dayEnd"></td><td class="par"><input class="parin" data-k="m-3-6" inputmode="numeric" /></td><td class="ev"></td><td class="tot"></td></tr>
+  </tbody></table>
+
+<p class="legend"><b>Par</b> = standing amount for that day. <b>Ev</b> (Events) = extra for events/parties. <b>Tot</b> (Total) = Par + Events = what gets pulled. Pull oldest-dated stock first.</p>
+
+<script>
+  var KEY = "lvmgp_freezer_pull_pars_v3";
+  function all(){ return Array.prototype.slice.call(document.querySelectorAll(".parin")); }
+  function load(){ try{ var d = JSON.parse(localStorage.getItem(KEY) || "{}"); all().forEach(function(i){ if(d[i.dataset.k] != null) i.value = d[i.dataset.k]; }); }catch(e){} }
+  function collect(){ var d={}; all().forEach(function(i){ if(i.value!=="") d[i.dataset.k]=i.value; }); return d; }
+  function savePlan(){ try{ localStorage.setItem(KEY, JSON.stringify(collect())); msg("Saved. Pars will be here next time on this device."); }catch(e){ msg("Couldn't save on this device."); } }
+  function clearPlan(){ if(!confirm("Clear all Par numbers?")) return; all().forEach(function(i){ i.value=""; }); try{ localStorage.removeItem(KEY); }catch(e){} msg("Cleared."); }
+  function msg(t){ var m=document.getElementById("msg"); m.textContent=t; setTimeout(function(){ m.textContent=""; }, 3000); }
+  document.addEventListener("input", function(e){ if(e.target.classList.contains("parin")){ try{ localStorage.setItem(KEY, JSON.stringify(collect())); }catch(e2){} } });
+  load();
+</script>
+</body>
+</html>
