@@ -155,6 +155,9 @@ export default function App() {
   const [receipts, setReceipts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [online, setOnline] = useState(typeof navigator === "undefined" || navigator.onLine !== false);
+  const [pending, setPending] = useState(() => db.pendingCount());
+  const [staleAt, setStaleAt] = useState(0);        // >0 = showing a cached catalog
 
   async function reload() {
     setError("");
@@ -190,13 +193,41 @@ export default function App() {
         m.total += qty;
       }
       setProducts(p); setLocations(l); setVendors(v); setUnits(u); setOnhand(map); setCounts(cts); setReceipts(rcs);
+      setStaleAt(0);
+      // Keep a copy that's enough to run a count with no signal.
+      db.saveSnapshot({ products: p, locations: l, vendors: v, units: u, onhand: map });
     } catch (e) {
-      setError("Couldn't load data: " + (e.message || e));
+      // No connection? Fall back to the last good catalog so the walk-in still works.
+      const snap = db.readSnapshot();
+      if (snap) {
+        setProducts(snap.products); setLocations(snap.locations); setVendors(snap.vendors || []);
+        setUnits(snap.units || []); setOnhand(snap.onhand || {});
+        setCounts([]); setReceipts([]);
+        setStaleAt(snap.at || 1); setError("");
+      } else {
+        setError("Couldn't load data: " + (e.message || e));
+      }
     } finally {
       setLoading(false);
     }
   }
   useEffect(() => { reload(); }, []);
+
+  // Push anything counted offline as soon as the connection returns.
+  async function syncNow() {
+    const r = await db.flushPendingCounts();
+    setPending(db.pendingCount());
+    if (r.flushed) await reload();
+    return r;
+  }
+  useEffect(() => {
+    const goOnline = () => { setOnline(true); syncNow(); };
+    const goOffline = () => setOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    if (navigator.onLine !== false && db.pendingCount()) syncNow();
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
+  }, []);
 
   if (loading) return <div className="pm"><style>{STYLE}</style><div className="wrap" style={{ padding: 60, textAlign: "center", color: "#71757E" }}>Loading…</div></div>;
 
@@ -220,8 +251,21 @@ export default function App() {
 
       <div className="wrap">
         {error && <div className="err">{error}</div>}
+        {(!online || pending > 0 || staleAt > 0) && (
+          <div className="note" style={{ marginBottom: 12, borderColor: online ? "#0E7C6B" : "#E68A00", background: online ? "#F3FAF8" : "#FFF8E1" }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "space-between" }}>
+              <div>
+                <b style={{ color: online ? "#0a5c50" : "#9a5b00" }}>{online ? "Back online" : "Offline"}</b>
+                {!online && <> — you can keep counting. Entries are saved on this device.</>}
+                {staleAt > 0 && <div className="stat">Item list is a saved copy{staleAt > 1 ? ` from ${new Date(staleAt).toLocaleString()}` : ""}. Dashboard and Shopping need a connection.</div>}
+                {pending > 0 && <div className="stat"><b>{pending}</b> count{pending === 1 ? "" : "s"} waiting to upload.</div>}
+              </div>
+              {pending > 0 && online && <button className="mini" onClick={syncNow}>Sync now</button>}
+            </div>
+          </div>
+        )}
         {tab === "catalog" && <Catalog products={products} vendors={vendors} locations={locations} units={units} onhand={onhand} counts={counts} receipts={receipts} reload={reload} jumpTo={jumpTo} clearJump={() => setJumpTo(null)} />}
-        {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} />}
+        {tab === "count" && <Count products={products} locations={locations} onhand={onhand} reload={reload} onPending={() => setPending(db.pendingCount())} />}
         {tab === "organize" && <Organize products={products} locations={locations} reload={reload} />}
         {tab === "receive" && <Receive products={products} vendors={vendors} locations={locations} reload={reload} />}
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} locations={locations} />}
@@ -754,7 +798,7 @@ function printCountSheet(products, locations, areaId, az = false) {
 
 const COUNT_DRAFT_KEY = "lvmgp_count_drafts";
 
-function Count({ products, locations, onhand, reload }) {
+function Count({ products, locations, onhand, reload, onPending }) {
   const [locId, setLocId] = useState("");
   // Typed-but-unsaved counts, kept per location and mirrored to localStorage so
   // leaving the tab (or the whole app) doesn't throw away a half-finished walk.
@@ -771,6 +815,7 @@ function Count({ products, locations, onhand, reload }) {
     return next;
   });
   const [note, setNote] = useState(0);
+  const [queued, setQueued] = useState(0);        // of the last save, how many are waiting to upload
   const [q, setQ] = useState("");
   const [finding, setFinding] = useState(false);
   const [focusId, setFocusId] = useState(null);
@@ -843,9 +888,12 @@ function Count({ products, locations, onhand, reload }) {
     const entries = draftEntries();
     if (!entries.length) { alert("These items don't have a location set yet — add one in Catalog, or pick a location above."); return; }
     try {
-      await db.postCounts(entries);
-      for (const e of entries) { const p = products.find((x) => x.product_id === e.product_id); if (p?.needs_recount) { try { await db.setRecountFlag(e.product_id, false); } catch {} } }
-      setNote(entries.length); setDraft({}); reload();
+      const r = await db.postCounts(entries);
+      // Recount flags need the server; offline they stay flagged and clear on the next sync.
+      if (r.saved) for (const e of entries) { const p = products.find((x) => x.product_id === e.product_id); if (p?.needs_recount) { try { await db.setRecountFlag(e.product_id, false); } catch {} } }
+      setNote(entries.length); setQueued(r.queued || 0); setDraft({});
+      onPending && onPending();
+      if (r.saved) reload();
     } catch (err) {
       alert("Couldn't save the count: " + (err.message || err));
     }
@@ -875,7 +923,10 @@ function Count({ products, locations, onhand, reload }) {
     }
     setBusy(true);
     try {
-      if (entries.length) await db.postCounts(entries);
+      let r = { saved: 0, queued: 0 };
+      if (entries.length) r = await db.postCounts(entries);
+      setQueued(r.queued || 0);
+      onPending && onPending();
       for (const pid of toFlag) { try { await db.setRecountFlag(pid, true, "not counted during weekly count"); } catch {} }
       for (const e of entries) { const p = products.find((x) => x.product_id === e.product_id); if (p?.needs_recount && !toFlag.includes(e.product_id)) { try { await db.setRecountFlag(e.product_id, false); } catch {} } }
       saveWeekly({ ...(weekly || { started: new Date().toISOString(), done: {} }), done: { ...((weekly && weekly.done) || {}), [loc.location_id]: new Date().toISOString() } });
@@ -960,7 +1011,9 @@ function Count({ products, locations, onhand, reload }) {
       )}
 
       <p className="stat" style={{ margin: "0 2px 12px" }}>{sortAZ ? "Items list A–Z in one flat list; the grey chip is the shelf. " : "Items list in shelf order (A1, A2, …). "}Count cases and loose separately — the total is figured for you. Each location is a partial count; on-hand sums across locations.</p>
-      {note > 0 && <div className="ok">Saved {note} count{note === 1 ? "" : "s"}. On-hand updated.</div>}
+      {note > 0 && (queued > 0
+        ? <div className="ok" style={{ background: "#FFF8E1", borderColor: "#E68A00", color: "#9a5b00" }}>Saved {note} count{note === 1 ? "" : "s"} on this device — they'll upload automatically when you're back in signal. Don't clear your browser data before then.</div>
+        : <div className="ok">Saved {note} count{note === 1 ? "" : "s"}. On-hand updated.</div>)}
       {pendingElsewhere.length > 0 && (
         <div className="note" style={{ marginBottom: 12 }}>
           <b>Unsaved counts waiting elsewhere</b> — they're kept on this device until you save them.
