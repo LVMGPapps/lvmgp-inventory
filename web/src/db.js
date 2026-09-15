@@ -3,8 +3,62 @@
 import { supabase } from "./supabase";
 
 async function uid() {
-  const { data } = await supabase.auth.getUser();
-  return data?.user?.id ?? null;
+  // getSession() reads the stored session; getUser() hits the network and hangs offline.
+  const { data } = await supabase.auth.getSession();
+  return data?.session?.user?.id ?? null;
+}
+
+// ---- Offline support ----------------------------------------------------
+// Counting happens in the walk-in, where there's no signal. Counts typed there are
+// queued locally and pushed when the connection comes back.
+const QUEUE_KEY = "lvmgp_pending_counts";
+const SNAP_KEY = "lvmgp_catalog_snapshot";
+
+function isNetworkError(err) {
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return true;
+  const m = String(err?.message || err || "").toLowerCase();
+  // "Load failed" is Safari/iOS; "Failed to fetch" is Chrome.
+  return m.includes("failed to fetch") || m.includes("load failed")
+      || m.includes("networkerror") || m.includes("network request failed")
+      || m.includes("timeout") || m.includes("err_internet_disconnected");
+}
+
+export function pendingBatches() { try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); } catch { return []; } }
+function writeQueue(q) { try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch {} }
+export function pendingCount() { return pendingBatches().reduce((a, b) => a + (b.rows?.length || 0), 0); }
+export function pendingErrors() { return pendingBatches().filter((b) => b.error); }
+export function discardPending() { writeQueue([]); }
+
+// Push anything queued. Network failures stay queued; real rejections are kept but
+// flagged, so a bad row can't silently swallow a staff member's count.
+export async function flushPendingCounts() {
+  const q = pendingBatches();
+  if (!q.length) return { flushed: 0, left: 0, failed: 0 };
+  const left = [];
+  let flushed = 0, failed = 0;
+  for (const batch of q) {
+    try {
+      const { error } = await supabase.from("stock_count").insert(batch.rows);
+      if (error) throw error;
+      flushed += batch.rows.length;
+    } catch (err) {
+      if (isNetworkError(err)) { left.push(batch); }
+      else { failed += batch.rows.length; left.push({ ...batch, error: String(err?.message || err) }); }
+    }
+  }
+  writeQueue(left);
+  return { flushed, left: left.reduce((a, b) => a + (b.rows?.length || 0), 0), failed };
+}
+
+// Catalog snapshot — enough to run a count with no connection. Counts/receipts history
+// is deliberately left out: it's large, and only Reports and Shopping need it.
+export function saveSnapshot(snap) {
+  try { localStorage.setItem(SNAP_KEY, JSON.stringify({ at: Date.now(), ...snap })); return true; }
+  catch { return false; }   // quota exceeded — not fatal, just means no offline catalog
+}
+export function readSnapshot() {
+  try { const s = JSON.parse(localStorage.getItem(SNAP_KEY) || "null"); return s?.products ? s : null; }
+  catch { return null; }
 }
 
 // ---- Catalog ----
@@ -225,15 +279,27 @@ export async function listVendors() {
 // ---- Counts (per-location partials) ----
 export async function postCounts(entries) {
   const me = await uid();
+  // Stamp when it was COUNTED, not when it syncs — a count queued in the freezer at 9am
+  // and pushed at noon must still read as 9am or usage math and weekly counts go wrong.
+  const stamp = new Date().toISOString();
   const rows = entries.map((e) => ({
     product_id: e.product_id, location_id: e.location_id,
     cases: Number(e.cases) || 0, loose: Number(e.loose) || 0,
     qty: e.qty != null ? Number(e.qty) : (Number(e.cases) || 0) * (Number(e.count_per_case) || 1) + (Number(e.loose) || 0),
     counted_by: me,
+    counted_at: e.counted_at || stamp,
   }));
-  const { error } = await supabase.from("stock_count").insert(rows);
-  if (error) throw error;
-  return rows.length;
+  try {
+    const { error } = await supabase.from("stock_count").insert(rows);
+    if (error) throw error;
+    return { saved: rows.length, queued: 0 };
+  } catch (err) {
+    if (!isNetworkError(err)) throw err;
+    const q = pendingBatches();
+    q.push({ queued_at: stamp, rows });
+    writeQueue(q);
+    return { saved: 0, queued: rows.length };
+  }
 }
 
 // ---- Waste logging ----
