@@ -158,6 +158,8 @@ export default function App() {
   const [online, setOnline] = useState(typeof navigator === "undefined" || navigator.onLine !== false);
   const [pending, setPending] = useState(() => db.pendingCount());
   const [staleAt, setStaleAt] = useState(0);        // >0 = showing a cached catalog
+  const [reportKey, setReportKey] = useState(null); // which report the Reporting tab is showing
+  const openReport = (k) => { setReportKey(k); setTab("reporting"); };
 
   async function reload() {
     setError("");
@@ -231,7 +233,7 @@ export default function App() {
 
   if (loading) return <div className="pm"><style>{STYLE}</style><div className="wrap" style={{ padding: 60, textAlign: "center", color: "#71757E" }}>Loading…</div></div>;
 
-  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["prep", "Prep"], ["waste", "Waste"], ["recipes", "Recipes"], ["reports", "Dashboard"], ["users", "Users"]];
+  const tabs = [["catalog", "Catalog"], ["count", "Count"], ["organize", "Organize"], ["receive", "Receive"], ["shopping", "Shopping"], ["prep", "Prep"], ["waste", "Waste"], ["recipes", "Recipes"], ["reports", "Dashboard"], ["reporting", "Reporting"], ["users", "Users"]];
 
   return (
     <div className="pm">
@@ -272,7 +274,8 @@ export default function App() {
         {tab === "waste" && <Waste products={products} locations={locations} reload={reload} />}
         {tab === "prep" && <PrepSheet products={products} reload={reload} />}
         {tab === "recipes" && <Recipes products={products} reload={reload} />}
-        {tab === "reports" && <Dashboard products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
+        {tab === "reports" && <Dashboard mode="dashboard" openReport={openReport} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
+        {tab === "reporting" && <Dashboard mode="reports" reportKey={reportKey} setReportKey={setReportKey} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
       </div>
     </div>
@@ -2826,9 +2829,30 @@ function RecipeEditor({ product, onClose, onSaved }) {
   );
 }
 
-function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload, openItem }) {
+// One-line description per report, shown on the Reporting index.
+const REPORT_INFO = {
+  notcounted: { blurb: "Stocked items with no count logged this week." },
+  stale:      { blurb: "Stock sitting in a location it shouldn't be — zero it out." },
+  attention:  { blurb: "Items missing costs, conversions, vendors or locations." },
+  review:     { blurb: "Last count → received → this count → what got used." },
+  onhand:     { blurb: "Current quantity of every item, broken out by location." },
+  value:      { blurb: "What your inventory is worth, grouped by category." },
+  valitem:    { blurb: "The same value, item by item — find what's tying up cash." },
+  spend:      { blurb: "Purchasing totals by vendor over a window you choose." },
+  foodcost:   { blurb: "Weekly food cost and usage per item." },
+  counts:     { blurb: "How many items were counted each week." },
+  complete:   { blurb: "Which catalog fields are still blank." },
+  menu:       { blurb: "Everyday items versus event-only items." },
+};
+
+function Dashboard({ products, onhand, vendors, locations, counts, receipts, reload, openItem,
+                    mode = "dashboard", openReport, reportKey, setReportKey }) {
   const [ship, setShip] = useState({ open: 0, purchased: 0 });
-  const [open, setOpen] = useState("attention");
+  // In "reports" mode the open report is owned by App, so the tab remembers where you were.
+  const [openLocal, setOpenLocal] = useState("attention");
+  const open = mode === "reports" ? reportKey : openLocal;
+  const setOpen = mode === "reports" ? setReportKey : setOpenLocal;
+  const goReport = (k) => (openReport ? openReport(k) : setOpen(k));
   const [spendDays, setSpendDays] = useState(7);
   const [detail, setDetail] = useState(null);   // product whose count history is open
   const [rq, setRq] = useState("");             // report search: product name or category
@@ -2917,14 +2941,55 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
   ];
 
   if (receipts === null) return <div className="empty">Loading…</div>;
+
+  // ---- Reporting tab: an index you pick from, then the report on its own ----
+  if (mode === "reports") {
+    const active = open ? reports.find((r) => r[0] === open) : null;
+    if (active) {
+      return (
+        <div>
+          <div className="toolbar" style={{ marginBottom: 10 }}>
+            <button className="mini" onClick={() => setOpen(null)}>← All reports</button>
+            <input className="grow" placeholder="🔍 Filter by product or category…" value={rq} onChange={(e) => setRq(e.target.value)} />
+            {rqn && <button className="mini" onClick={() => setRq("")}>Clear</button>}
+          </div>
+          <div className="secthead" style={{ marginTop: 0 }}>{active[1]}</div>
+          {rqn && <div className="stat" style={{ marginBottom: 6 }}>Showing {fProducts.length} item{fProducts.length === 1 ? "" : "s"} matching “{rq}”.</div>}
+          <div style={{ background: "#fff", border: "1.5px solid #E6E1D6", borderRadius: 11, padding: 14 }}>{active[2]}</div>
+          {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+        </div>
+      );
+    }
+    return (
+      <div>
+        <div className="secthead" style={{ marginTop: 0 }}>Reports</div>
+        <p className="stat" style={{ margin: "0 2px 12px" }}>Pick a report. Filters and your place are kept while you're in this tab.</p>
+        <div style={{ display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))" }}>
+          {reports.map(([key, label]) => {
+            const d = REPORT_INFO[key] || {};
+            return (
+              <button key={key} onClick={() => setOpen(key)}
+                style={{ textAlign: "left", cursor: "pointer", background: "#fff", border: "1.5px solid #E6E1D6",
+                         borderRadius: 11, padding: "12px 13px", font: "inherit" }}>
+                <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 17, textTransform: "uppercase", letterSpacing: ".03em" }}>{label}</div>
+                {d.blurb && <div className="stat" style={{ marginTop: 3 }}>{d.blurb}</div>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Dashboard tab: the numbers at a glance; tiles jump to the matching report ----
   return (
     <div>
       <div className="tiles">
-        {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true, () => setOpen("valitem"))}
-        {tile("Spent · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`, false, () => setOpen("spend"))}
-        {tile("Needs attention", attention.length, attention.length ? "tap to see the list" : "all clear ✓", false, () => setOpen("attention"))}
-        {tile("Not counted", notCountedStocked, notCountedStocked ? "stocked · this week" : "all counted ✓", false, () => setOpen("notcounted"))}
-        {staleLocs > 0 && tile("Stray stock", staleLocs, "wrong location · zero it", false, () => setOpen("stale"))}
+        {tile("Inventory value", fmtUSD(invValue), invValue ? "current count × cost" : "count items to populate", true, () => goReport("valitem"))}
+        {tile("Spent · this week", fmtUSD(spend7), `${recs7.length} receipt${recs7.length === 1 ? "" : "s"} · 30d ${fmtUSD(spend30)}`, false, () => goReport("spend"))}
+        {tile("Needs attention", attention.length, attention.length ? "tap to see the list" : "all clear ✓", false, () => goReport("attention"))}
+        {tile("Not counted", notCountedStocked, notCountedStocked ? "stocked · this week" : "all counted ✓", false, () => goReport("notcounted"))}
+        {staleLocs > 0 && tile("Stray stock", staleLocs, "wrong location · zero it", false, () => goReport("stale"))}
         {tile("To buy / awaiting", `${ship.open} / ${ship.purchased}`, "open · purchased")}
       </div>
 
@@ -2944,21 +3009,8 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
           </div>}
 
       <div className="secthead">Reports</div>
-      <div style={{ marginBottom: 8 }}>
-        <input placeholder="🔍 Filter reports by product or category…" value={rq} onChange={(e) => setRq(e.target.value)} style={{ width: "100%" }} />
-        {rqn && <div className="stat" style={{ marginTop: 4 }}>Showing {fProducts.length} item{fProducts.length === 1 ? "" : "s"} matching “{rq}”. <button className="mini" style={{ marginLeft: 6 }} onClick={() => setRq("")}>Clear</button></div>}
-      </div>
-      <div style={{ display: "flex", gap: 6, overflowX: "auto", padding: "2px 0 10px", WebkitOverflowScrolling: "touch" }}>
-        {reports.map(([key, label]) => (
-          <button key={key} className="mini" onClick={() => setOpen(key)}
-            style={{ whiteSpace: "nowrap", flex: "0 0 auto", fontWeight: open === key ? 700 : 500, background: open === key ? "#191B1F" : "#fff", color: open === key ? "#fff" : "#191B1F", borderColor: open === key ? "#191B1F" : "#E6E1D6" }}>
-            {label}
-          </button>
-        ))}
-      </div>
-      <div className="panel-b" style={{ background: "#fff", border: "1.5px solid #E6E1D6", borderRadius: 11, padding: 14 }}>
-        {(() => { const r = reports.find((x) => x[0] === open) || reports[0]; return <div><div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 18, marginBottom: 8 }}>{r[1]}</div>{r[2]}</div>; })()}
-      </div>
+      <div className="note">Every report now lives in the <b>Reporting</b> tab — including the ones behind the tiles above.</div>
+
       {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
     </div>
   );
