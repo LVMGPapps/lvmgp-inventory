@@ -870,6 +870,7 @@ export async function savePizzaComponent(c) {
     unit: c.unit || "oz", factor: n(c.factor), full_qty: n(c.full_qty),
     tool_kind: c.tool_kind || null, tool_qty: n(c.tool_qty), tool_label: c.tool_label || null,
     kids_qty: n(c.kids_qty), kids_tool: c.kids_tool || null, estimated: !!c.estimated,
+    addon_price: n(c.addon_price), kids_addon_price: n(c.kids_addon_price),
     fallback_cost: n(c.fallback_cost), note: c.note || null,
   };
   if (c.component_id) {
