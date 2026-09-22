@@ -810,6 +810,8 @@ export async function saveMenuRecipe(r, lines) {
     category: r.category || null,
     kind: r.kind || "standard",
     size_key: r.kind === "wing_base" ? (r.size_key || null) : null,
+    yield_qty: r.kind === "prep" && r.yield_qty !== "" && r.yield_qty != null ? Number(r.yield_qty) : null,
+    yield_unit: r.kind === "prep" ? (r.yield_unit || null) : null,
     base_recipe_id: /_specialty$/.test(r.kind || "") ? (r.base_recipe_id || null) : null,
     sauce_component_id: /_specialty$/.test(r.kind || "") ? (r.sauce_component_id || null) : null,
     topping_component_ids: r.kind === "pizza_specialty" ? (r.topping_component_ids || []) : [],
@@ -867,7 +869,7 @@ export async function listPizzaComponents() {
 export async function savePizzaComponent(c) {
   const n = (v) => (v === "" || v == null || isNaN(Number(v)) ? null : Number(v));
   const row = {
-    station: c.station || "pizza", portions: c.portions ?? null,
+    station: c.station || "pizza", portions: c.portions ?? null, sub_recipe_id: c.sub_recipe_id || null,
     kind: c.kind, name: String(c.name).trim(), sort: n(c.sort) ?? 999, product_id: c.product_id || null,
     unit: c.unit || "oz", factor: n(c.factor), full_qty: n(c.full_qty),
     tool_kind: c.tool_kind || null, tool_qty: n(c.tool_qty), tool_label: c.tool_label || null,
