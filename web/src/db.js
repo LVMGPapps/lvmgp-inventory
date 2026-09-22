@@ -809,8 +809,9 @@ export async function saveMenuRecipe(r, lines) {
     name: String(r.name).trim(),
     category: r.category || null,
     kind: r.kind || "standard",
-    base_recipe_id: r.kind === "pizza_specialty" ? (r.base_recipe_id || null) : null,
-    sauce_component_id: r.kind === "pizza_specialty" ? (r.sauce_component_id || null) : null,
+    size_key: r.kind === "wing_base" ? (r.size_key || null) : null,
+    base_recipe_id: /_specialty$/.test(r.kind || "") ? (r.base_recipe_id || null) : null,
+    sauce_component_id: /_specialty$/.test(r.kind || "") ? (r.sauce_component_id || null) : null,
     topping_component_ids: r.kind === "pizza_specialty" ? (r.topping_component_ids || []) : [],
     menu_price: r.menu_price === "" || r.menu_price == null ? null : Number(r.menu_price),
     method: r.method || null,
@@ -858,7 +859,7 @@ export async function setMenuRecipeOrder(updates) {
 
 // ---------- Pizza building blocks (toppings & sauces) ----------
 export async function listPizzaComponents() {
-  const { data, error } = await supabase.from("pizza_component").select("*").order("kind").order("sort").order("name");
+  const { data, error } = await supabase.from("pizza_component").select("*").order("station").order("kind").order("sort").order("name");
   if (error) throw error;
   return data || [];
 }
@@ -866,6 +867,7 @@ export async function listPizzaComponents() {
 export async function savePizzaComponent(c) {
   const n = (v) => (v === "" || v == null || isNaN(Number(v)) ? null : Number(v));
   const row = {
+    station: c.station || "pizza", portions: c.portions ?? null,
     kind: c.kind, name: String(c.name).trim(), sort: n(c.sort) ?? 999, product_id: c.product_id || null,
     unit: c.unit || "oz", factor: n(c.factor), full_qty: n(c.full_qty),
     tool_kind: c.tool_kind || null, tool_qty: n(c.tool_qty), tool_label: c.tool_label || null,
