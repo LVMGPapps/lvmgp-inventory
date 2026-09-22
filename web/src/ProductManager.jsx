@@ -2911,22 +2911,32 @@ function fracStr(x) {
   const w = Math.floor(e / 8), r = e % 8; const g = (a, b) => (b ? g(b, a % b) : a); const d = g(r, 8);
   return [w || "", r ? `${r / d}/${8 / d}` : ""].filter(Boolean).join(" ");
 }
+// The line has one measuring cup: the 1/4 cup. Portions land on whole or half scoops of it,
+// and the ounces follow the scoop actually used (not the raw math).
+const SCOOP_CUPS = 0.25;
+const snapHalf = (x, min) => Math.max(min, Math.round(x * 2 - 1e-9) / 2);   // nearest half, ties DOWN
+const snapQuarter = (x, min) => Math.max(min, Math.round(x * 4 - 1e-9) / 4);
+function scoopText(n) { return `${fracStr(n)} scoop${n <= 1 ? "" : "s"} of the 1/4 cup`; }
+// How much of the single portion a component actually ends up at, once snapped to the line's tools.
+function snappedRatio(c, ratio) {
+  const t = num(c.tool_qty);
+  if (c.tool_kind === "cup" && t) { const base = t / SCOOP_CUPS; return snapHalf(base * ratio, 0.5) / base; }
+  if (c.tool_kind === "cheese_cup" && t) return snapQuarter(t * ratio, 0.25) / t;
+  return ratio;
+}
 // Line measure for a component at a given share of its single-topping portion.
 function toolText(c, ratio, kids) {
   if (kids) return c.kids_tool || "";
-  const q = Number(c.tool_qty) * ratio;
-  if (c.tool_kind === "count") return `${Math.round(q)} ${c.tool_label || ""}`.trim();
-  if (c.tool_kind === "cup") {
-    if (q >= 0.25 - 1e-9) return `${fracStr(q)} measuring cup`;
-    const tb = Math.round(q * 16 * 2) / 2;                  // 1 cup = 16 Tbsp
-    return `${tb} Tbsp`;
-  }
-  if (c.tool_kind === "cheese_cup") return q >= 0.999 ? "full 16 oz cheese cup" : `${fracStr(q)} of the 16 oz cheese cup`;
+  const t = num(c.tool_qty);
+  if (c.tool_kind === "count") return `${Math.round(Number(c.tool_qty) * ratio)} ${c.tool_label || ""}`.trim();
+  if (c.tool_kind === "cup" && t) return scoopText(snapHalf((t / SCOOP_CUPS) * ratio, 0.5));
+  if (c.tool_kind === "cheese_cup" && t) { const q = snapQuarter(t * ratio, 0.25); return q >= 0.999 ? "full 16 oz cheese cup" : `${fracStr(q)} of the 16 oz cheese cup`; }
   if (c.tool_kind === "text") return ratio === 1 ? (c.tool_label || "") : `${tierName(ratio)} of: ${c.tool_label || ""}`;
   return "";
 }
 function componentLine(c, ratio, kids) {
-  const qty = kids ? num(c.kids_qty) : (num(c.full_qty) == null ? null : Number(c.full_qty) * ratio);
+  const r = snappedRatio(c, ratio);
+  const qty = kids ? num(c.kids_qty) : (num(c.full_qty) == null ? null : Number(c.full_qty) * r);
   return { product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty, unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
     portion: toolText(c, ratio, kids), note: c.estimated ? "estimated portion — not weighed yet" : null, _src: c.kind };
 }
@@ -3125,7 +3135,7 @@ function PizzaGuide({ comps, byId, onEdit, showCost, prices, onSavePrices }) {
   return (
     <>
       <div className="group-t" style={{ marginTop: 18 }}>Pizza — 2–4. Topping portions (large)</div>
-      <div className="stat" style={{ marginBottom: 6 }}>Every pizza — specialty or build-your-own — follows one rule: 1 topping = full portion, 2 toppings → ¾ of each, 3 or more → ½ of each. Each cell shows <b>what the line uses</b>, then ounces{showCost ? "; with costs on, the portion cost and — on a single topping — food cost against the 1-topping price" : ""}. Tap a topping to edit it.</div>
+      <div className="stat" style={{ marginBottom: 6 }}>Every pizza — specialty or build-your-own — follows one rule: 1 topping = full portion, 2 toppings → ¾ of each, 3 or more → ½ of each. Scooped toppings land on the nearest half scoop of the 1/4 cup, and the ounces follow the scoop actually used. Each cell shows <b>what the line uses</b>, then ounces{showCost ? "; with costs on, the portion cost and — on a single topping — food cost against the 1-topping price" : ""}. Tap a topping to edit it.</div>
       <div style={{ overflowX: "auto" }}>
         <table className="tbl" style={{ minWidth: 640 }}>
           <thead><tr><th>Topping</th>{TOPPING_TIERS.map((t) => <th key={t.n}>{t.label}{t.ratio < 1 ? ` (${tierName(t.ratio)})` : ""}</th>)}<th>Kids</th></tr></thead>
@@ -3430,9 +3440,15 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
             <div className="field" style={{ flex: "1 1 150px" }}><label>Line measures it by</label>
               <select value={c.tool_kind || ""} onChange={(e) => set("tool_kind", e.target.value || null)}>
-                <option value="">— not set —</option><option value="count">Count (slices, pieces)</option><option value="cup">Measuring cup</option>
+                <option value="">— not set —</option><option value="count">Count (slices, pieces)</option><option value="cup">1/4 cup scoop</option>
                 <option value="cheese_cup">16 oz cheese cup</option><option value="text">Other (describe)</option></select></div>
-            {c.tool_kind && c.tool_kind !== "text" && <div className="field" style={{ flex: "0 1 110px" }}><label>{c.tool_kind === "count" ? "How many" : "Fraction of cup"}</label><input className="fig" type="number" step="any" value={c.tool_qty ?? ""} onChange={(e) => set("tool_qty", e.target.value)} /></div>}
+            {c.tool_kind === "count" && <div className="field" style={{ flex: "0 1 110px" }}><label>How many</label><input className="fig" type="number" step="any" value={c.tool_qty ?? ""} onChange={(e) => set("tool_qty", e.target.value)} /></div>}
+            {c.tool_kind === "cup" && <div className="field" style={{ flex: "0 1 150px" }}><label>Scoops of the 1/4 cup</label>
+              <select value={String((num(c.tool_qty) ?? 0) / SCOOP_CUPS)} onChange={(e) => set("tool_qty", Number(e.target.value) * SCOOP_CUPS)}>
+                {[0.5, 1, 1.5, 2, 2.5, 3, 4].map((n) => <option key={n} value={n}>{scoopText(n)}</option>)}</select></div>}
+            {c.tool_kind === "cheese_cup" && <div className="field" style={{ flex: "0 1 150px" }}><label>Of the 16 oz cheese cup</label>
+              <select value={String(num(c.tool_qty) ?? 1)} onChange={(e) => set("tool_qty", Number(e.target.value))}>
+                {[0.25, 0.5, 0.75, 1].map((n) => <option key={n} value={n}>{n === 1 ? "full cup" : `${fracStr(n)} of the cup`}</option>)}</select></div>}
             {(c.tool_kind === "count" || c.tool_kind === "text") && <div className="field" style={{ flex: "1 1 140px" }}><label>{c.tool_kind === "count" ? "Of what" : "Describe the measure"}</label><input value={c.tool_label || ""} onChange={(e) => set("tool_label", e.target.value)} placeholder={c.tool_kind === "count" ? "slices" : "1 blue scoop"} /></div>}
           </div>
           <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, fontSize: 13 }}><input type="checkbox" checked={!!c.estimated} onChange={(e) => set("estimated", e.target.checked)} />Estimate — not weighed yet</label>
