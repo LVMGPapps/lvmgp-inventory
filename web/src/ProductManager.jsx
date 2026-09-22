@@ -3037,7 +3037,7 @@ function MenuRecipes({ products }) {
               {reorder && <td style={{ whiteSpace: "nowrap" }}>
                 <button className="mini" style={{ padding: "3px 7px" }} disabled={i === 0} onClick={() => moveRow(r, -1, grp)}>↑</button>
                 <button className="mini" style={{ padding: "3px 7px" }} disabled={i === grp.length - 1} onClick={() => moveRow(r, 1, grp)}>↓</button></td>}
-              <td><b>{r.name}</b>{(r.kind === "pizza_base" || r.kind === "wing_base") && <span className="bchip" style={{ marginLeft: 6 }}>base</span>}
+              <td>{r.image_url && <img src={r.image_url} alt="" style={{ width: 34, height: 34, objectFit: "cover", borderRadius: 6, float: "left", marginRight: 8 }} />}<b>{r.name}</b>{(r.kind === "pizza_base" || r.kind === "wing_base") && <span className="bchip" style={{ marginLeft: 6 }}>base</span>}
                 {r.kind === "pizza_specialty" && <div className="stat">{[compsById[r.sauce_component_id]?.name, ...(r.topping_component_ids || []).map((id) => compsById[id]?.name)].filter(Boolean).join(" · ")}</div>}
                 {r.kind === "wing_specialty" && <div className="stat">{[recipesById[r.base_recipe_id]?.name, compsById[r.sauce_component_id]?.name].filter(Boolean).join(" + ")}</div>}
                 {r.kind === "prep" && <div className="stat">{subInfo(r.recipe_id, showCost)}</div>}
@@ -3067,6 +3067,10 @@ function MenuRecipes({ products }) {
         <button className="mini" onClick={flipCost} title="Hide costs for a line-staff view"
           style={showCost ? { background: "#0E7C6B", color: "#fff", borderColor: "#0E7C6B" } : undefined}>{showCost ? "$ Costs shown" : "Costs hidden"}</button>
         <button className="mini" onClick={() => setReorder((v) => !v)} style={reorder ? { background: "#101012", color: "#fff" } : undefined}>{reorder ? "Done ordering" : "Reorder"}</button>
+        <button className="mini" onClick={() => {
+          const out = []; for (const c of [...MENU_CATS, ...extra]) out.push(...list.filter((r) => (r.category || "Other") === c && r.active !== false));
+          printRecipeCards(out, "LVMGP recipe cards");
+        }} title="Printable cards for the team — no costs">🖨 Print cards</button>
         <button className="btn btn-primary" onClick={() => setEdit(blank)}>+ New recipe</button>
       </div>
       {rows.length === 0 && !err && <div className="note">No menu recipes yet. Run <b>menu_recipes_migration.sql</b> in Supabase to load them, or add one here.</div>}
@@ -3153,6 +3157,74 @@ function PizzaGuide({ comps, byId, onEdit, showCost, prices, onSavePrices }) {
       {addBtn("sauce")}
     </>
   );
+}
+
+// ---------- Printable recipe cards (team version — never shows cost) ----------
+const escHtml = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function recipeCardHTML(r) {
+  const R = RECIPE_CTX.recipesById, C = RECIPE_CTX.compsById;
+  const lines = builtLines(r, R, C);
+  let build = "";
+  if (r.kind === "pizza_specialty") {
+    const tops = (r.topping_component_ids || []).map((id) => C[id]?.name).filter(Boolean);
+    build = `${R[r.base_recipe_id]?.name || "Base"} + ${C[r.sauce_component_id]?.name || "no sauce"}${tops.length ? " + " + tops.join(", ") : ""}` + (tops.length > 1 ? ` — ${tierName(tierRatio(tops.length))} of each topping` : "");
+  } else if (r.kind === "wing_specialty") build = `${R[r.base_recipe_id]?.name || "Base wings"} + ${C[r.sauce_component_id]?.name || "no sauce"}`;
+  else if (r.kind === "prep" && num(r.yield_qty)) build = `One batch makes ${r.yield_qty} ${r.yield_unit || ""}`;
+  const rows = lines.map((l) => {
+    const q = num(l.qty);
+    return `<tr><td>${escHtml(l.item_name)}</td><td class="use">${escHtml(l.portion || "")}</td><td class="amt">${q != null ? `${+q.toFixed(2)} ${escHtml(l.unit || "")}` : ""}</td></tr>`;
+  }).join("");
+  return `<section class="card">
+    ${r.image_url ? `<img class="photo" src="${escHtml(r.image_url)}" alt="">` : `<div class="photo none">No photo yet</div>`}
+    <div class="band"></div>
+    <div class="body">
+      <div class="eyebrow">${escHtml(r.category || "")}</div>
+      <h1>${escHtml(r.name)}</h1>
+      ${build ? `<p class="build">${escHtml(build)}</p>` : ""}
+      <table><thead><tr><th>Ingredient</th><th>What you use</th><th class="amt">Amount</th></tr></thead><tbody>${rows}</tbody></table>
+      ${r.method ? `<h2>How to make it</h2><p class="method">${escHtml(r.method)}</p>` : ""}
+    </div>
+    <footer><span>LAS VEGAS MINI GRAND PRIX · KITCHEN</span><span>${escHtml(r.name)}</span></footer>
+  </section>`;
+}
+function printRecipeCards(list, title) {
+  if (!list.length) { alert("Nothing to print."); return; }
+  const w = window.open("", "_blank");
+  if (!w) { alert("Allow pop-ups for this site to print recipe cards."); return; }
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${escHtml(title || "Recipe cards")}</title>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+@page { size: letter; margin: 0.4in; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, system-ui, sans-serif; color: #191B1F; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+.card { page-break-after: always; break-after: page; display: flex; flex-direction: column; min-height: 10.1in; }
+.card:last-child { page-break-after: auto; break-after: auto; }
+.photo { width: 100%; height: 4.1in; object-fit: cover; border-radius: 10px; display: block; }
+.photo.none { background: #F4F1EA; color: #9aa0a8; display: flex; align-items: center; justify-content: center; font: 600 16px Inter, sans-serif; }
+.band { height: 9px; margin: 12px 0 0; border-radius: 2px; background-color: #fff;
+  background-image: linear-gradient(45deg,#0c0c0e 25%,transparent 25%),linear-gradient(-45deg,#0c0c0e 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#0c0c0e 75%),linear-gradient(-45deg,transparent 75%,#0c0c0e 75%);
+  background-size: 18px 18px; background-position: 0 0,0 9px,9px -9px,-9px 0; }
+.body { flex: 1; padding-top: 12px; }
+.eyebrow { font: 700 12px 'Barlow Condensed', sans-serif; letter-spacing: .16em; text-transform: uppercase; color: #E0392B; }
+h1 { font: 700 38px/1.02 'Barlow Condensed', sans-serif; text-transform: uppercase; margin: 2px 0 6px; letter-spacing: .01em; }
+.build { margin: 0 0 12px; font-size: 13.5px; color: #3b3f46; }
+h2 { font: 700 15px 'Barlow Condensed', sans-serif; letter-spacing: .12em; text-transform: uppercase; margin: 16px 0 4px; border-bottom: 3px solid #FFCE1F; display: inline-block; padding-bottom: 2px; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th { text-align: left; font: 700 11px 'Barlow Condensed', sans-serif; letter-spacing: .12em; text-transform: uppercase; color: #71757E; border-bottom: 2px solid #101012; padding: 6px 8px; }
+td { padding: 7px 8px; border-bottom: 1px solid #E6E1D6; vertical-align: top; }
+td.use { font-weight: 600; }
+.amt { text-align: right; white-space: nowrap; color: #71757E; }
+.method { font-size: 13.5px; line-height: 1.5; margin: 6px 0 0; white-space: pre-wrap; }
+footer { display: flex; justify-content: space-between; margin-top: 14px; padding-top: 8px; border-top: 1px solid #E6E1D6; font: 600 10px 'Barlow Condensed', sans-serif; letter-spacing: .14em; color: #9aa0a8; text-transform: uppercase; }
+</style></head><body>${list.map(recipeCardHTML).join("")}
+<script>
+window.onload = function () {
+  var imgs = Array.prototype.slice.call(document.images);
+  Promise.all(imgs.map(function (i) { return i.complete ? 1 : new Promise(function (r) { i.onload = i.onerror = r; }); }))
+    .then(function () { setTimeout(function () { window.print(); }, 350); });
+};
+<\/script></body></html>`);
+  w.document.close();
 }
 
 // One dropdown for "what does this line draw from": an inventory item OR a house-made prep recipe.
@@ -3413,6 +3485,13 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
     const p = l.product_id && !l.sub_recipe_id ? byId[l.product_id] : null;
     setLine(l._k, { unit, factor: (p ? suggestFactor(p, unit) : null) ?? l.factor, fallback_cost: null });
   }
+  async function uploadPhoto(e) {
+    const f = e.target.files?.[0]; if (!f) return;
+    setBusy(true);
+    try { const big = await downscaleImage(f, 1800, 0.86); const url = await db.uploadProductImage(big, `recipe-${r.recipe_id || "new-" + Date.now()}`); set("image_url", url); }
+    catch (err) { alert("Photo upload failed: " + (err.message || err)); }
+    finally { setBusy(false); e.target.value = ""; }
+  }
   const isPrep = r.kind === "prep";
   const usedIn = isPrep && r.recipe_id ? (recipes || []).filter((x) => (x.lines || []).some((l) => l.sub_recipe_id === r.recipe_id)).map((x) => x.name)
     .concat((comps || []).filter((c) => c.sub_recipe_id === r.recipe_id).map((c) => `${c.name} (${stationOf(c)} ${c.kind})`)) : [];
@@ -3455,6 +3534,19 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
           <button className="mini" onClick={onClose}>✕</button>
         </div>
         {r.updated_by && <div className="stat">Last saved {r.updated_at ? new Date(r.updated_at).toLocaleString() : ""} by {r.updated_by}</div>}
+
+        <div className="group" style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+          {r.image_url ? <img src={r.image_url} alt="" style={{ width: 150, height: 110, objectFit: "cover", borderRadius: 10 }} />
+            : <div style={{ width: 150, height: 110, borderRadius: 10, background: "#F4F1EA", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 30 }}>📷</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div className="group-t" style={{ marginBottom: 0 }}>Finished photo</div>
+            <div className="stat" style={{ marginTop: 0 }}>Shown big on the printed recipe card. Shoot it plated, in good light, from slightly above.</div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <label className="mini" style={{ cursor: "pointer" }}>📷 {r.image_url ? "Replace" : "Add"} photo<input type="file" accept="image/*" style={{ display: "none" }} onChange={uploadPhoto} /></label>
+              {r.image_url && <button className="mini mini-danger" onClick={() => set("image_url", null)}>Remove</button>}
+            </div>
+          </div>
+        </div>
 
         <div className="group">
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -3585,6 +3677,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
         <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
           <button className="btn btn-primary" disabled={busy} onClick={save}>Save recipe</button>
           <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancel</button>
+          <button className="btn btn-ghost" disabled={busy} onClick={() => printRecipeCards([r], r.name)} title="Printable card for the team — no costs">🖨 Print card</button>
           {r.recipe_id && <button className="btn btn-ghost" disabled={busy} style={{ marginLeft: "auto", color: "#B0271B" }} onClick={remove}>Delete</button>}
         </div>
       </div>
