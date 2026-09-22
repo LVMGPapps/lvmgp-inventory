@@ -896,3 +896,16 @@ export async function deletePizzaComponent(component_id) {
   const { error } = await supabase.from("pizza_component").delete().eq("component_id", component_id);
   if (error) throw error;
 }
+
+// ---------- Menu settings (e.g. build-your-own topping prices) ----------
+export async function getMenuSetting(key) {
+  const { data, error } = await supabase.from("menu_setting").select("value").eq("key", key).maybeSingle();
+  if (error) throw error;
+  return data?.value ?? null;
+}
+
+export async function setMenuSetting(key, value) {
+  const { error } = await supabase.from("menu_setting")
+    .upsert({ key, value, updated_at: new Date().toISOString(), updated_by: await whoAmI() }, { onConflict: "key" });
+  if (error) throw error;
+}
