@@ -2907,11 +2907,25 @@ function componentLine(c, ratio, kids) {
   return { product_id: c.product_id, item_name: c.name, qty, unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
     portion: toolText(c, ratio, kids), note: c.estimated ? "estimated portion — not weighed yet" : null, _src: c.kind };
 }
-// Full line list a recipe costs out to. Specialty pizzas are assembled from their base + sauce + toppings.
+// Wings: a sauce/seasoning carries its own portion for each wing count ("8", "10", "16").
+const stationOf = (c) => c.station || "pizza";
+const WING_SIZES_DEFAULT = ["8", "10", "16"];
+function wingLine(c, size) {
+  const p = (c.portions || {})[size] || {};
+  return { product_id: c.product_id, item_name: c.name, qty: num(p.qty), unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
+    portion: p.tool || "", note: c.estimated ? "estimated portion — not measured yet" : null, _src: "sauce" };
+}
+// Full line list a recipe costs out to. Specialty pizzas are assembled from their base + sauce + toppings;
+// flavored wings from their base wings + sauce at that wing count.
 function builtLines(r, recipesById, compsById) {
+  if (r.kind === "wing_specialty") {
+    const base = recipesById[r.base_recipe_id], sauce = compsById[r.sauce_component_id];
+    return [...(base?.lines || []).map((l) => ({ ...l, _src: "base" })), ...(sauce ? [wingLine(sauce, base?.size_key)] : []),
+      ...(r.lines || []).map((l) => ({ ...l, _src: "own" }))];
+  }
   if (r.kind !== "pizza_specialty") return (r.lines || []).map((l) => ({ ...l, _src: "own" }));
   const base = recipesById[r.base_recipe_id];
-  const sauceProducts = new Set(Object.values(compsById).filter((c) => c.kind === "sauce").map((c) => c.product_id));
+  const sauceProducts = new Set(Object.values(compsById).filter((c) => c.kind === "sauce" && stationOf(c) === "pizza").map((c) => c.product_id));
   const baseLines = (base?.lines || []).filter((l) => !sauceProducts.has(l.product_id)).map((l) => ({ ...l, _src: "base" }));
   const sauce = compsById[r.sauce_component_id];
   const tops = (r.topping_component_ids || []).map((id) => compsById[id]).filter(Boolean);
@@ -2988,8 +3002,9 @@ function MenuRecipes({ products }) {
               {reorder && <td style={{ whiteSpace: "nowrap" }}>
                 <button className="mini" style={{ padding: "3px 7px" }} disabled={i === 0} onClick={() => moveRow(r, -1, grp)}>↑</button>
                 <button className="mini" style={{ padding: "3px 7px" }} disabled={i === grp.length - 1} onClick={() => moveRow(r, 1, grp)}>↓</button></td>}
-              <td><b>{r.name}</b>{r.kind === "pizza_base" && <span className="bchip" style={{ marginLeft: 6 }}>base</span>}
+              <td><b>{r.name}</b>{(r.kind === "pizza_base" || r.kind === "wing_base") && <span className="bchip" style={{ marginLeft: 6 }}>base</span>}
                 {r.kind === "pizza_specialty" && <div className="stat">{[compsById[r.sauce_component_id]?.name, ...(r.topping_component_ids || []).map((id) => compsById[id]?.name)].filter(Boolean).join(" · ")}</div>}
+                {r.kind === "wing_specialty" && <div className="stat">{[recipesById[r.base_recipe_id]?.name, compsById[r.sauce_component_id]?.name].filter(Boolean).join(" + ")}</div>}
                 {!r.active && <span className="bchip" style={{ marginLeft: 6 }}>inactive</span>}</td>
               <td className="fig">{price != null ? money(price) : "—"}</td>
               {showCost && <>
@@ -3022,20 +3037,34 @@ function MenuRecipes({ products }) {
       {[...MENU_CATS, ...extra].map((c) => {
         const grp = list.filter((r) => (r.category || "Other") === c);
         if (!grp.length && !(c === "Pizza" && comps.length)) return null;
+        if (c === "Wings") {
+          const wb = grp.filter((r) => r.kind === "wing_base").sort((a, b) => Number(a.size_key) - Number(b.size_key) || ord(a, b));
+          const ws = grp.filter((r) => r.kind === "wing_specialty"), wr = grp.filter((r) => r.kind !== "wing_base" && r.kind !== "wing_specialty");
+          return (
+            <div key={c} style={{ marginBottom: 18 }}>
+              <div className="group-t">Wings — 1. Base wings</div>
+              {wb.length ? table(wb) : <div className="stat">Mark a recipe as base wings (edit it → Type).</div>}
+              {!q && <WingGuide comps={comps.filter((x) => stationOf(x) === "wings")} sizes={wb.length ? wb.map((b) => b.size_key).filter(Boolean) : WING_SIZES_DEFAULT} byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)} />}
+              <div className="group-t" style={{ marginTop: 18 }}>Wings — 3. Flavored wings <span className="stat" style={{ textTransform: "none", letterSpacing: 0 }}>base wings + sauce + extras</span></div>
+              {ws.length ? table(ws) : <div className="stat">No flavored wings yet.</div>}
+              {wr.length > 0 && <><div className="group-t" style={{ marginTop: 18 }}>Wings — other</div>{table(wr)}</>}
+            </div>);
+        }
         if (c !== "Pizza") return <div key={c} style={{ marginBottom: 18 }}><div className="group-t">{c}</div>{table(grp)}</div>;
         const bases = grp.filter((r) => r.kind === "pizza_base"), specs = grp.filter((r) => r.kind === "pizza_specialty"), rest = grp.filter((r) => r.kind !== "pizza_base" && r.kind !== "pizza_specialty");
         return (
           <div key={c} style={{ marginBottom: 18 }}>
             <div className="group-t">Pizza — 1. Base</div>
             {bases.length ? table(bases) : <div className="stat">Mark a recipe as a pizza base (edit it → Type).</div>}
-            {!q && <PizzaGuide comps={comps} byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)} />}
+            {!q && <PizzaGuide comps={comps.filter((x) => stationOf(x) === "pizza")} byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)} />}
             <div className="group-t" style={{ marginTop: 18 }}>Pizza — 6. Specialty pizzas <span className="stat" style={{ textTransform: "none", letterSpacing: 0 }}>base + sauce + toppings</span></div>
             {specs.length ? table(specs) : <div className="stat">No specialty pizzas yet.</div>}
             {rest.length > 0 && <><div className="group-t" style={{ marginTop: 18 }}>Pizza — other</div>{table(rest)}</>}
           </div>);
       })}
       {edit && <MenuRecipeEditor recipe={edit} products={products} byId={byId} recipes={rows} comps={comps} showCost={showCost} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
-      {editComp && <PizzaComponentEditor comp={editComp} products={products} byId={byId} showCost={showCost} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
+      {editComp && stationOf(editComp) === "wings" && <WingComponentEditor comp={editComp} products={products} byId={byId} showCost={showCost} sizes={rows.filter((x) => x.kind === "wing_base").map((x) => x.size_key).filter(Boolean).sort((a, b) => a - b)} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
+      {editComp && stationOf(editComp) === "pizza" && <PizzaComponentEditor comp={editComp} products={products} byId={byId} showCost={showCost} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
     </div>
   );
 }
@@ -3085,6 +3114,101 @@ function PizzaGuide({ comps, byId, onEdit, showCost }) {
       </div>
       {addBtn("sauce")}
     </>
+  );
+}
+
+// Section 2 of the wing station: every sauce/seasoning at every wing count.
+function WingGuide({ comps, sizes, byId, onEdit, showCost }) {
+  const list = comps.slice().sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
+  const sz = sizes.length ? sizes : WING_SIZES_DEFAULT;
+  return (
+    <>
+      <div className="group-t" style={{ marginTop: 18 }}>Wings — 2. Sauces &amp; seasonings</div>
+      <div className="stat" style={{ marginBottom: 6 }}>What each sauce adds on top of the base wings, by wing count: <b>what the line uses</b>, then the amount{showCost ? " and its cost" : ""}. Tap a sauce to edit its portions.</div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="tbl" style={{ minWidth: 520 }}>
+          <thead><tr><th>Sauce / seasoning</th>{sz.map((k) => <th key={k}>{k} wings</th>)}</tr></thead>
+          <tbody>{list.map((c) => (
+            <tr key={c.component_id} onClick={() => onEdit(JSON.parse(JSON.stringify(c)))} style={{ cursor: "pointer" }}>
+              <td><b>{c.name}</b>{c.estimated && <div>{estChip}</div>}{!c.product_id && <div className="stat" style={{ color: "#B0271B" }}>not in inventory</div>}</td>
+              {sz.map((k) => {
+                const l = wingLine(c, k), cost = lineCostInfo(l, byId);
+                if (l.qty == null) return <td key={k}><span className="stat">—</span></td>;
+                return <td key={k}><b>{l.portion || <span style={{ color: "#B0271B", fontWeight: 400 }}>no line measure</span>}</b>
+                  <div className="stat">{+l.qty.toFixed(2)} {c.unit}</div>
+                  {showCost && <div className="stat" style={{ color: "#191B1F" }}>Cost {cost.cost != null ? money(cost.cost) : "—"}</div>}</td>;
+              })}
+            </tr>))}</tbody>
+        </table>
+      </div>
+      <button className="mini" style={{ marginTop: 8 }} onClick={() => onEdit({ station: "wings", kind: "sauce", name: "", unit: "oz", sort: 999, portions: {} })}>+ Add sauce or seasoning</button>
+    </>
+  );
+}
+
+function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, showCost }) {
+  const [c, setC] = useState({ ...comp, portions: comp.portions || {} });
+  const [busy, setBusy] = useState(false);
+  const set = (k, v) => setC((s) => ({ ...s, [k]: v }));
+  const setP = (size, k, v) => setC((s) => ({ ...s, portions: { ...s.portions, [size]: { ...(s.portions[size] || {}), [k]: v } } }));
+  const p = c.product_id ? byId[c.product_id] : null;
+  const sz = sizes.length ? sizes : WING_SIZES_DEFAULT;
+  const sorted = products.slice().sort((a, b) => a.name.localeCompare(b.name));
+  function pick(pid) { const x = pid ? byId[Number(pid)] : null; setC((s) => ({ ...s, product_id: x ? x.product_id : null, factor: x ? suggestFactor(x, s.unit) : null, name: s.name || (x ? x.name : "") })); }
+  async function save() {
+    if (!String(c.name || "").trim()) { alert("Name it."); return; }
+    const portions = {}; for (const k of Object.keys(c.portions || {})) { const q = num(c.portions[k]?.qty); if (q != null || c.portions[k]?.tool) portions[k] = { qty: q, tool: c.portions[k]?.tool || null }; }
+    setBusy(true);
+    try { await db.savePizzaComponent({ ...c, station: "wings", kind: "sauce", portions }); onSaved(); } catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
+  }
+  async function remove() {
+    if (!c.component_id) { onClose(); return; }
+    if (!confirm(`Remove ${c.name}? Flavored wings using it will lose their sauce.`)) return;
+    setBusy(true);
+    try { await db.deletePizzaComponent(c.component_id); onSaved(); } catch (e) { alert("Delete failed: " + (e.message || e)); setBusy(false); }
+  }
+  return (
+    <div className="overlay">
+      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ width: "min(560px,100%)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ marginBottom: 2 }}>{c.component_id ? c.name : "New wing sauce"}</h2>
+          <button className="mini" onClick={onClose}>✕</button>
+        </div>
+        <div className="group">
+          <div className="field"><label>Name</label><input value={c.name || ""} onChange={(e) => set("name", e.target.value)} /></div>
+          <div className="field" style={{ marginTop: 8 }}><label>Inventory item</label>
+            <select value={c.product_id ?? ""} onChange={(e) => pick(e.target.value)}>
+              <option value="">— not linked —</option>
+              {sorted.map((x) => <option key={x.product_id} value={x.product_id}>{x.name}</option>)}
+            </select>
+            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {costPerCount(p) != null ? `$${costPerCount(p).toFixed(4)}/${measure(p)}` : "no vendor price"}</>}</div>}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+            <div className="field" style={{ flex: "0 1 100px" }}><label>Unit</label><select value={c.unit || "oz"} onChange={(e) => setC((s) => ({ ...s, unit: e.target.value, factor: p ? (suggestFactor(p, e.target.value) ?? s.factor) : s.factor }))}>{RECIPE_UNITS.map((u) => <option key={u}>{u}</option>)}</select></div>
+            {p && <div className="field" style={{ flex: "1 1 150px" }}><label>1 {c.unit} = ? {measure(p)}</label><input className="fig" type="number" step="any" value={c.factor ?? ""} onChange={(e) => set("factor", e.target.value)} /></div>}
+          </div>
+        </div>
+        <div className="group">
+          <div className="group-t">Portion by wing count</div>
+          <div className="stat" style={{ marginBottom: 6 }}>Leave a size blank if this flavor isn't sold at that count.</div>
+          {sz.map((k) => { const l = wingLine({ ...c, portions: { [k]: { qty: c.portions[k]?.qty, tool: c.portions[k]?.tool } } }, k), lc = lineCostInfo(l, byId).cost;
+            return (
+              <div key={k} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 8 }}>
+                <div style={{ width: 70, fontWeight: 700, paddingBottom: 8 }}>{k} wings</div>
+                <div className="field" style={{ flex: "0 1 90px" }}><label>Amount ({c.unit})</label><input className="fig" type="number" step="any" value={c.portions[k]?.qty ?? ""} onChange={(e) => setP(k, "qty", e.target.value)} /></div>
+                <div className="field" style={{ flex: "1 1 180px" }}><label>What the line uses</label><input value={c.portions[k]?.tool ?? ""} onChange={(e) => setP(k, "tool", e.target.value)} placeholder="e.g. 2 oz ladle" /></div>
+                {showCost && <div className="stat" style={{ paddingBottom: 9 }}>{money(lc)}</div>}
+              </div>); })}
+          <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, fontSize: 13 }}><input type="checkbox" checked={!!c.estimated} onChange={(e) => set("estimated", e.target.checked)} />Estimate — not measured yet</label>
+        </div>
+        <div className="field" style={{ marginTop: 10 }}><label>Note</label><input value={c.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          <button className="btn btn-primary" disabled={busy} onClick={save}>Save</button>
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancel</button>
+          {c.component_id && <button className="btn btn-ghost" disabled={busy} style={{ marginLeft: "auto", color: "#B0271B" }} onClick={remove}>Remove</button>}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -3175,9 +3299,12 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
   const recipesById = Object.fromEntries((recipes || []).map((x) => [x.recipe_id, x]));
   const compsById = Object.fromEntries((comps || []).map((c) => [c.component_id, c]));
   const bases = (recipes || []).filter((x) => x.kind === "pizza_base");
-  const sauces = (comps || []).filter((c) => c.kind === "sauce").sort((a, b) => a.sort - b.sort);
-  const toppings = (comps || []).filter((c) => c.kind === "topping").sort((a, b) => a.sort - b.sort);
-  const isSpec = r.kind === "pizza_specialty";
+  const sauces = (comps || []).filter((c) => c.kind === "sauce" && stationOf(c) === "pizza").sort((a, b) => a.sort - b.sort);
+  const toppings = (comps || []).filter((c) => c.kind === "topping" && stationOf(c) === "pizza").sort((a, b) => a.sort - b.sort);
+  const wingBases = (recipes || []).filter((x) => x.kind === "wing_base").sort((a, b) => Number(a.size_key) - Number(b.size_key));
+  const wingSauces = (comps || []).filter((c) => stationOf(c) === "wings").sort((a, b) => a.sort - b.sort);
+  const isWing = r.kind === "wing_specialty";
+  const isSpec = r.kind === "pizza_specialty" || isWing;
   function pick(l, pid) {
     const p = pid ? byId[Number(pid)] : null;
     setLine(l._k, { product_id: p ? p.product_id : null, factor: p ? suggestFactor(p, l.unit) : null, item_name: l.item_name || (p ? p.name : "") });
@@ -3191,6 +3318,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
   const addLine = () => setR((s) => ({ ...s, lines: [...s.lines, { _k: nextKey.current++, product_id: null, item_name: "", qty: "", unit: "oz", factor: null, portion: "", note: "" }] }));
   const dropLine = (k) => setR((s) => ({ ...s, lines: s.lines.filter((l) => l._k !== k) }));
   function setKind(kind) {
+    if (kind === "wing_specialty") { setR((s) => ({ ...s, kind, base_recipe_id: wingBases.some((b) => b.recipe_id === s.base_recipe_id) ? s.base_recipe_id : (wingBases[0]?.recipe_id || null), sauce_component_id: wingSauces.some((c) => c.component_id === s.sauce_component_id) ? s.sauce_component_id : (wingSauces[0]?.component_id || null) })); return; }
     setR((s) => ({ ...s, kind, base_recipe_id: kind === "pizza_specialty" ? (s.base_recipe_id || bases.find((b) => /large/i.test(b.name))?.recipe_id || bases[0]?.recipe_id || null) : s.base_recipe_id,
       sauce_component_id: kind === "pizza_specialty" ? (s.sauce_component_id || sauces[0]?.component_id || null) : s.sauce_component_id }));
   }
@@ -3235,6 +3363,10 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
             {r.category === "Pizza" && <div className="field" style={{ flex: "1 1 150px" }}><label>Type</label>
               <select value={r.kind || "standard"} onChange={(e) => setKind(e.target.value)}>
                 <option value="pizza_base">Pizza base</option><option value="pizza_specialty">Specialty pizza</option><option value="standard">Other</option></select></div>}
+            {r.category === "Wings" && <div className="field" style={{ flex: "1 1 150px" }}><label>Type</label>
+              <select value={r.kind || "standard"} onChange={(e) => setKind(e.target.value)}>
+                <option value="wing_base">Base wings</option><option value="wing_specialty">Flavored wings</option><option value="standard">Other</option></select></div>}
+            {r.kind === "wing_base" && <div className="field" style={{ flex: "0 1 100px" }}><label>Wing count</label><input className="fig" value={r.size_key ?? ""} onChange={(e) => set("size_key", e.target.value.replace(/\D/g, ""))} /></div>}
             <div className="field" style={{ flex: "0 1 110px" }}><label>Menu price</label><input className="fig" type="number" step="0.01" value={r.menu_price ?? ""} onChange={(e) => set("menu_price", e.target.value)} /></div>
             <div className="field" style={{ flex: "0 1 110px", justifyContent: "flex-end" }}>
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="checkbox" checked={r.active !== false} onChange={(e) => set("active", e.target.checked)} />On the menu</label></div>
@@ -3250,6 +3382,15 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
         {isSpec && (
           <div className="group">
             <div className="group-t">Build</div>
+            {isWing ? (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div className="field" style={{ flex: "1 1 200px" }}><label>Base wings</label>
+                  <select value={r.base_recipe_id ?? ""} onChange={(e) => set("base_recipe_id", num(e.target.value))}>
+                    <option value="">— choose —</option>{wingBases.map((b) => <option key={b.recipe_id} value={b.recipe_id}>{b.name}</option>)}</select></div>
+                <div className="field" style={{ flex: "1 1 200px" }}><label>Sauce / seasoning</label>
+                  <select value={r.sauce_component_id ?? ""} onChange={(e) => set("sauce_component_id", num(e.target.value))}>
+                    <option value="">None</option>{wingSauces.map((c) => <option key={c.component_id} value={c.component_id}>{c.name}</option>)}</select></div>
+              </div>) : <>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               <div className="field" style={{ flex: "1 1 200px" }}><label>Base</label>
                 <select value={r.base_recipe_id ?? ""} onChange={(e) => set("base_recipe_id", num(e.target.value))}>
@@ -3262,7 +3403,9 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>{toppings.map((c) => {
                 const on = r.topping_component_ids.includes(c.component_id);
                 return <button key={c.component_id} className="mini" onClick={() => toggleTop(c.component_id)} style={on ? { background: "#101012", color: "#fff", borderColor: "#101012" } : undefined}>{on ? "✓ " : ""}{c.name}</button>;
-              })}</div></div>
+              })}</div></div></>}
+            {isWing && (() => { const b = recipesById[r.base_recipe_id], sc = compsById[r.sauce_component_id];
+              return b && sc && num((sc.portions || {})[b.size_key]?.qty) == null ? <div className="stat" style={{ color: "#B0271B", marginTop: 6 }}>{sc.name} has no portion set for {b.size_key} wings — set it in the sauce chart.</div> : null; })()}
             <div style={{ overflowX: "auto", marginTop: 12 }}>
               <table className="tbl" style={{ minWidth: 620 }}>
                 <thead><tr><th>From</th><th>Ingredient</th><th>What the line uses</th><th>Amount</th>{showCost && <th>Cost</th>}</tr></thead>
@@ -3273,12 +3416,12 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                     {showCost && <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>}</tr>); })}</tbody>
               </table>
             </div>
-            <div className="stat" style={{ marginTop: 6 }}>These lines come from the base, the sauce and the topping guide — change them there and every specialty updates. Add anything extra (a drizzle, a garnish) below.</div>
+            <div className="stat" style={{ marginTop: 6 }}>These lines come from the base{isWing ? " and the sauce chart" : ", the sauce and the topping guide"} — change them there and everything built on them updates. Add anything extra ({isWing ? "ranch, a garnish" : "a drizzle, a garnish"}) below.</div>
           </div>
         )}
 
         <div className="group">
-          <div className="group-t">{isSpec ? "Extras on this pizza" : "Ingredients"}</div>
+          <div className="group-t">{isSpec ? (isWing ? "Extras on these wings" : "Extras on this pizza") : "Ingredients"}</div>
           {!isSpec && <div className="stat" style={{ marginBottom: 8 }}>Amount is what recipe costing uses. <b>What the line uses</b> is the cup, scoop or count the cook actually reaches for.</div>}
           <div style={{ overflowX: "auto" }}>
             <table className="tbl" style={{ minWidth: 860 }}>
