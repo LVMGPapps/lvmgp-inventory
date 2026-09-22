@@ -2951,6 +2951,8 @@ function MenuRecipes({ products }) {
   const [reorder, setReorder] = useState(false);
   const [edit, setEdit] = useState(null);
   const [editComp, setEditComp] = useState(null);
+  const [showCost, setShowCost] = useState(() => { try { return localStorage.getItem("lvmgp.menuCosts") !== "off"; } catch { return true; } });
+  const flipCost = () => setShowCost((v) => { const n = !v; try { localStorage.setItem("lvmgp.menuCosts", n ? "on" : "off"); } catch { /* private mode */ } return n; });
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   async function load() {
     try {
@@ -2978,7 +2980,7 @@ function MenuRecipes({ products }) {
   const table = (grp) => (
     <div style={{ overflowX: "auto" }}>
       <table className="tbl">
-        <thead><tr>{reorder && <th style={{ width: 70 }}></th>}<th>Recipe</th><th>Price</th><th>Cost</th><th>Food cost</th><th>Check</th></tr></thead>
+        <thead><tr>{reorder && <th style={{ width: 70 }}></th>}<th>Recipe</th><th>Price</th>{showCost && <><th>Cost</th><th>Food cost</th><th>Check</th></>}</tr></thead>
         <tbody>{grp.map((r, i) => {
           const rc = costLines(builtLines(r, recipesById, compsById), byId), price = num(r.menu_price), fc = price ? rc.total / price : null;
           return (
@@ -2990,6 +2992,7 @@ function MenuRecipes({ products }) {
                 {r.kind === "pizza_specialty" && <div className="stat">{[compsById[r.sauce_component_id]?.name, ...(r.topping_component_ids || []).map((id) => compsById[id]?.name)].filter(Boolean).join(" · ")}</div>}
                 {!r.active && <span className="bchip" style={{ marginLeft: 6 }}>inactive</span>}</td>
               <td className="fig">{price != null ? money(price) : "—"}</td>
+              {showCost && <>
               <td className="fig">{money(rc.total)}</td>
               <td className="fig" style={fc > 0.3 ? { color: "#B0271B", fontWeight: 700 } : undefined}>{pct(fc)}</td>
               <td className="stat" style={{ marginTop: 0 }}>
@@ -2997,7 +3000,7 @@ function MenuRecipes({ products }) {
                 {rc.missing > 0 && rc.vendor > 0 && " · "}
                 {rc.vendor > 0 && <span style={{ color: "#9a5b00" }}>{rc.vendor} on vendor cost</span>}
                 {!rc.missing && !rc.vendor && <span style={{ color: "#0a5c50" }}>✓ app cost</span>}
-              </td>
+              </td></>}
             </tr>);
         })}</tbody>
       </table>
@@ -3010,6 +3013,8 @@ function MenuRecipes({ products }) {
         <input placeholder="Search menu recipes…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
         <label className="stat" style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 0 }}>
           <input type="checkbox" checked={showOff} onChange={(e) => setShowOff(e.target.checked)} />show inactive</label>
+        <button className="mini" onClick={flipCost} title="Hide costs for a line-staff view"
+          style={showCost ? { background: "#0E7C6B", color: "#fff", borderColor: "#0E7C6B" } : undefined}>{showCost ? "$ Costs shown" : "Costs hidden"}</button>
         <button className="mini" onClick={() => setReorder((v) => !v)} style={reorder ? { background: "#101012", color: "#fff" } : undefined}>{reorder ? "Done ordering" : "Reorder"}</button>
         <button className="btn btn-primary" onClick={() => setEdit(blank)}>+ New recipe</button>
       </div>
@@ -3023,40 +3028,44 @@ function MenuRecipes({ products }) {
           <div key={c} style={{ marginBottom: 18 }}>
             <div className="group-t">Pizza — 1. Base</div>
             {bases.length ? table(bases) : <div className="stat">Mark a recipe as a pizza base (edit it → Type).</div>}
-            {!q && <PizzaGuide comps={comps} byId={byId} onEdit={(x) => setEditComp(x)} />}
+            {!q && <PizzaGuide comps={comps} byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)} />}
             <div className="group-t" style={{ marginTop: 18 }}>Pizza — 6. Specialty pizzas <span className="stat" style={{ textTransform: "none", letterSpacing: 0 }}>base + sauce + toppings</span></div>
             {specs.length ? table(specs) : <div className="stat">No specialty pizzas yet.</div>}
             {rest.length > 0 && <><div className="group-t" style={{ marginTop: 18 }}>Pizza — other</div>{table(rest)}</>}
           </div>);
       })}
-      {edit && <MenuRecipeEditor recipe={edit} products={products} byId={byId} recipes={rows} comps={comps} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
-      {editComp && <PizzaComponentEditor comp={editComp} products={products} byId={byId} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
+      {edit && <MenuRecipeEditor recipe={edit} products={products} byId={byId} recipes={rows} comps={comps} showCost={showCost} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
+      {editComp && <PizzaComponentEditor comp={editComp} products={products} byId={byId} showCost={showCost} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
     </div>
   );
 }
 
 // Sections 2–4 of the pizza station: single-topping portions, 2- and 3+-topping portions, and sauces.
-function PizzaGuide({ comps, byId, onEdit }) {
+function PizzaGuide({ comps, byId, onEdit, showCost }) {
   const tops = comps.filter((c) => c.kind === "topping").sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
   const sauces = comps.filter((c) => c.kind === "sauce").sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
-  const cell = (c, ratio) => {
-    const l = componentLine(c, ratio), cost = lineCostInfo(l, byId);
+  const cell = (c, ratio, price) => {
+    const l = componentLine(c, ratio), cost = lineCostInfo(l, byId), p = num(price);
     return <td><b>{l.portion || <span style={{ color: "#B0271B", fontWeight: 400 }}>no line measure</span>}</b>
-      <div className="stat">{l.qty != null ? `${+l.qty.toFixed(2)} ${c.unit}` : "—"} · {cost.cost != null ? money(cost.cost) : "—"}</div></td>;
+      <div className="stat">{l.qty != null ? `${+l.qty.toFixed(2)} ${c.unit}` : "—"}</div>
+      {showCost && <div className="stat" style={{ color: "#191B1F" }}>Cost {cost.cost != null ? money(cost.cost) : "—"}
+        {p != null && cost.cost != null && <> · <span style={cost.cost / p > 0.3 ? { color: "#B0271B", fontWeight: 700 } : { color: "#0a5c50", fontWeight: 600 }}>{pct(cost.cost / p)} of {money(p)}</span></>}</div>}</td>;
   };
   const addBtn = (kind) => <button className="mini" style={{ marginTop: 8 }} onClick={() => onEdit({ kind, name: "", unit: "oz", sort: 999, estimated: true })}>+ Add {kind}</button>;
   return (
     <>
       <div className="group-t" style={{ marginTop: 18 }}>Pizza — 2–4. Topping portions (large)</div>
-      <div className="stat" style={{ marginBottom: 6 }}>Single topping = the add-a-topping portion. Specialty pizzas use: 2 toppings → ¾ of each, 3 or more → ½ of each. Each cell shows <b>what the line uses</b>, then ounces and cost. Tap a topping to edit it.</div>
+      <div className="stat" style={{ marginBottom: 6 }}>Single topping = the add-a-topping portion. Specialty pizzas use: 2 toppings → ¾ of each, 3 or more → ½ of each. Each cell shows <b>what the line uses</b>, then ounces{showCost ? "; with costs on, the portion cost and — on the single topping — food cost against the add-on price" : ""}. Tap a topping to edit it.</div>
       <div style={{ overflowX: "auto" }}>
         <table className="tbl" style={{ minWidth: 640 }}>
           <thead><tr><th>Topping</th>{TOPPING_TIERS.map((t) => <th key={t.n}>{t.label}{t.ratio < 1 ? ` (${tierName(t.ratio)})` : ""}</th>)}<th>Kids</th></tr></thead>
           <tbody>{tops.map((c) => (
             <tr key={c.component_id} onClick={() => onEdit(JSON.parse(JSON.stringify(c)))} style={{ cursor: "pointer" }}>
               <td><b>{c.name}</b>{c.estimated && <div>{estChip}</div>}</td>
-              {TOPPING_TIERS.map((t) => <Fragment key={t.n}>{cell(c, t.ratio)}</Fragment>)}
-              <td>{c.kids_qty != null ? <><b>{c.kids_tool || ""}</b><div className="stat">{c.kids_qty} {c.unit}</div></> : <span className="stat">not set</span>}</td>
+              {TOPPING_TIERS.map((t) => <Fragment key={t.n}>{cell(c, t.ratio, t.n === 1 ? c.addon_price : null)}</Fragment>)}
+              <td>{c.kids_qty != null ? <><b>{c.kids_tool || ""}</b><div className="stat">{c.kids_qty} {c.unit}</div>
+                {showCost && (() => { const kc = lineCostInfo(componentLine(c, 1, true), byId).cost, kp = num(c.kids_addon_price);
+                  return <div className="stat" style={{ color: "#191B1F" }}>Cost {money(kc)}{kp != null && kc != null ? ` · ${pct(kc / kp)} of ${money(kp)}` : ""}</div>; })()}</> : <span className="stat">not set</span>}</td>
             </tr>))}</tbody>
         </table>
       </div>
@@ -3069,8 +3078,8 @@ function PizzaGuide({ comps, byId, onEdit }) {
           <tbody>{sauces.map((c) => (
             <tr key={c.component_id} onClick={() => onEdit(JSON.parse(JSON.stringify(c)))} style={{ cursor: "pointer" }}>
               <td><b>{c.name}</b>{c.estimated && <div>{estChip}</div>}</td>
-              {cell(c, 1)}
-              <td>{c.kids_qty != null ? <><b>{c.kids_tool || ""}</b><div className="stat">{c.kids_qty} {c.unit} · {money(lineCostInfo(componentLine(c, 1, true), byId).cost)}</div></> : <span className="stat">not set</span>}</td>
+              {cell(c, 1, c.addon_price)}
+              <td>{c.kids_qty != null ? <><b>{c.kids_tool || ""}</b><div className="stat">{c.kids_qty} {c.unit}{showCost ? ` · cost ${money(lineCostInfo(componentLine(c, 1, true), byId).cost)}` : ""}</div></> : <span className="stat">not set</span>}</td>
             </tr>))}</tbody>
         </table>
       </div>
@@ -3079,7 +3088,7 @@ function PizzaGuide({ comps, byId, onEdit }) {
   );
 }
 
-function PizzaComponentEditor({ comp, products, byId, onClose, onSaved }) {
+function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost }) {
   const [c, setC] = useState(comp);
   const [busy, setBusy] = useState(false);
   const set = (k, v) => setC((s) => ({ ...s, [k]: v }));
@@ -3131,13 +3140,17 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved }) {
             {(c.tool_kind === "count" || c.tool_kind === "text") && <div className="field" style={{ flex: "1 1 140px" }}><label>{c.tool_kind === "count" ? "Of what" : "Describe the measure"}</label><input value={c.tool_label || ""} onChange={(e) => set("tool_label", e.target.value)} placeholder={c.tool_kind === "count" ? "slices" : "1 blue scoop"} /></div>}
           </div>
           <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 10, fontSize: 13 }}><input type="checkbox" checked={!!c.estimated} onChange={(e) => set("estimated", e.target.checked)} />Estimate — not weighed yet</label>
-          <div style={{ marginTop: 10 }}>{preview.map(({ t, l }) => <div key={t.n} className="stat">{c.kind === "sauce" ? "Large" : t.label}: <b>{l.portion || "—"}</b> = {l.qty != null ? +Number(l.qty).toFixed(2) : "—"} {c.unit} · {money(lineCostInfo(l, byId).cost)}</div>)}</div>
+          <div className="field" style={{ marginTop: 10, maxWidth: 200 }}><label>Add-on price (large)</label><input className="fig" type="number" step="0.01" value={c.addon_price ?? ""} onChange={(e) => set("addon_price", e.target.value)} placeholder="what the guest pays" /></div>
+          <div style={{ marginTop: 10 }}>{preview.map(({ t, l }) => { const lc = lineCostInfo(l, byId).cost, ap = num(c.addon_price);
+            return <div key={t.n} className="stat">{c.kind === "sauce" ? "Large" : t.label}: <b>{l.portion || "—"}</b> = {l.qty != null ? +Number(l.qty).toFixed(2) : "—"} {c.unit}
+              {showCost && <> · {money(lc)}{t.n === 1 && ap != null && lc != null ? ` · ${pct(lc / ap)} food cost` : ""}</>}</div>; })}</div>
         </div>
         <div className="group">
           <div className="group-t">Kids pizza</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <div className="field" style={{ flex: "0 1 90px" }}><label>Amount ({c.unit})</label><input className="fig" type="number" step="any" value={c.kids_qty ?? ""} onChange={(e) => set("kids_qty", e.target.value)} /></div>
             <div className="field" style={{ flex: "1 1 200px" }}><label>What the line uses</label><input value={c.kids_tool || ""} onChange={(e) => set("kids_tool", e.target.value)} /></div>
+            <div className="field" style={{ flex: "0 1 130px" }}><label>Add-on price (kids)</label><input className="fig" type="number" step="0.01" value={c.kids_addon_price ?? ""} onChange={(e) => set("kids_addon_price", e.target.value)} /></div>
           </div>
         </div>
         <div className="field" style={{ marginTop: 10 }}><label>Note</label><input value={c.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
@@ -3151,7 +3164,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved }) {
   );
 }
 
-function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onSaved }) {
+function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onSaved, showCost }) {
   const [r, setR] = useState(() => ({ ...recipe, topping_component_ids: recipe.topping_component_ids || [], lines: (recipe.lines || []).map((l, i) => ({ ...l, _k: i })) }));
   const [busy, setBusy] = useState(false);
   const nextKey = useRef(1000);
@@ -3226,12 +3239,12 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
             <div className="field" style={{ flex: "0 1 110px", justifyContent: "flex-end" }}>
               <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="checkbox" checked={r.active !== false} onChange={(e) => set("active", e.target.checked)} />On the menu</label></div>
           </div>
-          <div style={{ display: "flex", gap: 22, marginTop: 12, flexWrap: "wrap", fontFamily: "'Barlow Condensed',sans-serif", fontSize: 20, fontWeight: 700 }}>
+          {showCost && <div style={{ display: "flex", gap: 22, marginTop: 12, flexWrap: "wrap", fontFamily: "'Barlow Condensed',sans-serif", fontSize: 20, fontWeight: 700 }}>
             <div>Cost <span className="fig">{money(rc.total)}</span></div>
             <div style={fc > 0.3 ? { color: "#B0271B" } : undefined}>Food cost <span className="fig">{pct(fc)}</span></div>
             {rc.missing > 0 && <div style={{ color: "#B0271B", fontSize: 15, alignSelf: "center" }}>{rc.missing} line{rc.missing === 1 ? "" : "s"} not costed</div>}
             {rc.vendor > 0 && <div style={{ color: "#9a5b00", fontSize: 15, alignSelf: "center" }}>{rc.vendor} using vendor-system cost</div>}
-          </div>
+          </div>}
         </div>
 
         {isSpec && (
@@ -3252,12 +3265,12 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
               })}</div></div>
             <div style={{ overflowX: "auto", marginTop: 12 }}>
               <table className="tbl" style={{ minWidth: 620 }}>
-                <thead><tr><th>From</th><th>Ingredient</th><th>What the line uses</th><th>Amount</th><th>Cost</th></tr></thead>
+                <thead><tr><th>From</th><th>Ingredient</th><th>What the line uses</th><th>Amount</th>{showCost && <th>Cost</th>}</tr></thead>
                 <tbody>{built.map((l, i) => { const c = lineCostInfo(l, byId); return (
                   <tr key={i}><td className="stat" style={{ marginTop: 0 }}>{l._src}</td><td>{l.item_name}</td>
                     <td><b>{l.portion || ""}</b>{l.note && <div className="stat">{l.note}</div>}</td>
                     <td className="fig">{l.qty != null ? `${+Number(l.qty).toFixed(2)} ${l.unit}` : "—"}</td>
-                    <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td></tr>); })}</tbody>
+                    {showCost && <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>}</tr>); })}</tbody>
               </table>
             </div>
             <div className="stat" style={{ marginTop: 6 }}>These lines come from the base, the sauce and the topping guide — change them there and every specialty updates. Add anything extra (a drizzle, a garnish) below.</div>
@@ -3269,7 +3282,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
           {!isSpec && <div className="stat" style={{ marginBottom: 8 }}>Amount is what recipe costing uses. <b>What the line uses</b> is the cup, scoop or count the cook actually reaches for.</div>}
           <div style={{ overflowX: "auto" }}>
             <table className="tbl" style={{ minWidth: 860 }}>
-              <thead><tr><th style={{ width: 250 }}>Inventory item</th><th style={{ width: 130 }}>Amount</th><th style={{ width: 170 }}>Converts to</th><th>What the line uses</th><th style={{ width: 90 }}>Cost</th><th style={{ width: 84 }}></th></tr></thead>
+              <thead><tr><th style={{ width: 250 }}>Inventory item</th><th style={{ width: 130 }}>Amount</th><th style={{ width: 170 }}>Converts to</th><th>What the line uses</th>{showCost && <th style={{ width: 90 }}>Cost</th>}<th style={{ width: 84 }}></th></tr></thead>
               <tbody>{r.lines.map((l, i) => {
                 const p = l.product_id ? byId[l.product_id] : null, cpu = p ? costPerCount(p) : null, c = lineCostInfo(l, byId);
                 return (
@@ -3279,7 +3292,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                         <option value="">— not linked —</option>
                         {cats.map((cat) => <optgroup key={cat} label={cat}>{sorted.filter((x) => (x.category || "Uncategorized") === cat).map((x) => <option key={x.product_id} value={x.product_id}>{x.name}{x.active === false ? " (inactive)" : ""}</option>)}</optgroup>)}
                       </select>
-                      <div className="stat">{p ? <>#{p.product_id} · counted in {measure(p)} · {cpu != null ? `$${cpu.toFixed(4)}/${measure(p)}` : <span style={{ color: "#B0271B" }}>no vendor price</span>}</> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
+                      <div className="stat">{p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? `$${cpu.toFixed(4)}/${measure(p)}` : <span style={{ color: "#B0271B" }}>no vendor price</span>}</>}</> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
                       {l.item_name && (!p || l.item_name !== p.name) && <div className="stat">Recipe says: {l.item_name}</div>}
                     </td>
                     <td><div style={{ display: "flex", gap: 4 }}>
@@ -3296,7 +3309,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                     </td>
                     <td><input value={l.portion ?? ""} placeholder="e.g. 1/2 of the 16 oz cheese cup" onChange={(e) => setLine(l._k, { portion: e.target.value })} style={{ width: "100%" }} />
                       {l.note && <div className="stat">{l.note}</div>}</td>
-                    <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>
+                    {showCost && <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>}
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button className="mini" style={{ padding: "4px 7px" }} disabled={i === 0} onClick={() => move(l._k, -1)}>↑</button>
                       <button className="mini" style={{ padding: "4px 7px" }} disabled={i === r.lines.length - 1} onClick={() => move(l._k, 1)}>↓</button>
