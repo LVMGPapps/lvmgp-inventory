@@ -795,7 +795,7 @@ async function whoAmI() {
 export async function listMenuRecipes() {
   const { data, error } = await supabase
     .from("menu_recipe")
-    .select("*, lines:menu_recipe_line!recipe_id(*)")
+    .select("*, lines:menu_recipe_line!menu_recipe_line_recipe_id_fkey(*)")
     .order("sort_order").order("name");
   if (error) throw error;
   for (const r of data || []) (r.lines || []).sort((a, b) => a.sort - b.sort);
