@@ -783,3 +783,113 @@ export async function receiveRows(rows, received_date) {
     }
   }
 }
+
+// ---------- Menu recipes (recipe costing) ----------
+// Paste at the bottom of db.js (replacing the earlier menu-recipe block if you added it).
+// Uses the Supabase client db.js already creates — if it isn't named `supabase`, rename it below.
+
+async function whoAmI() {
+  try { const { data } = await supabase.auth.getUser(); return data?.user?.email || null; } catch { return null; }
+}
+
+export async function listMenuRecipes() {
+  const { data, error } = await supabase
+    .from("menu_recipe")
+    .select("*, lines:menu_recipe_line(*)")
+    .order("sort_order").order("name");
+  if (error) throw error;
+  for (const r of data || []) (r.lines || []).sort((a, b) => a.sort - b.sort);
+  return data || [];
+}
+
+// Saves the recipe, then replaces its lines. New lines are written BEFORE old ones are removed,
+// so a failed save never leaves a recipe with no ingredients.
+export async function saveMenuRecipe(r, lines) {
+  const row = {
+    name: String(r.name).trim(),
+    category: r.category || null,
+    kind: r.kind || "standard",
+    base_recipe_id: r.kind === "pizza_specialty" ? (r.base_recipe_id || null) : null,
+    sauce_component_id: r.kind === "pizza_specialty" ? (r.sauce_component_id || null) : null,
+    topping_component_ids: r.kind === "pizza_specialty" ? (r.topping_component_ids || []) : [],
+    menu_price: r.menu_price === "" || r.menu_price == null ? null : Number(r.menu_price),
+    method: r.method || null,
+    active: r.active !== false,
+    updated_at: new Date().toISOString(),
+    updated_by: await whoAmI(),
+  };
+  let id = r.recipe_id;
+  if (id) {
+    const { error } = await supabase.from("menu_recipe").update(row).eq("recipe_id", id);
+    if (error) throw error;
+  } else {
+    const { data: last } = await supabase.from("menu_recipe").select("sort_order").eq("category", row.category).order("sort_order", { ascending: false }).limit(1);
+    const sort_order = ((last && last[0]?.sort_order) || 0) + 10;               // new recipes go to the end of their category
+    const { data, error } = await supabase.from("menu_recipe").insert({ ...row, sort_order, source: "App" }).select("recipe_id").single();
+    if (error) throw error;
+    id = data.recipe_id;
+  }
+  const { data: old, error: oErr } = await supabase.from("menu_recipe_line").select("line_id").eq("recipe_id", id);
+  if (oErr) throw oErr;
+  if (lines.length) {
+    const { error } = await supabase.from("menu_recipe_line").insert(lines.map((l, i) => ({ ...l, recipe_id: id, sort: i })));
+    if (error) throw error;
+  }
+  const oldIds = (old || []).map((x) => x.line_id);
+  if (oldIds.length) {
+    const { error } = await supabase.from("menu_recipe_line").delete().in("line_id", oldIds);
+    if (error) throw error;
+  }
+  return id;
+}
+
+export async function deleteMenuRecipe(recipe_id) {
+  const { error } = await supabase.from("menu_recipe").delete().eq("recipe_id", recipe_id);
+  if (error) throw error;
+}
+
+// updates = [{ recipe_id, sort_order }, …]
+export async function setMenuRecipeOrder(updates) {
+  for (const u of updates) {
+    const { error } = await supabase.from("menu_recipe").update({ sort_order: u.sort_order }).eq("recipe_id", u.recipe_id);
+    if (error) throw error;
+  }
+}
+
+// ---------- Pizza building blocks (toppings & sauces) ----------
+export async function listPizzaComponents() {
+  const { data, error } = await supabase.from("pizza_component").select("*").order("kind").order("sort").order("name");
+  if (error) throw error;
+  return data || [];
+}
+
+export async function savePizzaComponent(c) {
+  const n = (v) => (v === "" || v == null || isNaN(Number(v)) ? null : Number(v));
+  const row = {
+    kind: c.kind, name: String(c.name).trim(), sort: n(c.sort) ?? 999, product_id: c.product_id || null,
+    unit: c.unit || "oz", factor: n(c.factor), full_qty: n(c.full_qty),
+    tool_kind: c.tool_kind || null, tool_qty: n(c.tool_qty), tool_label: c.tool_label || null,
+    kids_qty: n(c.kids_qty), kids_tool: c.kids_tool || null, estimated: !!c.estimated,
+    fallback_cost: n(c.fallback_cost), note: c.note || null,
+  };
+  if (c.component_id) {
+    const { error } = await supabase.from("pizza_component").update(row).eq("component_id", c.component_id);
+    if (error) throw error;
+    return c.component_id;
+  }
+  const { data, error } = await supabase.from("pizza_component").insert(row).select("component_id").single();
+  if (error) throw error;
+  return data.component_id;
+}
+
+// Also removes the topping from any specialty pizza that lists it.
+export async function deletePizzaComponent(component_id) {
+  const { data: specs, error: sErr } = await supabase.from("menu_recipe").select("recipe_id, topping_component_ids").contains("topping_component_ids", [component_id]);
+  if (sErr) throw sErr;
+  for (const r of specs || []) {
+    const { error } = await supabase.from("menu_recipe").update({ topping_component_ids: r.topping_component_ids.filter((x) => x !== component_id) }).eq("recipe_id", r.recipe_id);
+    if (error) throw error;
+  }
+  const { error } = await supabase.from("pizza_component").delete().eq("component_id", component_id);
+  if (error) throw error;
+}
