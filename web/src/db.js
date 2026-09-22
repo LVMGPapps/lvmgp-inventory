@@ -817,6 +817,7 @@ export async function saveMenuRecipe(r, lines) {
     topping_component_ids: r.kind === "pizza_specialty" ? (r.topping_component_ids || []) : [],
     menu_price: r.menu_price === "" || r.menu_price == null ? null : Number(r.menu_price),
     method: r.method || null,
+    image_url: r.image_url || null,
     active: r.active !== false,
     updated_at: new Date().toISOString(),
     updated_by: await whoAmI(),
