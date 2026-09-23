@@ -2866,7 +2866,7 @@ const RECIPE_UNITS = ["oz", "fl oz", "each", "tsp", "tbsp", "pump", "lb"];
 const OZ_PER = { oz: 1, ounce: 1, ounces: 1, lb: 16, lbs: 16, pound: 16, pounds: 16, g: 1 / 28.3495, kg: 35.274 };
 const FLOZ_PER = { "fl oz": 1, floz: 1, gal: 128, gallon: 128, qt: 32, pt: 16 };
 const EACHISH = ["each", "ea", "ct", "count", "unit", "units"];
-const VOL_TSP = { tsp: 1, tbsp: 3, "fl oz": 6, cup: 48, cups: 48 };
+const VOL_TSP = { tsp: 1, tbsp: 3, "fl oz": 6, floz: 6, cup: 48, cups: 48, pt: 96, pint: 96, qt: 192, quart: 192, gal: 768, gallon: 768, ml: 0.202884, l: 202.884, liter: 202.884 };
 // How many `to` units are in one `from` unit, when it's a straight weight-to-weight or volume-to-volume conversion.
 function unitConv(from, to) {
   const f = String(from || "").toLowerCase().trim(), t = String(to || "").toLowerCase().trim();
@@ -2894,6 +2894,15 @@ const TOPPING_TIERS = [{ n: 1, label: "1 topping", ratio: 1 }, { n: 2, label: "2
 const tierRatio = (count) => (count <= 1 ? 1 : count === 2 ? 0.75 : 0.5);
 const tierName = (r) => (r === 1 ? "full portion" : r === 0.75 ? "3/4 portion" : "1/2 portion");
 
+// How much one usage unit of a product holds, in `unit` — from the product's own size
+// (a 4.5 LB tub of parmesan holds 72 oz), so nobody has to do that math by hand.
+function sizePerUsageUnit(p, unit) {
+  const sz = num(p?.size), per = unitConv(p?.size_unit, unit);
+  if (!sz || per == null) return null;
+  const upp = num(p?.usage_per_package) || 1;
+  const v = (sz * per) / upp;
+  return v > 0 ? v : null;
+}
 function suggestFactor(p, unit) {
   if (!p) return null;
   const m = String(measure(p)).toLowerCase().trim(), u = String(unit || "").toLowerCase().trim();
@@ -2903,7 +2912,17 @@ function suggestFactor(p, unit) {
   if (u === "lb" && OZ_PER[m]) return 16 / OZ_PER[m];
   if (u === "fl oz" && m === "oz") return 1;                 // sauces/syrups costed per oz
   if (u === "fl oz" && FLOZ_PER[m]) return 1 / FLOZ_PER[m];
+  const direct = unitConv(m, u);                             // any other straight conversion
+  if (direct != null) return 1 / direct;
+  const held = sizePerUsageUnit(p, unit);                    // e.g. 1 oz = 1/72 of a 4.5 LB tub
+  if (held) return 1 / held;
   return null;
+}
+// What a line/component will actually cost with: the factor typed in, or the one the item's size implies.
+const effFactor = (l, p) => num(l.factor) ?? (p ? suggestFactor(p, l.unit) : null);
+function sizeHint(p, unit) {
+  const held = sizePerUsageUnit(p, unit);
+  return held ? `from the ${+Number(p.size)} ${String(p.size_unit).toUpperCase()} ${measure(p)}` : null;
 }
 // "3/4", "1 1/2", nearest 1/8
 function fracStr(x) {
@@ -2980,9 +2999,9 @@ function lineCostInfo(l, byId, seen) {
   }
   const p = l.product_id ? byId[l.product_id] : null;
   const cpu = p ? costPerCount(p) : null;
-  const f = num(l.factor);
+  const f = effFactor(l, p);
   if (p && cpu != null && f != null) return { cost: qty * f * cpu, src: "app" };
-  const why = subWhy ? subWhy : !p ? "not linked to an item" : cpu == null ? "item has no vendor price" : `size not set (1 ${l.unit} = ? ${measure(p)})`;
+  const why = subWhy ? subWhy : !p ? "not linked to an item" : cpu == null ? "item has no vendor price" : `no size on ${p.name} — set 1 ${l.unit} = ? ${measure(p)}`;
   const fb = num(l.fallback_cost);
   if (fb != null) return { cost: qty * fb, src: "vendor", why };
   return { cost: null, src: "none", why };
@@ -3369,7 +3388,9 @@ function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, sh
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
             <div className="field" style={{ flex: "0 1 100px" }}><label>Unit</label><select value={c.unit || "oz"} onChange={(e) => setC((s) => ({ ...s, unit: e.target.value, factor: p ? (suggestFactor(p, e.target.value) ?? s.factor) : s.factor }))}>{RECIPE_UNITS.map((u) => <option key={u}>{u}</option>)}</select></div>
-            {p && <div className="field" style={{ flex: "1 1 150px" }}><label>1 {c.unit} = ? {measure(p)}</label><input className="fig" type="number" step="any" value={c.factor ?? ""} onChange={(e) => set("factor", e.target.value)} /></div>}
+            {p && <div className="field" style={{ flex: "1 1 190px" }}><label>1 {c.unit} = ? {measure(p)}</label>
+              <input className="fig" type="number" step="any" value={c.factor ?? ""} placeholder={suggestFactor(p, c.unit) != null ? String(+suggestFactor(p, c.unit).toFixed(5)) : ""} onChange={(e) => set("factor", e.target.value)} />
+              {num(c.factor) == null && (sizeHint(p, c.unit) ? <span className="stat">auto {sizeHint(p, c.unit)}</span> : suggestFactor(p, c.unit) == null && <span className="stat" style={{ color: "#B0271B" }}>add a size to {p.name} in Products</span>)}</div>}
           </div>
         </div>
         <div className="group">
@@ -3435,7 +3456,9 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <div className="field" style={{ flex: "0 1 90px" }}><label>Amount</label><input className="fig" type="number" step="any" value={c.full_qty ?? ""} onChange={(e) => set("full_qty", e.target.value)} /></div>
             <div className="field" style={{ flex: "0 1 90px" }}><label>Unit</label><select value={c.unit || "oz"} onChange={(e) => setC((s) => ({ ...s, unit: e.target.value, factor: p ? (suggestFactor(p, e.target.value) ?? s.factor) : s.factor }))}>{RECIPE_UNITS.map((u) => <option key={u}>{u}</option>)}</select></div>
-            {p && <div className="field" style={{ flex: "1 1 150px" }}><label>1 {c.unit} = ? {measure(p)}</label><input className="fig" type="number" step="any" value={c.factor ?? ""} onChange={(e) => set("factor", e.target.value)} /></div>}
+            {p && <div className="field" style={{ flex: "1 1 190px" }}><label>1 {c.unit} = ? {measure(p)}</label>
+              <input className="fig" type="number" step="any" value={c.factor ?? ""} placeholder={suggestFactor(p, c.unit) != null ? String(+suggestFactor(p, c.unit).toFixed(5)) : ""} onChange={(e) => set("factor", e.target.value)} />
+              {num(c.factor) == null && (sizeHint(p, c.unit) ? <span className="stat">auto {sizeHint(p, c.unit)}</span> : suggestFactor(p, c.unit) == null && <span className="stat" style={{ color: "#B0271B" }}>add a size to {p.name} in Products</span>)}</div>}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
             <div className="field" style={{ flex: "1 1 150px" }}><label>Line measures it by</label>
@@ -3663,12 +3686,17 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                           <span>1 {l.unit} =</span>
                           <input className="fig" type="number" step="any" value={l.factor ?? ""} onChange={(e) => setLine(l._k, { factor: e.target.value })} style={{ width: 70, background: num(l.factor) == null ? "#FFF2CC" : undefined }} />
                           <span>{sub.yield_unit || "?"}</span></div>)
-                      : p ? <div style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
-                        <span>1 {l.unit} =</span>
-                        <input className="fig" type="number" step="any" value={l.factor ?? ""} onChange={(e) => setLine(l._k, { factor: e.target.value })} style={{ width: 70, background: num(l.factor) == null ? "#FFF2CC" : undefined }} />
-                        <span>{measure(p)}</span>
-                      </div> : <span className="stat">—</span>}
-                      {p && num(l.factor) == null && <div className="stat" style={{ color: "#B0271B" }}>set the size to cost it</div>}
+                      : p ? (() => { const auto = suggestFactor(p, l.unit), hint = sizeHint(p, l.unit); return <>
+                        <div style={{ display: "flex", gap: 4, alignItems: "center", fontSize: 12 }}>
+                          <span>1 {l.unit} =</span>
+                          <input className="fig" type="number" step="any" value={l.factor ?? ""} placeholder={auto != null ? String(+auto.toFixed(5)) : ""}
+                            onChange={(e) => setLine(l._k, { factor: e.target.value })} style={{ width: 70, background: num(l.factor) == null && auto == null ? "#FFF2CC" : undefined }} />
+                          <span>{measure(p)}</span>
+                        </div>
+                        {num(l.factor) == null && (auto != null
+                          ? <div className="stat" style={{ marginTop: 2 }}>auto{hint ? ` ${hint}` : ""}</div>
+                          : <div className="stat" style={{ color: "#B0271B" }}>add a size to {p.name} in Products to cost this</div>)}
+                      </>; })() : <span className="stat">—</span>}
                     </td>
                     <td><input value={l.portion ?? ""} placeholder="e.g. 1/2 of the 16 oz cheese cup" onChange={(e) => setLine(l._k, { portion: e.target.value })} style={{ width: "100%" }} />
                       {l.note && <div className="stat">{l.note}</div>}</td>
