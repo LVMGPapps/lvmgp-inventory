@@ -795,7 +795,7 @@ async function whoAmI() {
 export async function listMenuRecipes() {
   const { data, error } = await supabase
     .from("menu_recipe")
-    .select("*, lines:menu_recipe_line!menu_recipe_line_recipe_id_fkey(*)")
+    .select("*, lines:menu_recipe_line!menu_recipe_line_recipe_id_fkey(*)")   // lines this recipe OWNS (not lines that use it as a prep recipe)
     .order("sort_order").order("name");
   if (error) throw error;
   for (const r of data || []) (r.lines || []).sort((a, b) => a.sort - b.sort);
@@ -815,6 +815,7 @@ export async function saveMenuRecipe(r, lines) {
     base_recipe_id: /_specialty$/.test(r.kind || "") ? (r.base_recipe_id || null) : null,
     sauce_component_id: /_specialty$/.test(r.kind || "") ? (r.sauce_component_id || null) : null,
     topping_component_ids: r.kind === "pizza_specialty" ? (r.topping_component_ids || []) : [],
+    line_order: /_specialty$/.test(r.kind || "") ? (r.line_order || null) : null,
     menu_price: r.menu_price === "" || r.menu_price == null ? null : Number(r.menu_price),
     method: r.method || null,
     image_url: r.image_url || null,
@@ -871,6 +872,7 @@ export async function savePizzaComponent(c) {
   const n = (v) => (v === "" || v == null || isNaN(Number(v)) ? null : Number(v));
   const row = {
     station: c.station || "pizza", portions: c.portions ?? null, sub_recipe_id: c.sub_recipe_id || null,
+    stage: c.stage || "before",
     kind: c.kind, name: String(c.name).trim(), sort: n(c.sort) ?? 999, product_id: c.product_id || null,
     unit: c.unit || "oz", factor: n(c.factor), full_qty: n(c.full_qty),
     tool_kind: c.tool_kind || null, tool_qty: n(c.tool_qty), tool_label: c.tool_label || null,
