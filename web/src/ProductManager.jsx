@@ -2863,6 +2863,9 @@ function RecipeEditor({ product, onClose, onSaved }) {
 // are base + sauce + toppings, with each topping portioned by how many toppings the pizza carries.
 const MENU_CATS = ["Pizza", "Wings", "Burgers & Hot Dogs", "Fries & Tenders", "Appetizers & Snacks", "Sides & Dips", "Dessert", "Beverage", "Prep"];
 const RECIPE_UNITS = ["oz", "fl oz", "each", "tsp", "tbsp", "pump", "lb"];
+const STAGES = [["before", "Before oven"], ["after", "After oven"], ["serve", "Serve in/on"], ["hide", "Don't print"]];
+const stageSelect = (v, onChange, style) => (
+  <select value={v || "before"} onChange={(e) => onChange(e.target.value)} style={style}>{STAGES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>);
 const OZ_PER = { oz: 1, ounce: 1, ounces: 1, lb: 16, lbs: 16, pound: 16, pounds: 16, g: 1 / 28.3495, kg: 35.274 };
 const FLOZ_PER = { "fl oz": 1, floz: 1, gal: 128, gallon: 128, qt: 32, pt: 16 };
 const EACHISH = ["each", "ea", "ct", "count", "unit", "units"];
@@ -2977,7 +2980,7 @@ function toolText(c, ratio, kids) {
 function componentLine(c, ratio, kids) {
   const r = snappedRatio(c, ratio);
   const qty = kids ? num(c.kids_qty) : (num(c.full_qty) == null ? null : Number(c.full_qty) * r);
-  return { _cid: c.component_id, product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty, unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
+  return { _cid: c.component_id, product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty, unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost, stage: c.stage || "before",
     portion: toolText(c, ratio, kids), note: c.estimated ? "estimated portion — not weighed yet" : null, _src: c.kind };
 }
 // Wings: a sauce/seasoning carries its own portion for each wing count ("8", "10", "16").
@@ -2985,7 +2988,7 @@ const stationOf = (c) => c.station || "pizza";
 const WING_SIZES_DEFAULT = ["8", "10", "16"];
 function wingLine(c, size) {
   const p = (c.portions || {})[size] || {};
-  return { _cid: c.component_id, product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty: num(p.qty), unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
+  return { _cid: c.component_id, product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty: num(p.qty), unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost, stage: c.stage || "after",
     portion: p.tool || "", note: c.estimated ? "estimated portion — not measured yet" : null, _src: "sauce" };
 }
 // Full line list a recipe costs out to. Specialty pizzas are assembled from their base + sauce + toppings;
@@ -3231,10 +3234,13 @@ function recipeCardHTML(r) {
     build = `${R[r.base_recipe_id]?.name || "Base"} + ${C[r.sauce_component_id]?.name || "no sauce"}${tops.length ? " + " + tops.join(", ") : ""}` + (tops.length > 1 ? ` — ${tierName(tierRatio(tops.length))} of each topping` : "");
   } else if (r.kind === "wing_specialty") build = `${R[r.base_recipe_id]?.name || "Base wings"} + ${C[r.sauce_component_id]?.name || "no sauce"}`;
   else if (r.kind === "prep" && num(r.yield_qty)) build = `One batch makes ${r.yield_qty} ${r.yield_unit || ""}`;
-  const rows = lines.map((l) => {
-    const q = num(l.qty);
-    return `<tr><td>${escHtml(l.item_name)}</td><td class="use">${escHtml(l.portion || "")}</td><td class="amt">${q != null ? `${+q.toFixed(2)} ${escHtml(l.unit || "")}` : ""}</td></tr>`;
-  }).join("");
+  const row = (l) => { const q = num(l.qty);
+    return `<tr><td>${escHtml(l.item_name)}</td><td class="use">${escHtml(l.portion || "")}</td><td class="amt">${q != null ? `${+q.toFixed(2)} ${escHtml(l.unit || "")}` : ""}</td></tr>`; };
+  const at = (k) => lines.filter((l) => (l.stage || "before") === k);
+  const before = at("before"), after = at("after"), serve = at("serve");
+  const head = (t) => `<tr class="stage"><td colspan="3">${t}</td></tr>`;
+  const rows = (before.length ? (after.length ? head("Before the oven") : "") + before.map(row).join("") : "")
+    + (after.length ? head("After the oven") + after.map(row).join("") : "");
   return `<section class="card">
     ${r.image_url ? `<img class="photo" src="${escHtml(r.image_url)}" alt="">` : `<div class="photo none">No photo yet</div>`}
     <div class="band"></div>
@@ -3243,6 +3249,7 @@ function recipeCardHTML(r) {
       <h1>${escHtml(r.name)}</h1>
       ${build ? `<p class="build">${escHtml(build)}</p>` : ""}
       <table><thead><tr><th>Ingredient</th><th>What you use</th><th class="amt">Amount</th></tr></thead><tbody>${rows}</tbody></table>
+      ${serve.length ? `<p class="serve"><span>Serve in / on</span> ${serve.map((l) => escHtml(l.portion || l.item_name)).join(" &nbsp;·&nbsp; ")}</p>` : ""}
       ${r.method ? `<h2>How to make it</h2><p class="method">${escHtml(r.method)}</p>` : ""}
     </div>
     <footer><span>LAS VEGAS MINI GRAND PRIX · KITCHEN</span><span>${escHtml(r.name)}</span></footer>
@@ -3275,6 +3282,10 @@ th { text-align: left; font: 700 11px 'Barlow Condensed', sans-serif; letter-spa
 td { padding: 7px 8px; border-bottom: 1px solid #E6E1D6; vertical-align: top; }
 td.use { font-weight: 600; }
 .amt { text-align: right; white-space: nowrap; color: #71757E; }
+tr.stage td { font: 700 11px 'Barlow Condensed', sans-serif; letter-spacing: .14em; text-transform: uppercase; color: #101012; padding: 12px 8px 4px; border-bottom: 3px solid #101012; }
+tr.stage:first-child td { padding-top: 2px; }
+.serve { margin: 10px 0 0; font-size: 13px; }
+.serve span { font: 700 10px 'Barlow Condensed', sans-serif; letter-spacing: .14em; text-transform: uppercase; color: #71757E; margin-right: 8px; }
 .method { font-size: 13.5px; line-height: 1.5; margin: 6px 0 0; white-space: pre-wrap; }
 footer { display: flex; justify-content: space-between; margin-top: 14px; padding-top: 8px; border-top: 1px solid #E6E1D6; font: 600 10px 'Barlow Condensed', sans-serif; letter-spacing: .14em; color: #9aa0a8; text-transform: uppercase; }
 </style></head><body>${list.map(recipeCardHTML).join("")}
@@ -3440,7 +3451,10 @@ function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, sh
               </div>); })}
           <label style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 6, fontSize: 13 }}><input type="checkbox" checked={!!c.estimated} onChange={(e) => set("estimated", e.target.checked)} />Estimate — not measured yet</label>
         </div>
-        <div className="field" style={{ marginTop: 10 }}><label>Note</label><input value={c.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <div className="field" style={{ flex: "0 1 160px" }}><label>On the card</label>{stageSelect(c.stage, (v) => set("stage", v))}</div>
+          <div className="field" style={{ flex: "1 1 220px" }}><label>Note</label><input value={c.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
+        </div>
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           <button className="btn btn-primary" disabled={busy} onClick={save}>Save</button>
           <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancel</button>
@@ -3522,7 +3536,10 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
             <div className="field" style={{ flex: "0 1 130px" }}><label>Add-on price (kids)</label><input className="fig" type="number" step="0.01" value={c.kids_addon_price ?? ""} onChange={(e) => set("kids_addon_price", e.target.value)} /></div>
           </div>
         </div>
-        <div className="field" style={{ marginTop: 10 }}><label>Note</label><input value={c.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+          <div className="field" style={{ flex: "0 1 160px" }}><label>On the card</label>{stageSelect(c.stage, (v) => set("stage", v))}</div>
+          <div className="field" style={{ flex: "1 1 220px" }}><label>Note</label><input value={c.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
+        </div>
         <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
           <button className="btn btn-primary" disabled={busy} onClick={save}>Save</button>
           <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancel</button>
@@ -3583,7 +3600,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
     try {
       const lines = r.lines.map((l) => {
         const p = l.product_id ? byId[l.product_id] : null;
-        return { product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null, item_name: (l.item_name || p?.name || RECIPE_CTX.recipesById[l.sub_recipe_id]?.name || "Unnamed").trim(), qty: num(l.qty), unit: l.unit || null,
+        return { stage: l.stage || "before", product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null, item_name: (l.item_name || p?.name || RECIPE_CTX.recipesById[l.sub_recipe_id]?.name || "Unnamed").trim(), qty: num(l.qty), unit: l.unit || null,
           factor: num(l.factor), portion: l.portion || null, note: l.note || null, fallback_cost: num(l.fallback_cost) };
       });
       await db.saveMenuRecipe(r, lines); onSaved();
@@ -3693,7 +3710,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                       <button className="mini" style={{ padding: "3px 6px" }} disabled={i === 0} onClick={() => moveBuilt(i, -1)}>↑</button>
                       <button className="mini" style={{ padding: "3px 6px" }} disabled={i === built.length - 1} onClick={() => moveBuilt(i, 1)}>↓</button>
                     </td>
-                    <td className="stat" style={{ marginTop: 0 }}>{l._src}</td><td>{l.item_name}</td>
+                    <td className="stat" style={{ marginTop: 0 }}>{l._src}<div>{(STAGES.find((x) => x[0] === (l.stage || "before")) || [])[1]}</div></td><td>{l.item_name}</td>
                     <td><b>{l.portion || ""}</b>{l.note && <div className="stat">{l.note}</div>}</td>
                     <td className="fig">{l.qty != null ? `${+Number(l.qty).toFixed(2)} ${l.unit}` : "—"}</td>
                     {showCost && <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>}</tr>); })}</tbody>
@@ -3709,7 +3726,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
           {!isSpec && <div className="stat" style={{ marginBottom: 8 }}>Amount is what recipe costing uses. <b>What the line uses</b> is the cup, scoop or count the cook actually reaches for.</div>}
           <div style={{ overflowX: "auto" }}>
             <table className="tbl" style={{ minWidth: 860 }}>
-              <thead><tr><th style={{ width: 250 }}>Inventory item</th><th style={{ width: 130 }}>Amount</th><th style={{ width: 170 }}>Converts to</th><th>What the line uses</th>{showCost && <th style={{ width: 90 }}>Cost</th>}<th style={{ width: 84 }}></th></tr></thead>
+              <thead><tr><th style={{ width: 250 }}>Inventory item</th><th style={{ width: 130 }}>Amount</th><th style={{ width: 170 }}>Converts to</th><th>What the line uses</th><th style={{ width: 112 }}>When / printing</th>{showCost && <th style={{ width: 90 }}>Cost</th>}<th style={{ width: 84 }}></th></tr></thead>
               <tbody>{r.lines.map((l, i) => {
                 const sub = l.sub_recipe_id ? RECIPE_CTX.recipesById[l.sub_recipe_id] : null;
                 const p = !sub && l.product_id ? byId[l.product_id] : null, cpu = p ? unitCost(p) : null, c = lineCostInfo(l, byId);
@@ -3745,6 +3762,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                     </td>
                     <td><input value={l.portion ?? ""} placeholder="e.g. 1/2 of the 16 oz cheese cup" onChange={(e) => setLine(l._k, { portion: e.target.value })} style={{ width: "100%" }} />
                       {l.note && <div className="stat">{l.note}</div>}</td>
+                    <td>{stageSelect(l.stage, (v) => setLine(l._k, { stage: v }), { width: "100%" })}</td>
                     {showCost && <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>}
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button className="mini" style={{ padding: "4px 7px" }} disabled={i === 0} onClick={() => move(l._k, -1)}>↑</button>
