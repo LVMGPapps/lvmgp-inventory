@@ -3013,9 +3013,11 @@ function builtLines(r, recipesById, compsById) {
   return [...applyOrder([...baseLines, ...(sauce ? [componentLine(sauce, 1)] : []), ...tops.map((c) => componentLine(c, ratio))], r.line_order),
     ...(r.lines || []).map((l) => ({ ...l, _src: "own" }))];
 }
+const isFreeLine = (l) => !l.product_id && !l.sub_recipe_id && num(l.fallback_cost) === 0;
 function lineCostInfo(l, byId, seen) {
   const qty = num(l.qty);
   if (qty == null) return { cost: null, src: "noqty", why: "no amount" };
+  if (isFreeLine(l)) return { cost: 0, src: "free" };            // tap water, ice — costs nothing but belongs on the recipe
   let subWhy = null;
   if (l.sub_recipe_id) {
     const sub = RECIPE_CTX.recipesById[l.sub_recipe_id];
@@ -3040,7 +3042,8 @@ function costLines(lines, byId) {
   return { total, missing, vendor };
 }
 const pct = (x) => (x == null || !isFinite(x)) ? "—" : (x * 100).toFixed(1) + "%";
-const costChip = (c) => c.src === "invoice" ? <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }} title="what we last paid for it">invoice</span>
+const costChip = (c) => c.src === "free" ? <span className="bchip" style={{ background: "#F1F1F3", borderColor: "#B9BCC4", color: "#5b6069" }} title="deliberately free — tap water, ice">no cost</span>
+  : c.src === "invoice" ? <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }} title="what we last paid for it">invoice</span>
   : c.src === "recipe" ? <span className="bchip" style={{ background: "#EEF0FF", borderColor: "#5A5FC8", color: "#3a3f9e" }}>house</span>
   : c.src === "app" ? <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }}>app</span>
   : c.src === "vendor" ? <span className="bchip" style={{ background: "#FFF3DC", borderColor: "#E0A320", color: "#7a5200" }} title={c.why}>vendor</span>
@@ -3286,13 +3289,14 @@ window.onload = function () {
 }
 
 // One dropdown for "what does this line draw from": an inventory item OR a house-made prep recipe.
-function ItemPicker({ productId, subId, products, excludeRecipeId, onPick, style }) {
+function ItemPicker({ productId, subId, free, products, excludeRecipeId, onPick, style }) {
   const cats = [...new Set(products.map((p) => p.category || "Uncategorized"))].sort();
   const sorted = products.slice().sort((a, b) => a.name.localeCompare(b.name));
   const preps = Object.values(RECIPE_CTX.recipesById).filter((r) => r.kind === "prep" && r.recipe_id !== excludeRecipeId).sort((a, b) => a.name.localeCompare(b.name));
   return (
-    <select value={subId ? `r:${subId}` : (productId ?? "")} onChange={(e) => onPick(e.target.value)} style={style}>
+    <select value={free ? "free" : subId ? `r:${subId}` : (productId ?? "")} onChange={(e) => onPick(e.target.value)} style={style}>
       <option value="">— not linked —</option>
+      <option value="free">— no cost (tap water, ice) —</option>
       {preps.length > 0 && <optgroup label="House-made (prep recipes)">{preps.map((r) => <option key={r.recipe_id} value={`r:${r.recipe_id}`}>{r.name}</option>)}</optgroup>}
       {cats.map((cat) => <optgroup key={cat} label={cat}>{sorted.filter((x) => (x.category || "Uncategorized") === cat).map((x) => <option key={x.product_id} value={x.product_id}>{x.name}{x.active === false ? " (inactive)" : ""}</option>)}</optgroup>)}
     </select>
@@ -3300,9 +3304,10 @@ function ItemPicker({ productId, subId, products, excludeRecipeId, onPick, style
 }
 // What a picked value means for a line/component.
 function resolvePick(v, byId, unit) {
-  if (!v) return { product_id: null, sub_recipe_id: null, name: "", factor: null };
-  if (String(v).startsWith("r:")) { const r = RECIPE_CTX.recipesById[Number(String(v).slice(2))]; return { product_id: null, sub_recipe_id: r?.recipe_id ?? null, name: r?.name || "", factor: null }; }
-  const p = byId[Number(v)]; return { product_id: p ? p.product_id : null, sub_recipe_id: null, name: p ? p.name : "", factor: p ? suggestFactor(p, unit) : null };
+  if (v === "free") return { product_id: null, sub_recipe_id: null, name: "", factor: null, fallback_cost: 0 };
+  if (!v) return { product_id: null, sub_recipe_id: null, name: "", factor: null, fallback_cost: null };
+  if (String(v).startsWith("r:")) { const r = RECIPE_CTX.recipesById[Number(String(v).slice(2))]; return { product_id: null, sub_recipe_id: r?.recipe_id ?? null, name: r?.name || "", factor: null, fallback_cost: null }; }
+  const p = byId[Number(v)]; return { product_id: p ? p.product_id : null, sub_recipe_id: null, name: p ? p.name : "", factor: p ? suggestFactor(p, unit) : null, fallback_cost: null };
 }
 function subInfo(subId, showCost) {
   const r = RECIPE_CTX.recipesById[subId]; if (!r) return <span style={{ color: "#B0271B" }}>prep recipe missing</span>;
@@ -3388,7 +3393,7 @@ function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, sh
   const p = c.product_id ? byId[c.product_id] : null;
   const sz = sizes.length ? sizes : WING_SIZES_DEFAULT;
   const sorted = products.slice().sort((a, b) => a.name.localeCompare(b.name));
-  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, name: s.name || x.name }; }); }
+  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, fallback_cost: x.fallback_cost, name: s.name || x.name }; }); }
   async function save() {
     if (!String(c.name || "").trim()) { alert("Name it."); return; }
     const portions = {}; for (const k of Object.keys(c.portions || {})) { const q = num(c.portions[k]?.qty); if (q != null || c.portions[k]?.tool) portions[k] = { qty: q, tool: c.portions[k]?.tool || null }; }
@@ -3411,7 +3416,7 @@ function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, sh
         <div className="group">
           <div className="field"><label>Name</label><input value={c.name || ""} onChange={(e) => set("name", e.target.value)} /></div>
           <div className="field" style={{ marginTop: 8 }}><label>Inventory item</label>
-            <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} products={products} onPick={pick} />
+            <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} free={num(c.fallback_cost) === 0 && !c.product_id && !c.sub_recipe_id} products={products} onPick={pick} />
             {c.sub_recipe_id && <div className="stat">{subInfo(c.sub_recipe_id, showCost)}</div>}
             {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}</div>}
           </div>
@@ -3452,7 +3457,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
   const set = (k, v) => setC((s) => ({ ...s, [k]: v }));
   const p = c.product_id ? byId[c.product_id] : null;
   const sorted = products.slice().sort((a, b) => a.name.localeCompare(b.name));
-  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, name: s.name || x.name }; }); }
+  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, fallback_cost: x.fallback_cost, name: s.name || x.name }; }); }
   async function save() {
     if (!String(c.name || "").trim()) { alert("Name it."); return; }
     setBusy(true);
@@ -3475,7 +3480,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
         <div className="group">
           <div className="field"><label>Name</label><input value={c.name || ""} onChange={(e) => set("name", e.target.value)} /></div>
           <div className="field" style={{ marginTop: 8 }}><label>Inventory item</label>
-            <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} products={products} onPick={pick} />
+            <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} free={num(c.fallback_cost) === 0 && !c.product_id && !c.sub_recipe_id} products={products} onPick={pick} />
             {c.sub_recipe_id && <div className="stat">{subInfo(c.sub_recipe_id, showCost)}</div>}
             {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}</div>}
           </div>
@@ -3547,11 +3552,11 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
   const isSpec = r.kind === "pizza_specialty" || isWing;
   function pick(l, v) {
     const x = resolvePick(v, byId, l.unit);
-    setLine(l._k, { product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, item_name: l.item_name || x.name });
+    setLine(l._k, { product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, fallback_cost: x.fallback_cost, item_name: l.item_name || x.name });
   }
   function changeUnit(l, unit) {
     const p = l.product_id && !l.sub_recipe_id ? byId[l.product_id] : null;
-    setLine(l._k, { unit, factor: (p ? suggestFactor(p, unit) : null) ?? l.factor, fallback_cost: null });
+    setLine(l._k, { unit, factor: (p ? suggestFactor(p, unit) : null) ?? l.factor, fallback_cost: isFreeLine(l) ? 0 : null });
   }
   async function uploadPhoto(e) {
     const f = e.target.files?.[0]; if (!f) return;
@@ -3712,8 +3717,8 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                 return (
                   <tr key={l._k}>
                     <td>
-                      <ItemPicker productId={l.product_id} subId={l.sub_recipe_id} products={products} excludeRecipeId={r.recipe_id} onPick={(v) => pick(l, v)} style={{ width: "100%" }} />
-                      <div className="stat">{sub ? subInfo(sub.recipe_id, showCost) : p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? <>${cpu.toFixed(4)}/{measure(p)} <span style={{ color: paidInfo(p) ? "#0a5c50" : "#9a5b00" }}>({priceNote(p)})</span></> : <span style={{ color: "#B0271B" }}>no delivery or vendor price</span>}</>}</> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
+                      <ItemPicker productId={l.product_id} subId={l.sub_recipe_id} free={isFreeLine(l)} products={products} excludeRecipeId={r.recipe_id} onPick={(v) => pick(l, v)} style={{ width: "100%" }} />
+                      <div className="stat">{sub ? subInfo(sub.recipe_id, showCost) : p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? <>${cpu.toFixed(4)}/{measure(p)} <span style={{ color: paidInfo(p) ? "#0a5c50" : "#9a5b00" }}>({priceNote(p)})</span></> : <span style={{ color: "#B0271B" }}>no delivery or vendor price</span>}</>}</> : isFreeLine(l) ? <span>No cost — tap water, ice, or anything that isn't bought</span> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
                       {l.item_name && !(sub && l.item_name === sub.name) && (!p || l.item_name !== p.name) && <div className="stat">Recipe says: {l.item_name}</div>}
                     </td>
                     <td><div style={{ display: "flex", gap: 4 }}>
