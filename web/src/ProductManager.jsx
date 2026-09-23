@@ -275,7 +275,7 @@ export default function App() {
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} locations={locations} />}
         {tab === "waste" && <Waste products={products} locations={locations} reload={reload} />}
         {tab === "prep" && <PrepSheet products={products} reload={reload} />}
-        {tab === "recipes" && <Recipes products={products} reload={reload} />}
+        {tab === "recipes" && <Recipes products={products} receipts={receipts} reload={reload} />}
         {tab === "reports" && <Dashboard mode="dashboard" openReport={openReport} openCatalogGaps={openCatalogGaps} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "reporting" && <Dashboard mode="reports" reportKey={reportKey} setReportKey={setReportKey} openCatalogGaps={openCatalogGaps} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
@@ -2752,7 +2752,7 @@ function PrepSheet({ products, reload }) {
   );
 }
 
-function Recipes({ products, reload }) {
+function Recipes({ products, receipts, reload }) {
   const [view, setView] = useState("menu");   // "menu" = costed menu recipes, "cook" = per-item cook directions
   const [q, setQ] = useState("");
   const [edit, setEdit] = useState(null);   // product being edited
@@ -2768,7 +2768,7 @@ function Recipes({ products, reload }) {
       ))}
     </div>
   );
-  if (view === "menu") return <div>{switcher}<MenuRecipes products={products} /></div>;
+  if (view === "menu") return <div>{switcher}<MenuRecipes products={products} receipts={receipts} /></div>;
   return (
     <div>
       {switcher}
@@ -2879,7 +2879,28 @@ function unitConv(from, to) {
 }
 // Prep recipes (house-made) are costed from their own lines, so line costing needs the full recipe set.
 // MenuRecipes refreshes this on every render.
-let RECIPE_CTX = { recipesById: {}, compsById: {}, byId: {} };
+let RECIPE_CTX = { recipesById: {}, compsById: {}, byId: {}, paid: {} };
+// What each item actually cost per count unit on its most recent delivery:
+// total spent on that line ÷ the count units it brought in.
+function lastPaidByProduct(receipts) {
+  const out = {};
+  for (const r of receipts || []) for (const l of r.receipt_line || []) {
+    const units = num(l.qty_count_units), qty = num(l.purchase_qty), uc = num(l.unit_cost);
+    if (!units || uc == null || qty == null) continue;
+    const per = (uc * qty) / units, d = r.received_date || "";
+    const cur = out[l.product_id];
+    if (per > 0 && (!cur || d > cur.date)) out[l.product_id] = { per, date: d };
+  }
+  return out;
+}
+// The cost per count unit a recipe uses: what we last paid, else the vendor's list price.
+function unitCost(p) {
+  if (!p) return null;
+  const paid = RECIPE_CTX.paid?.[p.product_id];
+  return paid && paid.per > 0 ? paid.per : costPerCount(p);
+}
+const paidInfo = (p) => RECIPE_CTX.paid?.[p?.product_id] || null;
+const priceNote = (p) => paidInfo(p) ? `last paid ${paidInfo(p).date}` : "vendor list price";
 function prepUnitCost(rid, seen) {
   const r = RECIPE_CTX.recipesById[rid], y = r ? num(r.yield_qty) : null;
   if (!r || !y || seen.has(rid)) return null;          // no yield, or a recipe that (eventually) uses itself
@@ -2956,7 +2977,7 @@ function toolText(c, ratio, kids) {
 function componentLine(c, ratio, kids) {
   const r = snappedRatio(c, ratio);
   const qty = kids ? num(c.kids_qty) : (num(c.full_qty) == null ? null : Number(c.full_qty) * r);
-  return { product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty, unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
+  return { _cid: c.component_id, product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty, unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
     portion: toolText(c, ratio, kids), note: c.estimated ? "estimated portion — not weighed yet" : null, _src: c.kind };
 }
 // Wings: a sauce/seasoning carries its own portion for each wing count ("8", "10", "16").
@@ -2964,15 +2985,22 @@ const stationOf = (c) => c.station || "pizza";
 const WING_SIZES_DEFAULT = ["8", "10", "16"];
 function wingLine(c, size) {
   const p = (c.portions || {})[size] || {};
-  return { product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty: num(p.qty), unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
+  return { _cid: c.component_id, product_id: c.product_id, sub_recipe_id: c.sub_recipe_id, item_name: c.name, qty: num(p.qty), unit: c.unit, factor: c.factor, fallback_cost: c.fallback_cost,
     portion: p.tool || "", note: c.estimated ? "estimated portion — not measured yet" : null, _src: "sauce" };
 }
 // Full line list a recipe costs out to. Specialty pizzas are assembled from their base + sauce + toppings;
 // flavored wings from their base wings + sauce at that wing count.
+// Each built line has a stable token so a recipe can remember the order you put them in.
+const lineToken = (l) => l._src === "base" ? `base:${l.line_id}` : l._src === "sauce" ? "sauce" : l._cid ? `comp:${l._cid}` : `own:${l.line_id || ""}`;
+function applyOrder(built, order) {
+  if (!Array.isArray(order) || !order.length) return built;
+  return built.map((l, i) => { const k = order.indexOf(lineToken(l)); return { l, k: k < 0 ? 9000 + i : k }; })
+    .sort((a, b) => a.k - b.k).map((x) => x.l);
+}
 function builtLines(r, recipesById, compsById) {
   if (r.kind === "wing_specialty") {
     const base = recipesById[r.base_recipe_id], sauce = compsById[r.sauce_component_id];
-    return [...(base?.lines || []).map((l) => ({ ...l, _src: "base" })), ...(sauce ? [wingLine(sauce, base?.size_key)] : []),
+    return [...applyOrder([...(base?.lines || []).map((l) => ({ ...l, _src: "base" })), ...(sauce ? [wingLine(sauce, base?.size_key)] : [])], r.line_order),
       ...(r.lines || []).map((l) => ({ ...l, _src: "own" }))];
   }
   if (r.kind !== "pizza_specialty") return (r.lines || []).map((l) => ({ ...l, _src: "own" }));
@@ -2982,7 +3010,7 @@ function builtLines(r, recipesById, compsById) {
   const sauce = compsById[r.sauce_component_id];
   const tops = (r.topping_component_ids || []).map((id) => compsById[id]).filter(Boolean);
   const ratio = tierRatio(tops.length);
-  return [...baseLines, ...(sauce ? [componentLine(sauce, 1)] : []), ...tops.map((c) => componentLine(c, ratio)),
+  return [...applyOrder([...baseLines, ...(sauce ? [componentLine(sauce, 1)] : []), ...tops.map((c) => componentLine(c, ratio))], r.line_order),
     ...(r.lines || []).map((l) => ({ ...l, _src: "own" }))];
 }
 function lineCostInfo(l, byId, seen) {
@@ -2998,10 +3026,10 @@ function lineCostInfo(l, byId, seen) {
     if (!l.product_id && num(l.fallback_cost) == null) return { cost: null, src: "none", why: subWhy };
   }
   const p = l.product_id ? byId[l.product_id] : null;
-  const cpu = p ? costPerCount(p) : null;
+  const cpu = p ? unitCost(p) : null;
   const f = effFactor(l, p);
-  if (p && cpu != null && f != null) return { cost: qty * f * cpu, src: "app" };
-  const why = subWhy ? subWhy : !p ? "not linked to an item" : cpu == null ? "item has no vendor price" : `no size on ${p.name} — set 1 ${l.unit} = ? ${measure(p)}`;
+  if (p && cpu != null && f != null) return { cost: qty * f * cpu, src: paidInfo(p) ? "invoice" : "app" };
+  const why = subWhy ? subWhy : !p ? "not linked to an item" : cpu == null ? "no delivery or vendor price on this item" : `no size on ${p.name} — set 1 ${l.unit} = ? ${measure(p)}`;
   const fb = num(l.fallback_cost);
   if (fb != null) return { cost: qty * fb, src: "vendor", why };
   return { cost: null, src: "none", why };
@@ -3012,13 +3040,14 @@ function costLines(lines, byId) {
   return { total, missing, vendor };
 }
 const pct = (x) => (x == null || !isFinite(x)) ? "—" : (x * 100).toFixed(1) + "%";
-const costChip = (c) => c.src === "recipe" ? <span className="bchip" style={{ background: "#EEF0FF", borderColor: "#5A5FC8", color: "#3a3f9e" }}>house</span>
+const costChip = (c) => c.src === "invoice" ? <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }} title="what we last paid for it">invoice</span>
+  : c.src === "recipe" ? <span className="bchip" style={{ background: "#EEF0FF", borderColor: "#5A5FC8", color: "#3a3f9e" }}>house</span>
   : c.src === "app" ? <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }}>app</span>
   : c.src === "vendor" ? <span className="bchip" style={{ background: "#FFF3DC", borderColor: "#E0A320", color: "#7a5200" }} title={c.why}>vendor</span>
   : <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={c.why}>none</span>;
 const estChip = <span className="bchip" style={{ background: "#FFF3DC", borderColor: "#E0A320", color: "#7a5200" }} title="Placeholder amount — weigh it">not weighed</span>;
 
-function MenuRecipes({ products }) {
+function MenuRecipes({ products, receipts }) {
   const [rows, setRows] = useState(null);
   const [comps, setComps] = useState([]);
   const [err, setErr] = useState("");
@@ -3041,7 +3070,7 @@ function MenuRecipes({ products }) {
   if (rows == null) return <div className="stat">Loading recipes…</div>;
   const recipesById = Object.fromEntries(rows.map((r) => [r.recipe_id, r]));
   const compsById = Object.fromEntries(comps.map((c) => [c.component_id, c]));
-  RECIPE_CTX = { recipesById, compsById, byId };
+  RECIPE_CTX = { recipesById, compsById, byId, paid: lastPaidByProduct(receipts) };
   const ord = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name);
   const list = rows.filter((r) => (showOff || r.active) && (!q || r.name.toLowerCase().includes(q.toLowerCase()))).sort(ord);
   const extra = [...new Set(list.map((r) => r.category || "Other"))].filter((c) => !MENU_CATS.includes(c));
@@ -3384,7 +3413,7 @@ function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, sh
           <div className="field" style={{ marginTop: 8 }}><label>Inventory item</label>
             <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} products={products} onPick={pick} />
             {c.sub_recipe_id && <div className="stat">{subInfo(c.sub_recipe_id, showCost)}</div>}
-            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {costPerCount(p) != null ? `$${costPerCount(p).toFixed(4)}/${measure(p)}` : "no vendor price"}</>}</div>}
+            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}</div>}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
             <div className="field" style={{ flex: "0 1 100px" }}><label>Unit</label><select value={c.unit || "oz"} onChange={(e) => setC((s) => ({ ...s, unit: e.target.value, factor: p ? (suggestFactor(p, e.target.value) ?? s.factor) : s.factor }))}>{RECIPE_UNITS.map((u) => <option key={u}>{u}</option>)}</select></div>
@@ -3448,7 +3477,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
           <div className="field" style={{ marginTop: 8 }}><label>Inventory item</label>
             <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} products={products} onPick={pick} />
             {c.sub_recipe_id && <div className="stat">{subInfo(c.sub_recipe_id, showCost)}</div>}
-            {p && <div className="stat">counted in {measure(p)} · {costPerCount(p) != null ? `$${costPerCount(p).toFixed(4)}/${measure(p)}` : "no vendor price"}</div>}
+            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}</div>}
           </div>
         </div>
         <div className="group">
@@ -3563,6 +3592,12 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
   }
   const all = builtLines(r, recipesById, compsById);
   const built = all.filter((l) => l._src !== "own");
+  function moveBuilt(i, d) {
+    const j = i + d; if (j < 0 || j >= built.length) return;
+    const order = built.map(lineToken);
+    [order[i], order[j]] = [order[j], order[i]];
+    set("line_order", order);
+  }
   const rc = costLines(all, byId), price = num(r.menu_price), fc = price ? rc.total / price : null;
   const nTop = r.topping_component_ids.length;
   return (
@@ -3646,15 +3681,20 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
               return b && sc && num((sc.portions || {})[b.size_key]?.qty) == null ? <div className="stat" style={{ color: "#B0271B", marginTop: 6 }}>{sc.name} has no portion set for {b.size_key} wings — set it in the sauce chart.</div> : null; })()}
             <div style={{ overflowX: "auto", marginTop: 12 }}>
               <table className="tbl" style={{ minWidth: 620 }}>
-                <thead><tr><th>From</th><th>Ingredient</th><th>What the line uses</th><th>Amount</th>{showCost && <th>Cost</th>}</tr></thead>
+                <thead><tr><th style={{ width: 54 }}></th><th>From</th><th>Ingredient</th><th>What the line uses</th><th>Amount</th>{showCost && <th>Cost</th>}</tr></thead>
                 <tbody>{built.map((l, i) => { const c = lineCostInfo(l, byId); return (
-                  <tr key={i}><td className="stat" style={{ marginTop: 0 }}>{l._src}</td><td>{l.item_name}</td>
+                  <tr key={i}>
+                    <td style={{ whiteSpace: "nowrap" }}>
+                      <button className="mini" style={{ padding: "3px 6px" }} disabled={i === 0} onClick={() => moveBuilt(i, -1)}>↑</button>
+                      <button className="mini" style={{ padding: "3px 6px" }} disabled={i === built.length - 1} onClick={() => moveBuilt(i, 1)}>↓</button>
+                    </td>
+                    <td className="stat" style={{ marginTop: 0 }}>{l._src}</td><td>{l.item_name}</td>
                     <td><b>{l.portion || ""}</b>{l.note && <div className="stat">{l.note}</div>}</td>
                     <td className="fig">{l.qty != null ? `${+Number(l.qty).toFixed(2)} ${l.unit}` : "—"}</td>
                     {showCost && <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>}</tr>); })}</tbody>
               </table>
             </div>
-            <div className="stat" style={{ marginTop: 6 }}>These lines come from the base{isWing ? " and the sauce chart" : ", the sauce and the topping guide"} — change them there and everything built on them updates. Add anything extra ({isWing ? "ranch, a garnish" : "a drizzle, a garnish"}) below.</div>
+            <div className="stat" style={{ marginTop: 6 }}>These lines come from the base{isWing ? " and the sauce chart" : ", the sauce and the topping guide"} — change the amounts there and everything built on them updates. The arrows set the order for <b>this</b> recipe only, on screen and on the printed card. Add anything extra ({isWing ? "ranch, a garnish" : "a drizzle, a garnish"}) below.</div>
           </div>
         )}
 
@@ -3667,13 +3707,13 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
               <thead><tr><th style={{ width: 250 }}>Inventory item</th><th style={{ width: 130 }}>Amount</th><th style={{ width: 170 }}>Converts to</th><th>What the line uses</th>{showCost && <th style={{ width: 90 }}>Cost</th>}<th style={{ width: 84 }}></th></tr></thead>
               <tbody>{r.lines.map((l, i) => {
                 const sub = l.sub_recipe_id ? RECIPE_CTX.recipesById[l.sub_recipe_id] : null;
-                const p = !sub && l.product_id ? byId[l.product_id] : null, cpu = p ? costPerCount(p) : null, c = lineCostInfo(l, byId);
+                const p = !sub && l.product_id ? byId[l.product_id] : null, cpu = p ? unitCost(p) : null, c = lineCostInfo(l, byId);
                 const subConv = sub ? unitConv(l.unit, sub.yield_unit) : null;
                 return (
                   <tr key={l._k}>
                     <td>
                       <ItemPicker productId={l.product_id} subId={l.sub_recipe_id} products={products} excludeRecipeId={r.recipe_id} onPick={(v) => pick(l, v)} style={{ width: "100%" }} />
-                      <div className="stat">{sub ? subInfo(sub.recipe_id, showCost) : p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? `$${cpu.toFixed(4)}/${measure(p)}` : <span style={{ color: "#B0271B" }}>no vendor price</span>}</>}</> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
+                      <div className="stat">{sub ? subInfo(sub.recipe_id, showCost) : p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? <>${cpu.toFixed(4)}/{measure(p)} <span style={{ color: paidInfo(p) ? "#0a5c50" : "#9a5b00" }}>({priceNote(p)})</span></> : <span style={{ color: "#B0271B" }}>no delivery or vendor price</span>}</>}</> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
                       {l.item_name && !(sub && l.item_name === sub.name) && (!p || l.item_name !== p.name) && <div className="stat">Recipe says: {l.item_name}</div>}
                     </td>
                     <td><div style={{ display: "flex", gap: 4 }}>
