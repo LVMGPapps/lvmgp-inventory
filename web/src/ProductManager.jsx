@@ -1271,6 +1271,15 @@ function Count({ products, locations, onhand, reload, onPending }) {
   );
 }
 
+// Receiving converts with "case" or "package". A product bought by the gallon/tub/bag is bought by the package —
+// without this the conversion falls back to 1 and 4 gallons land as 4 units instead of 512 oz.
+function normalizeOrderUnit(orderUnit, p) {
+  const u = String(orderUnit || p?.buy_by || "case").toLowerCase().trim();
+  if (u === "case" || u === "package") return u;
+  const pkg = String(p?.package_unit || "").toLowerCase().trim();
+  if (pkg && u === pkg) return "package";
+  return u === "each" ? "package" : "case";
+}
 function Receive({ products, vendors, reload }) {
   const [rows, setRows] = useState(null);   // awaiting (purchased) rows, editable
   const [extras, setExtras] = useState([]); // scanned lines not on the purchased list
@@ -1363,7 +1372,7 @@ function Receive({ products, vendors, reload }) {
       count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
       units_per_package: r.units_per_package ?? byId[r.product_id]?.usage_per_package ?? 1,
       vendor_units_per_case: r.vendor_units_per_case ?? null, vendor_units_per_package: r.vendor_units_per_package ?? null,
-      order_unit: r.order_unit || "case",
+      order_unit: normalizeOrderUnit(r.order_unit, byId[r.product_id]),
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
     setBusy(true);
@@ -2871,13 +2880,18 @@ const FLOZ_PER = { "fl oz": 1, floz: 1, gal: 128, gallon: 128, qt: 32, pt: 16 };
 const EACHISH = ["each", "ea", "ct", "count", "unit", "units"];
 const VOL_TSP = { tsp: 1, tbsp: 3, "fl oz": 6, floz: 6, cup: 48, cups: 48, pt: 96, pint: 96, qt: 192, quart: 192, gal: 768, gallon: 768, ml: 0.202884, l: 202.884, liter: 202.884 };
 // How many `to` units are in one `from` unit, when it's a straight weight-to-weight or volume-to-volume conversion.
+const sameUnit = (a, b) => {
+  const f = String(a || "").toLowerCase().trim().replace(/\.$/, ""), t = String(b || "").toLowerCase().trim().replace(/\.$/, "");
+  return !!f && !!t && (f === t || f + "s" === t || f === t + "s");
+};
 function unitConv(from, to) {
   const f = String(from || "").toLowerCase().trim(), t = String(to || "").toLowerCase().trim();
   if (!f || !t) return null;
-  if (f === t) return 1;
+  if (sameUnit(f, t)) return 1;
   if (OZ_PER[f] && OZ_PER[t]) return OZ_PER[f] / OZ_PER[t];
   if (VOL_TSP[f] && VOL_TSP[t]) return VOL_TSP[f] / VOL_TSP[t];
   if (EACHISH.includes(f) && EACHISH.includes(t)) return 1;
+  if ((f === "oz" && t === "fl oz") || (f === "fl oz" && t === "oz")) return 1;   // sauces are sold by fl oz and portioned by oz
   return null;
 }
 // Prep recipes (house-made) are costed from their own lines, so line costing needs the full recipe set.
@@ -2885,14 +2899,29 @@ function unitConv(from, to) {
 let RECIPE_CTX = { recipesById: {}, compsById: {}, byId: {}, paid: {} };
 // What each item actually cost per count unit on its most recent delivery:
 // total spent on that line ÷ the count units it brought in.
-function lastPaidByProduct(receipts) {
+// How many count units one PURCHASE unit holds, from the product's own pack setup —
+// a gallon of BBQ is 128 oz. Deliveries store a count-units figure too, but it is only as good as the
+// conversion that was set when it was received, so the product's setup wins.
+function unitsPerPurchase(p) {
+  if (!p) return null;
+  const ppc = num(p.packages_per_case) || 1, upp = num(p.usage_per_package) || 1;
+  const bb = String(p.buy_by || "case").toLowerCase().trim(), pkg = String(p.package_unit || "").toLowerCase().trim();
+  const v = (bb === "package" || (pkg && bb === pkg)) ? upp : ppc * upp;   // bought by the package, or by the case
+  return v > 0 ? v : null;
+}
+// Cost per COUNT UNIT straight off the most recent delivery: what was spent on that line
+// ÷ the count units it brought in. Recipes then convert from the count unit down to oz/each
+// using the product's size (a 1 gallon jug = 128 oz).
+function lastPaidByProduct(receipts, byId) {
   const out = {};
   for (const r of receipts || []) for (const l of r.receipt_line || []) {
-    const units = num(l.qty_count_units), qty = num(l.purchase_qty), uc = num(l.unit_cost);
-    if (!units || uc == null || qty == null) continue;
-    const per = (uc * qty) / units, d = r.received_date || "";
+    const uc = num(l.unit_cost), qty = num(l.purchase_qty), units = num(l.qty_count_units);
+    if (uc == null || !qty) continue;
+    const per = units ? (uc * qty) / units                       // as received
+      : (unitsPerPurchase(byId?.[l.product_id]) ? uc / unitsPerPurchase(byId[l.product_id]) : null);
+    const d = r.received_date || "";
     const cur = out[l.product_id];
-    if (per > 0 && (!cur || d > cur.date)) out[l.product_id] = { per, date: d };
+    if (per != null && per > 0 && (!cur || d > cur.date)) out[l.product_id] = { per, date: d };
   }
   return out;
 }
@@ -2904,6 +2933,11 @@ function unitCost(p) {
 }
 const paidInfo = (p) => RECIPE_CTX.paid?.[p?.product_id] || null;
 const priceNote = (p) => paidInfo(p) ? `last paid ${paidInfo(p).date}` : "vendor list price";
+// A delivery whose stored count units disagree with the product's pack setup — the receipt itself needs fixing.
+function badReceiptNote(p) {
+  const i = paidInfo(p), b = i?.bad;
+  return b ? `delivery ${i.date} recorded ${+b.stored} ${measure(p)}, pack setup says ${+b.should.toFixed(2)} — fix it in Receiving` : null;
+}
 function prepUnitCost(rid, seen) {
   const r = RECIPE_CTX.recipesById[rid], y = r ? num(r.yield_qty) : null;
   if (!r || !y || seen.has(rid)) return null;          // no yield, or a recipe that (eventually) uses itself
@@ -2920,13 +2954,24 @@ const tierName = (r) => (r === 1 ? "full portion" : r === 0.75 ? "3/4 portion" :
 
 // How much one usage unit of a product holds, in `unit` — from the product's own size
 // (a 4.5 LB tub of parmesan holds 72 oz), so nobody has to do that math by hand.
+// The product declares it: one package holds `size` of `size_unit` (1 sleeve = 100 plate).
+// Nothing here needs to know what a "plate" is — only when a recipe measures in something else
+// (oz from a pound) does the weight/volume table get involved.
 function sizePerUsageUnit(p, unit) {
-  const sz = num(p?.size), per = unitConv(p?.size_unit, unit);
-  if (!sz || per == null) return null;
+  const sz = num(p?.size);
+  if (!sz || !p?.size_unit) return null;
+  const u = String(unit || "").toLowerCase().trim();
+  const su = String(p.size_unit).toLowerCase().trim();
+  const countable = !(OZ_PER[su] != null || VOL_TSP[su] != null || FLOZ_PER[su] != null);
+  const per = sameUnit(u, su) ? 1                              // the recipe measures in what the product declares
+    : unitConv(p.size_unit, unit) ?? (countable && EACHISH.includes(u) ? 1 : null);   // pieces are pieces
+  if (per == null) return null;
   const upp = num(p?.usage_per_package) || 1;
   const v = (sz * per) / upp;
   return v > 0 ? v : null;
 }
+// What a recipe line should be measured in for this product, unless you say otherwise.
+const naturalUnit = (p) => String(p?.size_unit || measure(p) || "each").toLowerCase().trim();
 function suggestFactor(p, unit) {
   if (!p) return null;
   const m = String(measure(p)).toLowerCase().trim(), u = String(unit || "").toLowerCase().trim();
@@ -2946,7 +2991,7 @@ function suggestFactor(p, unit) {
 const effFactor = (l, p) => num(l.factor) ?? (p ? suggestFactor(p, l.unit) : null);
 function sizeHint(p, unit) {
   const held = sizePerUsageUnit(p, unit);
-  return held ? `from the ${+Number(p.size)} ${String(p.size_unit).toUpperCase()} ${measure(p)}` : null;
+  return held ? `1 ${measure(p)} = ${+held.toFixed(4)} ${unit} (${+Number(p.size)} ${p.size_unit} per ${String(p.package_unit || measure(p)).toLowerCase()})` : null;
 }
 // "3/4", "1 1/2", nearest 1/8
 function fracStr(x) {
@@ -3076,7 +3121,7 @@ function MenuRecipes({ products, receipts }) {
   if (rows == null) return <div className="stat">Loading recipes…</div>;
   const recipesById = Object.fromEntries(rows.map((r) => [r.recipe_id, r]));
   const compsById = Object.fromEntries(comps.map((c) => [c.component_id, c]));
-  RECIPE_CTX = { recipesById, compsById, byId, paid: lastPaidByProduct(receipts) };
+  RECIPE_CTX = { recipesById, compsById, byId, paid: lastPaidByProduct(receipts, byId) };
   const ord = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name);
   const list = rows.filter((r) => (showOff || r.active) && (!q || r.name.toLowerCase().includes(q.toLowerCase()))).sort(ord);
   const extra = [...new Set(list.map((r) => r.category || "Other"))].filter((c) => !MENU_CATS.includes(c));
@@ -3249,7 +3294,7 @@ function recipeCardHTML(r) {
       <h1>${escHtml(r.name)}</h1>
       ${build ? `<p class="build">${escHtml(build)}</p>` : ""}
       <table><thead><tr><th>Ingredient</th><th>What you use</th><th class="amt">Amount</th></tr></thead><tbody>${rows}</tbody></table>
-      ${serve.length ? `<p class="serve"><span>Serve in / on</span> ${serve.map((l) => escHtml(l.portion || l.item_name)).join(" &nbsp;·&nbsp; ")}</p>` : ""}
+      ${(r.serve_note || serve.length) ? `<p class="serve"><span>Serve in / on</span> ${escHtml(r.serve_note) || serve.map((l) => escHtml(l.portion || l.item_name)).join(" &nbsp;·&nbsp; ")}</p>` : ""}
       ${r.method ? `<h2>How to make it</h2><p class="method">${escHtml(r.method)}</p>` : ""}
     </div>
     <footer><span>LAS VEGAS MINI GRAND PRIX · KITCHEN</span><span>${escHtml(r.name)}</span></footer>
@@ -3318,7 +3363,10 @@ function resolvePick(v, byId, unit) {
   if (v === "free") return { product_id: null, sub_recipe_id: null, name: "", factor: null, fallback_cost: 0 };
   if (!v) return { product_id: null, sub_recipe_id: null, name: "", factor: null, fallback_cost: null };
   if (String(v).startsWith("r:")) { const r = RECIPE_CTX.recipesById[Number(String(v).slice(2))]; return { product_id: null, sub_recipe_id: r?.recipe_id ?? null, name: r?.name || "", factor: null, fallback_cost: null }; }
-  const p = byId[Number(v)]; return { product_id: p ? p.product_id : null, sub_recipe_id: null, name: p ? p.name : "", factor: p ? suggestFactor(p, unit) : null, fallback_cost: null };
+  const p = byId[Number(v)];
+  if (!p) return { product_id: null, sub_recipe_id: null, name: "", factor: null, fallback_cost: null };
+  const u = naturalUnit(p);
+  return { product_id: p.product_id, sub_recipe_id: null, name: p.name, unit: u, factor: suggestFactor(p, u), fallback_cost: null };
 }
 function subInfo(subId, showCost) {
   const r = RECIPE_CTX.recipesById[subId]; if (!r) return <span style={{ color: "#B0271B" }}>prep recipe missing</span>;
@@ -3404,7 +3452,7 @@ function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, sh
   const p = c.product_id ? byId[c.product_id] : null;
   const sz = sizes.length ? sizes : WING_SIZES_DEFAULT;
   const sorted = products.slice().sort((a, b) => a.name.localeCompare(b.name));
-  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, fallback_cost: x.fallback_cost, name: s.name || x.name }; }); }
+  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, unit: x.unit || s.unit, factor: x.factor, fallback_cost: x.fallback_cost, name: s.name || x.name }; }); }
   async function save() {
     if (!String(c.name || "").trim()) { alert("Name it."); return; }
     const portions = {}; for (const k of Object.keys(c.portions || {})) { const q = num(c.portions[k]?.qty); if (q != null || c.portions[k]?.tool) portions[k] = { qty: q, tool: c.portions[k]?.tool || null }; }
@@ -3471,7 +3519,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
   const set = (k, v) => setC((s) => ({ ...s, [k]: v }));
   const p = c.product_id ? byId[c.product_id] : null;
   const sorted = products.slice().sort((a, b) => a.name.localeCompare(b.name));
-  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, fallback_cost: x.fallback_cost, name: s.name || x.name }; }); }
+  function pick(v) { setC((s) => { const x = resolvePick(v, byId, s.unit); return { ...s, product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, unit: x.unit || s.unit, factor: x.factor, fallback_cost: x.fallback_cost, name: s.name || x.name }; }); }
   async function save() {
     if (!String(c.name || "").trim()) { alert("Name it."); return; }
     setBusy(true);
@@ -3569,7 +3617,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
   const isSpec = r.kind === "pizza_specialty" || isWing;
   function pick(l, v) {
     const x = resolvePick(v, byId, l.unit);
-    setLine(l._k, { product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, factor: x.factor, fallback_cost: x.fallback_cost, item_name: l.item_name || x.name });
+    setLine(l._k, { product_id: x.product_id, sub_recipe_id: x.sub_recipe_id, unit: x.unit || l.unit, factor: x.factor, fallback_cost: x.fallback_cost, item_name: l.item_name || x.name });
   }
   function changeUnit(l, unit) {
     const p = l.product_id && !l.sub_recipe_id ? byId[l.product_id] : null;
@@ -3740,7 +3788,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                     </td>
                     <td><div style={{ display: "flex", gap: 4 }}>
                       <input className="fig" type="number" step="any" value={l.qty ?? ""} onChange={(e) => setLine(l._k, { qty: e.target.value })} style={{ width: 62, background: num(l.qty) == null ? "#FFF2CC" : undefined }} />
-                      <select value={l.unit || "oz"} onChange={(e) => changeUnit(l, e.target.value)}>{[...new Set([...RECIPE_UNITS, l.unit].filter(Boolean))].map((u) => <option key={u} value={u}>{u}</option>)}</select>
+                      <select value={l.unit || "oz"} onChange={(e) => changeUnit(l, e.target.value)}>{[...new Set([p ? naturalUnit(p) : null, ...RECIPE_UNITS, l.unit].filter(Boolean))].map((u) => <option key={u} value={u}>{u}</option>)}</select>
                     </div></td>
                     <td>
                       {sub ? (subConv != null ? <span className="stat" style={{ marginTop: 0 }}>1 {l.unit} = {+subConv.toFixed(4)} {sub.yield_unit}</span>
@@ -3777,6 +3825,9 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
         </div>
 
         <div className="group">
+          <div className="field" style={{ marginBottom: 10 }}><label>Serve in / on</label>
+            <input value={r.serve_note ?? ""} placeholder="e.g. Pizza tray with 10 paper plates" onChange={(e) => set("serve_note", e.target.value)} />
+            <span className="stat">Prints at the bottom of the recipe card. Leave blank to list the items marked "Serve in/on" instead.</span></div>
           <div className="group-t">Method</div>
           <textarea rows={4} style={{ width: "100%", fontFamily: "inherit", fontSize: 13 }} value={r.method ?? ""} onChange={(e) => set("method", e.target.value)} placeholder="Build and cook steps…" />
         </div>
