@@ -3199,6 +3199,18 @@ function MenuRecipes({ products, receipts }) {
               {wr.length > 0 && <><div className="group-t" style={{ marginTop: 18 }}>Wings — other</div>{table(wr)}</>}
             </div>);
         }
+        if (c === "Burgers & Hot Dogs") {
+          const dogComps = comps.filter((x) => stationOf(x) === "dog");
+          return (
+            <div key={c} style={{ marginBottom: 18 }}>
+              <div className="group-t">{c}</div>
+              {table(grp)}
+              {!q && <SimpleToppingGuide comps={dogComps} station="dog" byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)}
+                title="Hot dog toppings" intro="What each topping adds to a dog, and what the line uses. Tap one to edit its portion, tool or inventory item." />}
+              {!q && <SimpleToppingGuide comps={comps.filter((x) => stationOf(x) === "burger")} station="burger" byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)}
+                title="Burger toppings" intro="Burger portions run heavier than a dog on the spreads and onion, cheese is a slice, and lettuce and tomato are burger-only." />}
+            </div>);
+        }
         if (c !== "Pizza") return <div key={c} style={{ marginBottom: 18 }}><div className="group-t">{c}</div>{table(grp)}</div>;
         const bases = grp.filter((r) => r.kind === "pizza_base"), specs = grp.filter((r) => r.kind === "pizza_specialty"), rest = grp.filter((r) => r.kind !== "pizza_base" && r.kind !== "pizza_specialty");
         return (
@@ -3214,7 +3226,7 @@ function MenuRecipes({ products, receipts }) {
       })}
       {edit && <MenuRecipeEditor recipe={edit} products={products} byId={byId} recipes={rows} comps={comps} showCost={showCost} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); load(); }} />}
       {editComp && stationOf(editComp) === "wings" && <WingComponentEditor comp={editComp} products={products} byId={byId} showCost={showCost} sizes={rows.filter((x) => x.kind === "wing_base").map((x) => x.size_key).filter(Boolean).sort((a, b) => a - b)} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
-      {editComp && stationOf(editComp) === "pizza" && <PizzaComponentEditor comp={editComp} products={products} byId={byId} showCost={showCost} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
+      {editComp && stationOf(editComp) !== "wings" && <PizzaComponentEditor comp={editComp} products={products} byId={byId} showCost={showCost} onClose={() => setEditComp(null)} onSaved={() => { setEditComp(null); load(); }} />}
     </div>
   );
 }
@@ -3415,6 +3427,32 @@ function ToppingPricing({ tops, byId, prices, onSave }) {
   );
 }
 
+// One-portion topping chart — used by the hot dog station (and anything else with a single portion).
+function SimpleToppingGuide({ comps, station, title, intro, byId, onEdit, showCost }) {
+  const list = comps.slice().sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
+  return (
+    <>
+      <div className="group-t" style={{ marginTop: 18 }}>{title}</div>
+      <div className="stat" style={{ marginBottom: 6 }}>{intro}</div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="tbl" style={{ minWidth: 560 }}>
+          <thead><tr><th>Topping</th><th>What the line uses</th><th>Amount</th>{showCost && <th>Cost</th>}<th>When</th></tr></thead>
+          <tbody>{list.map((c) => { const l = componentLine(c, 1), cost = lineCostInfo(l, byId);
+            return (
+              <tr key={c.component_id} onClick={() => onEdit(JSON.parse(JSON.stringify(c)))} style={{ cursor: "pointer" }}>
+                <td><b>{c.name}</b>{c.estimated && <div>{estChip}</div>}</td>
+                <td><b>{l.portion || <span style={{ color: "#B0271B", fontWeight: 400 }}>no line measure</span>}</b></td>
+                <td className="fig">{l.qty != null ? `${+l.qty.toFixed(2)} ${c.unit}` : "—"}</td>
+                {showCost && <td className="fig">{cost.cost != null ? money(cost.cost) : "—"} {costChip(cost)}</td>}
+                <td className="stat" style={{ marginTop: 0 }}>{(STAGES.find((x) => x[0] === (c.stage || "before")) || [])[1]}</td>
+              </tr>); })}</tbody>
+        </table>
+      </div>
+      <button className="mini" style={{ marginTop: 8 }} onClick={() => onEdit({ station, kind: "topping", name: "", unit: "oz", sort: 999, stage: "after", tool_kind: "text", estimated: true })}>+ Add topping</button>
+    </>
+  );
+}
+
 // Section 2 of the wing station: every sauce/seasoning at every wing count.
 function WingGuide({ comps, sizes, byId, onEdit, showCost }) {
   const list = comps.slice().sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
@@ -3523,7 +3561,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
   async function save() {
     if (!String(c.name || "").trim()) { alert("Name it."); return; }
     setBusy(true);
-    try { await db.savePizzaComponent(c); onSaved(); } catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
+    try { await db.savePizzaComponent({ ...c, station: stationOf(c) }); onSaved(); } catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
   }
   async function remove() {
     if (!c.component_id) { onClose(); return; }
@@ -3548,7 +3586,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
           </div>
         </div>
         <div className="group">
-          <div className="group-t">{c.kind === "sauce" ? "Large portion" : "Single-topping portion (large)"}</div>
+          <div className="group-t">{stationOf(c) !== "pizza" ? "Portion" : c.kind === "sauce" ? "Large portion" : "Single-topping portion (large)"}</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <div className="field" style={{ flex: "0 1 90px" }}><label>Amount</label><input className="fig" type="number" step="any" value={c.full_qty ?? ""} onChange={(e) => set("full_qty", e.target.value)} /></div>
             <div className="field" style={{ flex: "0 1 90px" }}><label>Unit</label><select value={c.unit || "oz"} onChange={(e) => setC((s) => ({ ...s, unit: e.target.value, factor: p ? (suggestFactor(p, e.target.value) ?? s.factor) : s.factor }))}>{RECIPE_UNITS.map((u) => <option key={u}>{u}</option>)}</select></div>
@@ -3576,14 +3614,14 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
             return <div key={t.n} className="stat">{c.kind === "sauce" ? "Large" : t.label}: <b>{l.portion || "—"}</b> = {l.qty != null ? +Number(l.qty).toFixed(2) : "—"} {c.unit}
               {showCost && <> · {money(lc)}{t.n === 1 && ap != null && lc != null ? ` · ${pct(lc / ap)} food cost` : ""}</>}</div>; })}</div>
         </div>
-        <div className="group">
+        {stationOf(c) === "pizza" && <div className="group">
           <div className="group-t">Kids pizza</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <div className="field" style={{ flex: "0 1 90px" }}><label>Amount ({c.unit})</label><input className="fig" type="number" step="any" value={c.kids_qty ?? ""} onChange={(e) => set("kids_qty", e.target.value)} /></div>
             <div className="field" style={{ flex: "1 1 200px" }}><label>What the line uses</label><input value={c.kids_tool || ""} onChange={(e) => set("kids_tool", e.target.value)} /></div>
             <div className="field" style={{ flex: "0 1 130px" }}><label>Add-on price (kids)</label><input className="fig" type="number" step="0.01" value={c.kids_addon_price ?? ""} onChange={(e) => set("kids_addon_price", e.target.value)} /></div>
           </div>
-        </div>
+        </div>}
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
           <div className="field" style={{ flex: "0 1 160px" }}><label>On the card</label>{stageSelect(c.stage, (v) => set("stage", v))}</div>
           <div className="field" style={{ flex: "1 1 220px" }}><label>Note</label><input value={c.note || ""} onChange={(e) => set("note", e.target.value)} /></div>
