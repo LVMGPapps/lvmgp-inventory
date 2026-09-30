@@ -1301,6 +1301,9 @@ function Receive({ products, vendors, reload }) {
   const [err, setErr] = useState("");
   const [recent, setRecent] = useState([]);
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
+  const byName = Object.fromEntries(products.map((p) => [String(p.name || "").toLowerCase().trim(), p]));
+  // Delivery rows don't always carry product_id — fall back to matching on the name.
+  const prodOf = (l) => byId[l.product_id] || byId[l.product?.product_id] || byName[String(l.product_name || l.name || "").toLowerCase().trim()] || null;
 
   // Price integrity at receiving: above catalog price for this vendor? another vendor cheaper per each?
   function priceCheck(product_id, vendor_id, enteredCasePrice, orderUnit) {
@@ -1499,13 +1502,13 @@ function Receive({ products, vendors, reload }) {
                 return (
                   <tr key={l.receipt_line_id}>
                     <td><input type="date" value={d.received_date} max={new Date().toISOString().slice(0, 10)} onChange={(e) => e.target.value && setDate(e.target.value)} /></td>
-                    <td>{l.product_name}<div className="stat">{packLine(byId[l.product_id])}</div></td>
+                    <td>{l.product_name}<div className="stat">{packLine(prodOf(l))}</div></td>
                     <td className="fig">
                       <input className="fig" style={{ width: 66 }} type="number" step="0.001" min="0" value={l.purchase_qty} onChange={(e) => editLine({ purchase_qty: e.target.value })} />
-                      <div className="stat">{byId[l.product_id] ? buyLabel(byId[l.product_id], null, Number(l.purchase_qty)) : ""}{receivedCount(byId[l.product_id], l.purchase_qty) ? ` → ${receivedCount(byId[l.product_id], l.purchase_qty)}` : ""}</div>
+                      <div className="stat">{prodOf(l) ? buyLabel(prodOf(l), null, Number(l.purchase_qty)) : "how many"}{receivedCount(prodOf(l), l.purchase_qty) ? ` → ${receivedCount(prodOf(l), l.purchase_qty)}` : ""}</div>
                     </td>
                     <td className="fig"><input className="fig" style={{ width: 82 }} type="number" step="0.01" min="0" value={l.unit_cost ?? ""} onChange={(e) => editLine({ unit_cost: e.target.value })} />
-                      <div className="stat">{byId[l.product_id] ? `per ${buyLabel(byId[l.product_id], null, 1)}` : ""}</div></td>
+                      <div className="stat">{prodOf(l) ? `per ${buyLabel(prodOf(l), null, 1)}` : "per unit"}</div></td>
                     <td className="fig">{total ? money(total) : "—"}</td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button className="mini" disabled={!dirty} style={dirty ? { background: "#E0392B", color: "#fff" } : undefined} onClick={async () => {
