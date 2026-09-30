@@ -3243,15 +3243,11 @@ function MenuRecipes({ products, receipts }) {
             </div>);
         }
         if (c === "Burgers & Hot Dogs") {
-          const dogComps = comps.filter((x) => stationOf(x) === "dog");
           return (
             <div key={c} style={{ marginBottom: 18 }}>
               <div className="group-t">{c}</div>
               {table(grp)}
-              {!q && <SimpleToppingGuide comps={dogComps} station="dog" byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)}
-                title="Hot dog toppings" intro="What each topping adds to a dog, and what the line uses. Tap one to edit its portion, tool or inventory item." />}
-              {!q && <SimpleToppingGuide comps={comps.filter((x) => stationOf(x) === "burger")} station="burger" byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)}
-                title="Burger toppings" intro="Burger portions run heavier than a dog on the spreads and onion, cheese is a slice, and lettuce and tomato are burger-only." />}
+              {!q && <BurgerDogGuide comps={comps.filter((x) => ["burger", "dog"].includes(stationOf(x)))} byId={byId} showCost={showCost} onEdit={(x) => setEditComp(x)} />}
             </div>);
         }
         if (c !== "Pizza") return <div key={c} style={{ marginBottom: 18 }}><div className="group-t">{c}</div>{table(grp)}</div>;
@@ -3480,6 +3476,43 @@ function ToppingPricing({ tops, byId, prices, onSave }) {
       </div>
       {dirty && <button className="btn btn-primary" style={{ marginTop: 10 }} disabled={busy} onClick={save}>Save prices</button>}
     </div>
+  );
+}
+
+// Burgers and hot dogs side by side: one row per topping, a column for each.
+// A topping can exist on one side only — the empty cell offers to add it.
+function BurgerDogGuide({ comps, byId, onEdit, showCost }) {
+  const key = (c) => String(c.name || "").toLowerCase().trim();
+  const burger = {}, dog = {};
+  for (const c of comps) (stationOf(c) === "burger" ? burger : dog)[key(c)] = c;
+  const names = [...new Set([...Object.values(burger), ...Object.values(dog)]
+    .sort((a, b) => (a.sort ?? 999) - (b.sort ?? 999) || a.name.localeCompare(b.name)).map((c) => key(c)))];
+  const cell = (c, station, name) => {
+    if (!c) return <td style={{ verticalAlign: "middle" }}>
+      <button className="mini" onClick={() => onEdit({ station, kind: "topping", name, unit: "oz", sort: 999, stage: "after", tool_kind: "text", estimated: true })}>+ add</button></td>;
+    const l = componentLine(c, 1), cost = lineCostInfo(l, byId);
+    return (
+      <td onClick={() => onEdit(JSON.parse(JSON.stringify(c)))} style={{ cursor: "pointer" }}>
+        <b>{l.portion || <span style={{ color: "#B0271B", fontWeight: 400 }}>no line measure</span>}</b>
+        <div className="stat">{l.qty != null ? `${+l.qty.toFixed(2)} ${c.unit}` : "—"}{showCost && cost.cost != null ? ` · ${money(cost.cost)}` : ""}
+          {c.estimated ? " · not weighed" : ""}{(c.stage || "before") !== "after" ? ` · ${((STAGES.find((x) => x[0] === (c.stage || "before")) || [])[1] || "").toLowerCase()}` : ""}</div>
+      </td>);
+  };
+  return (
+    <>
+      <div className="group-t" style={{ marginTop: 18 }}>Burger &amp; hot dog toppings</div>
+      <div className="stat" style={{ marginBottom: 6 }}>Same topping, both sides. Spreads and onion run heavier on a burger; scooped and pre-portioned items match. Tap a cell to edit that side, or add it where it is missing.</div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="tbl" style={{ minWidth: 640 }}>
+          <thead><tr><th>Topping</th><th style={{ width: "36%" }}>Burger</th><th style={{ width: "36%" }}>Hot dog</th></tr></thead>
+          <tbody>{names.map((n) => {
+            const b = burger[n], d = dog[n], nm = (b || d).name;
+            return <tr key={n}><td><b>{nm}</b></td>{cell(b, "burger", nm)}{cell(d, "dog", nm)}</tr>;
+          })}</tbody>
+        </table>
+      </div>
+      <button className="mini" style={{ marginTop: 8 }} onClick={() => onEdit({ station: "burger", kind: "topping", name: "", unit: "oz", sort: 999, stage: "after", tool_kind: "text", estimated: true })}>+ Add topping</button>
+    </>
   );
 }
 
