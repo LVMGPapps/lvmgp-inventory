@@ -3070,6 +3070,8 @@ function wingLine(c, size) {
 // flavored wings from their base wings + sauce at that wing count.
 // Each built line has a stable token so a recipe can remember the order you put them in.
 const lineToken = (l) => l._src === "base" ? `base:${l.line_id}` : l._src === "sauce" ? "sauce" : l._cid ? `comp:${l._cid}` : `own:${l.line_id || ""}`;
+const isExcluded = (r, l) => Array.isArray(r?.excluded_lines) && r.excluded_lines.includes(lineToken(l));
+const dropExcluded = (r, built) => built.filter((l) => !isExcluded(r, l));
 function applyOrder(built, order) {
   if (!Array.isArray(order) || !order.length) return built;
   return built.map((l, i) => { const k = order.indexOf(lineToken(l)); return { l, k: k < 0 ? 9000 + i : k }; })
@@ -3078,7 +3080,7 @@ function applyOrder(built, order) {
 function builtLines(r, recipesById, compsById) {
   if (r.kind === "wing_specialty") {
     const base = recipesById[r.base_recipe_id], sauce = compsById[r.sauce_component_id];
-    return [...applyOrder([...(base?.lines || []).map((l) => ({ ...l, _src: "base" })), ...(sauce ? [wingLine(sauce, base?.size_key)] : [])], r.line_order),
+    return [...dropExcluded(r, applyOrder([...(base?.lines || []).map((l) => ({ ...l, _src: "base" })), ...(sauce ? [wingLine(sauce, base?.size_key)] : [])], r.line_order)),
       ...(r.lines || []).map((l) => ({ ...l, _src: "own" }))];
   }
   if (r.kind !== "pizza_specialty") return (r.lines || []).map((l) => ({ ...l, _src: "own" }));
@@ -3088,7 +3090,7 @@ function builtLines(r, recipesById, compsById) {
   const sauce = compsById[r.sauce_component_id];
   const tops = (r.topping_component_ids || []).map((id) => compsById[id]).filter(Boolean);
   const ratio = tierRatio(tops.length);
-  return [...applyOrder([...baseLines, ...(sauce ? [componentLine(sauce, 1)] : []), ...tops.map((c) => componentLine(c, ratio))], r.line_order),
+  return [...dropExcluded(r, applyOrder([...baseLines, ...(sauce ? [componentLine(sauce, 1)] : []), ...tops.map((c) => componentLine(c, ratio))], r.line_order)),
     ...(r.lines || []).map((l) => ({ ...l, _src: "own" }))];
 }
 const isFreeLine = (l) => !l.product_id && !l.sub_recipe_id && num(l.fallback_cost) === 0;
@@ -3756,6 +3758,15 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
   }
   const all = builtLines(r, recipesById, compsById);
   const built = all.filter((l) => l._src !== "own");
+  // Everything the base would give this recipe, before anything is left out.
+  const inherited = (r.kind === "pizza_specialty" || r.kind === "wing_specialty")
+    ? builtLines({ ...r, excluded_lines: [], lines: [] }, recipesById, compsById) : [];
+  const excluded = (r.excluded_lines || []);
+  const dropped = inherited.filter((l) => excluded.includes(lineToken(l)));
+  const toggleExclude = (l) => {
+    const t = lineToken(l);
+    set("excluded_lines", excluded.includes(t) ? excluded.filter((x) => x !== t) : [...excluded, t]);
+  };
   function moveBuilt(i, d) {
     const j = i + d; if (j < 0 || j >= built.length) return;
     const order = built.map(lineToken);
@@ -3848,9 +3859,10 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                 <thead><tr><th style={{ width: 54 }}></th><th>From</th><th>Ingredient</th><th>What the line uses</th><th>Amount</th>{showCost && <th>Cost</th>}</tr></thead>
                 <tbody>{built.map((l, i) => { const c = lineCostInfo(l, byId); return (
                   <tr key={i}>
-                    <td style={{ whiteSpace: "nowrap" }}>
+                    <td style={{ whiteSpace: "nowrap", width: 84 }}>
                       <button className="mini" style={{ padding: "3px 6px" }} disabled={i === 0} onClick={() => moveBuilt(i, -1)}>↑</button>
                       <button className="mini" style={{ padding: "3px 6px" }} disabled={i === built.length - 1} onClick={() => moveBuilt(i, 1)}>↓</button>
+                      <button className="mini mini-danger" style={{ padding: "3px 6px" }} title="Leave this out of this recipe" onClick={() => toggleExclude(l)}>✕</button>
                     </td>
                     <td className="stat" style={{ marginTop: 0 }}>{l._src}<div>{(STAGES.find((x) => x[0] === (l.stage || "before")) || [])[1]}</div></td><td>{l.item_name}</td>
                     <td><b>{l.portion || ""}</b>{l.note && <div className="stat">{l.note}</div>}</td>
@@ -3858,7 +3870,11 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                     {showCost && <td className="fig">{c.cost != null ? money(c.cost) : "—"} {costChip(c)}</td>}</tr>); })}</tbody>
               </table>
             </div>
-            <div className="stat" style={{ marginTop: 6 }}>These lines come from the base{isWing ? " and the sauce chart" : ", the sauce and the topping guide"} — change the amounts there and everything built on them updates. The arrows set the order for <b>this</b> recipe only, on screen and on the printed card. Add anything extra ({isWing ? "ranch, a garnish" : "a drizzle, a garnish"}) below.</div>
+            {dropped.length > 0 && <div className="note" style={{ marginTop: 8 }}>
+              <b>Left out of this recipe:</b>{" "}
+              {dropped.map((l) => <button key={lineToken(l)} className="mini" style={{ marginLeft: 6 }} onClick={() => toggleExclude(l)}>+ {l.item_name}</button>)}
+            </div>}
+            <div className="stat" style={{ marginTop: 6 }}>These lines come from the base{isWing ? " and the sauce chart" : ", the sauce and the topping guide"} — change the amounts there and everything built on them updates. The arrows set the order for <b>this</b> recipe only, on screen and on the printed card. The ✕ leaves a line out of this recipe without changing the base. Add anything extra ({isWing ? "ranch, a garnish" : "a drizzle, a garnish"}) below.</div>
           </div>
         )}
 
