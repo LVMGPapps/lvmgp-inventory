@@ -3343,16 +3343,22 @@ function recipeCardHTML(r) {
     + (after.length ? head("After the oven") + after.map(row).join("") : "")
     + (side.length ? head("Comes with") + side.map(row).join("") : "");
   return `<section class="card">
-    ${r.image_url ? `<img class="photo" src="${escHtml(r.image_url)}" alt="">` : `<div class="photo none">No photo yet</div>`}
-    <div class="band"></div>
-    <div class="body">
+    <header class="head">
       <div class="eyebrow">${escHtml(r.category || "")}</div>
       <h1>${escHtml(r.name)}</h1>
       ${build ? `<p class="build">${escHtml(build)}</p>` : ""}
-      <table><thead><tr><th>Ingredient</th><th>What you use</th><th class="amt">Amount</th></tr></thead><tbody>${rows}</tbody></table>
-      ${(r.serve_note || serve.length) ? `<p class="serve"><span>Serve in / on</span> ${escHtml(r.serve_note) || serve.map((l) => escHtml(l.portion || l.item_name)).join(" &nbsp;·&nbsp; ")}</p>` : ""}
-      ${r.method ? `<h2>How to make it</h2><p class="method">${escHtml(r.method)}</p>` : ""}
+    </header>
+    <div class="band"></div>
+    <div class="top">
+      <div class="left">
+        ${r.image_url ? `<img class="photo" src="${escHtml(r.image_url)}" alt="">` : `<div class="photo none">No photo yet</div>`}
+        ${(r.serve_note || serve.length) ? `<p class="serve"><span>Serve in / on</span><br>${escHtml(r.serve_note) || serve.map((l) => escHtml(l.portion || l.item_name)).join(" &nbsp;·&nbsp; ")}</p>` : ""}
+      </div>
+      <div class="right">
+        <table><thead><tr><th>Ingredient</th><th>What you use</th><th class="amt">Amount</th></tr></thead><tbody>${rows}</tbody></table>
+      </div>
     </div>
+    ${r.method ? `<div class="how"><h2>How to make it</h2><p class="method">${escHtml(r.method)}</p></div>` : ""}
     <footer><span>LAS VEGAS MINI GRAND PRIX · KITCHEN</span><span>${escHtml(r.name)}</span></footer>
   </section>`;
 }
@@ -3368,26 +3374,32 @@ function printRecipeCards(list, title) {
 body { margin: 0; font-family: Inter, system-ui, sans-serif; color: #191B1F; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .card { page-break-after: always; break-after: page; display: flex; flex-direction: column; min-height: 10.1in; }
 .card:last-child { page-break-after: auto; break-after: auto; }
-.photo { width: 100%; height: 4.1in; object-fit: cover; border-radius: 10px; display: block; }
-.photo.none { background: #F4F1EA; color: #9aa0a8; display: flex; align-items: center; justify-content: center; font: 600 16px Inter, sans-serif; }
-.band { height: 9px; margin: 12px 0 0; border-radius: 2px; background-color: #fff;
+.head { padding-bottom: 6px; }
+.top { display: flex; gap: 20px; padding-top: 12px; align-items: flex-start; }
+.left { width: 3.15in; flex: none; }
+.right { flex: 1; min-width: 0; }
+.photo { width: 100%; height: 2.5in; object-fit: cover; border-radius: 10px; display: block; }
+.photo.none { background: #F4F1EA; color: #9aa0a8; display: flex; align-items: center; justify-content: center; font: 600 15px Inter, sans-serif; height: 2.5in; border-radius: 10px; }
+.how { margin-top: 14px; padding-top: 10px; border-top: 1px solid #E6E1D6; }
+.band { height: 9px; margin: 4px 0 0; border-radius: 2px; background-color: #fff;
   background-image: linear-gradient(45deg,#0c0c0e 25%,transparent 25%),linear-gradient(-45deg,#0c0c0e 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#0c0c0e 75%),linear-gradient(-45deg,transparent 75%,#0c0c0e 75%);
   background-size: 18px 18px; background-position: 0 0,0 9px,9px -9px,-9px 0; }
-.body { flex: 1; padding-top: 12px; }
+
 .eyebrow { font: 700 12px 'Barlow Condensed', sans-serif; letter-spacing: .16em; text-transform: uppercase; color: #E0392B; }
-h1 { font: 700 38px/1.02 'Barlow Condensed', sans-serif; text-transform: uppercase; margin: 2px 0 6px; letter-spacing: .01em; }
+h1 { font: 700 34px/1.02 'Barlow Condensed', sans-serif; text-transform: uppercase; margin: 2px 0 6px; letter-spacing: .01em; }
 .build { margin: 0 0 12px; font-size: 13.5px; color: #3b3f46; }
 h2 { font: 700 15px 'Barlow Condensed', sans-serif; letter-spacing: .12em; text-transform: uppercase; margin: 16px 0 4px; border-bottom: 3px solid #FFCE1F; display: inline-block; padding-bottom: 2px; }
-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 th { text-align: left; font: 700 11px 'Barlow Condensed', sans-serif; letter-spacing: .12em; text-transform: uppercase; color: #71757E; border-bottom: 2px solid #101012; padding: 6px 8px; }
-td { padding: 7px 8px; border-bottom: 1px solid #E6E1D6; vertical-align: top; }
+td { padding: 5px 7px; border-bottom: 1px solid #E6E1D6; vertical-align: top; }
 td.use { font-weight: 600; }
 .amt { text-align: right; white-space: nowrap; color: #71757E; }
 tr.stage td { font: 700 11px 'Barlow Condensed', sans-serif; letter-spacing: .14em; text-transform: uppercase; color: #101012; padding: 12px 8px 4px; border-bottom: 3px solid #101012; }
 tr.stage:first-child td { padding-top: 2px; }
-.serve { margin: 10px 0 0; font-size: 13px; }
+.serve { margin: 12px 0 0; font-size: 13px; line-height: 1.35; }
 .serve span { font: 700 10px 'Barlow Condensed', sans-serif; letter-spacing: .14em; text-transform: uppercase; color: #71757E; margin-right: 8px; }
-.method { font-size: 13.5px; line-height: 1.5; margin: 6px 0 0; white-space: pre-wrap; }
+.method { font-size: 13px; line-height: 1.45; margin: 6px 0 0; white-space: pre-wrap; }
+footer { margin-top: auto; }
 footer { display: flex; justify-content: space-between; margin-top: 14px; padding-top: 8px; border-top: 1px solid #E6E1D6; font: 600 10px 'Barlow Condensed', sans-serif; letter-spacing: .14em; color: #9aa0a8; text-transform: uppercase; }
 </style></head><body>${list.map(recipeCardHTML).join("")}
 <script>
