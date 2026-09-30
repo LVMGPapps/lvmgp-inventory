@@ -1273,6 +1273,18 @@ function Count({ products, locations, onhand, reload, onPending }) {
 
 // Receiving converts with "case" or "package". A product bought by the gallon/tub/bag is bought by the package —
 // without this the conversion falls back to 1 and 4 gallons land as 4 units instead of 512 oz.
+// "1 case = 12 sleeves of 1 sleeve · holds 100 plate" — so nobody has to remember how each item is packed.
+function packLine(p) {
+  if (!p) return "";
+  const bits = [caseMakeup(p)];
+  if (num(p.size) && p.size_unit) bits.push(`1 ${(p.package_unit || "package").toLowerCase()} holds ${+num(p.size)} ${String(p.size_unit).toLowerCase()}`);
+  return bits.join(" · ");
+}
+// What a quantity of purchase units becomes in count units.
+function receivedCount(p, qty) {
+  const n = unitsPerPurchase(p), q = num(qty);
+  return (n && q) ? `${+(q * n).toFixed(2)} ${String(p.usage_measure || "each").toLowerCase()}` : "";
+}
 function normalizeOrderUnit(orderUnit, p) {
   const u = String(orderUnit || p?.buy_by || "case").toLowerCase().trim();
   if (u === "case" || u === "package") return u;
@@ -1475,10 +1487,10 @@ function Receive({ products, vendors, reload }) {
       )}
       {recent.length > 0 && (
         <div className="vgroup">
-          <div className="vgroup-h"><span className="vname">Recent deliveries</span><span className="stat">edit date, qty, or case $ to match your receipt — then Save</span></div>
+          <div className="vgroup-h"><span className="vname">Recent deliveries</span><span className="stat">edit date, how many, or the price to match your invoice — then Save. Each row says what one of them is</span></div>
           <div style={{ overflowX: "auto" }}>
             <table className="tbl" style={{ border: "none", minWidth: 560 }}>
-              <thead><tr><th>Date</th><th>Item</th><th className="fig">Qty</th><th className="fig">Case $</th><th className="fig">Total</th><th></th></tr></thead>
+              <thead><tr><th>Date</th><th>Item</th><th className="fig">How many</th><th className="fig">Price each</th><th className="fig">Total</th><th></th></tr></thead>
               <tbody>{recent.flatMap((d) => d.lines.map((l) => {
                 const editLine = (patch) => setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, lines: x.lines.map((ll) => ll.receipt_line_id === l.receipt_line_id ? { ...ll, ...patch, dirty: true } : ll) } : x));
                 const setDate = (nd) => setRecent((rs) => rs.map((x) => x.receipt_id === d.receipt_id ? { ...x, received_date: nd, dirtyDate: true } : x));
@@ -1487,9 +1499,13 @@ function Receive({ products, vendors, reload }) {
                 return (
                   <tr key={l.receipt_line_id}>
                     <td><input type="date" value={d.received_date} max={new Date().toISOString().slice(0, 10)} onChange={(e) => e.target.value && setDate(e.target.value)} /></td>
-                    <td>{l.product_name}</td>
-                    <td className="fig"><input className="fig" style={{ width: 66 }} type="number" step="0.001" min="0" value={l.purchase_qty} onChange={(e) => editLine({ purchase_qty: e.target.value })} /></td>
-                    <td className="fig"><input className="fig" style={{ width: 82 }} type="number" step="0.01" min="0" value={l.unit_cost ?? ""} onChange={(e) => editLine({ unit_cost: e.target.value })} /></td>
+                    <td>{l.product_name}<div className="stat">{packLine(byId[l.product_id])}</div></td>
+                    <td className="fig">
+                      <input className="fig" style={{ width: 66 }} type="number" step="0.001" min="0" value={l.purchase_qty} onChange={(e) => editLine({ purchase_qty: e.target.value })} />
+                      <div className="stat">{byId[l.product_id] ? buyLabel(byId[l.product_id], null, Number(l.purchase_qty)) : ""}{receivedCount(byId[l.product_id], l.purchase_qty) ? ` → ${receivedCount(byId[l.product_id], l.purchase_qty)}` : ""}</div>
+                    </td>
+                    <td className="fig"><input className="fig" style={{ width: 82 }} type="number" step="0.01" min="0" value={l.unit_cost ?? ""} onChange={(e) => editLine({ unit_cost: e.target.value })} />
+                      <div className="stat">{byId[l.product_id] ? `per ${buyLabel(byId[l.product_id], null, 1)}` : ""}</div></td>
                     <td className="fig">{total ? money(total) : "—"}</td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button className="mini" disabled={!dirty} style={dirty ? { background: "#E0392B", color: "#fff" } : undefined} onClick={async () => {
@@ -4563,8 +4579,8 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
             {recs.map((r) => (
               <div className="crow" key={r.receipt_line_id} style={{ gridTemplateColumns: "128px 60px 76px 1fr auto", alignItems: "center" }}>
                 <div><input type="date" value={r._date ?? (r.received_date || "")} max={today} onChange={(e) => setRec(r.receipt_line_id, "_date", e.target.value)} /><div className="stat">{r.vendor_name || "—"}</div></div>
-                <label>Qty<input className="fig" type="number" step="0.001" value={r.purchase_qty} onChange={(e) => setRec(r.receipt_line_id, "purchase_qty", e.target.value)} /></label>
-                <label>Unit $<input className="fig" type="number" step="0.01" value={r.unit_cost ?? ""} onChange={(e) => setRec(r.receipt_line_id, "unit_cost", e.target.value)} /></label>
+                <label>{buyLabel(product, null, 2)}<input className="fig" type="number" step="0.001" value={r.purchase_qty} onChange={(e) => setRec(r.receipt_line_id, "purchase_qty", e.target.value)} /></label>
+                <label>$ per {buyLabel(product, null, 1)}<input className="fig" type="number" step="0.01" value={r.unit_cost ?? ""} onChange={(e) => setRec(r.receipt_line_id, "unit_cost", e.target.value)} /></label>
                 <div className="stat">{money((Number(r.unit_cost) || 0) * (Number(r.purchase_qty) || 0))}</div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <button className="mini" disabled={busy} onClick={() => saveRec(r)}>Save</button>
