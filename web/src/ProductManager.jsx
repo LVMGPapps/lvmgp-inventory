@@ -1273,12 +1273,23 @@ function Count({ products, locations, onhand, reload, onPending }) {
 
 // Receiving converts with "case" or "package". A product bought by the gallon/tub/bag is bought by the package —
 // without this the conversion falls back to 1 and 4 gallons land as 4 units instead of 512 oz.
-// "1 case = 12 sleeves of 1 sleeve · holds 100 plate" — so nobody has to remember how each item is packed.
+// "case = 12 sleeves of 1 sleeve · 1 sleeve holds 100 plate" — so nobody has to remember how each item is packed.
 function packLine(p) {
   if (!p) return "";
   const bits = [caseMakeup(p)];
-  if (num(p.size) && p.size_unit) bits.push(`1 ${(p.package_unit || "package").toLowerCase()} holds ${+num(p.size)} ${String(p.size_unit).toLowerCase()}`);
+  const sz = num(p.size), su = String(p.size_unit || "").toLowerCase().trim(), pkg = String(p.package_unit || "package").toLowerCase();
+  // Only worth saying when it tells you something new — not "1 gallon holds 1 gal".
+  if (sz && sz !== 1 && su && !sameUnit(su, pkg) && !sameUnit(su, String(p.usage_measure || "").toLowerCase()))
+    bits.push(`1 ${pkg} holds ${+sz} ${su}`);
   return bits.join(" · ");
+}
+// What you are entering: cases, gallons, tubs, bags — whatever this item is bought by.
+function purchaseLabel(p, n) {
+  if (!p) return "how many";
+  const bb = String(p.buy_by || "case").toLowerCase().trim();
+  const pkg = String(p.package_unit || "package").toLowerCase().trim();
+  const word = bb === "case" ? "case" : (bb === "package" || bb === "each") ? pkg : bb;
+  return word + (Number(n) === 1 ? "" : "s");
 }
 // What a quantity of purchase units becomes in count units.
 function receivedCount(p, qty) {
@@ -1505,10 +1516,10 @@ function Receive({ products, vendors, reload }) {
                     <td>{l.product_name}<div className="stat">{packLine(prodOf(l))}</div></td>
                     <td className="fig">
                       <input className="fig" style={{ width: 66 }} type="number" step="0.001" min="0" value={l.purchase_qty} onChange={(e) => editLine({ purchase_qty: e.target.value })} />
-                      <div className="stat">{prodOf(l) ? buyLabel(prodOf(l), null, Number(l.purchase_qty)) : "how many"}{receivedCount(prodOf(l), l.purchase_qty) ? ` → ${receivedCount(prodOf(l), l.purchase_qty)}` : ""}</div>
+                      <div className="stat">{purchaseLabel(prodOf(l), l.purchase_qty)}{receivedCount(prodOf(l), l.purchase_qty) ? ` → ${receivedCount(prodOf(l), l.purchase_qty)}` : ""}</div>
                     </td>
                     <td className="fig"><input className="fig" style={{ width: 82 }} type="number" step="0.01" min="0" value={l.unit_cost ?? ""} onChange={(e) => editLine({ unit_cost: e.target.value })} />
-                      <div className="stat">{prodOf(l) ? `per ${buyLabel(prodOf(l), null, 1)}` : "per unit"}</div></td>
+                      <div className="stat">{prodOf(l) ? `per ${purchaseLabel(prodOf(l), 1)}` : "per unit"}</div></td>
                     <td className="fig">{total ? money(total) : "—"}</td>
                     <td style={{ whiteSpace: "nowrap" }}>
                       <button className="mini" disabled={!dirty} style={dirty ? { background: "#E0392B", color: "#fff" } : undefined} onClick={async () => {
@@ -4582,8 +4593,8 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
             {recs.map((r) => (
               <div className="crow" key={r.receipt_line_id} style={{ gridTemplateColumns: "128px 60px 76px 1fr auto", alignItems: "center" }}>
                 <div><input type="date" value={r._date ?? (r.received_date || "")} max={today} onChange={(e) => setRec(r.receipt_line_id, "_date", e.target.value)} /><div className="stat">{r.vendor_name || "—"}</div></div>
-                <label>{buyLabel(product, null, 2)}<input className="fig" type="number" step="0.001" value={r.purchase_qty} onChange={(e) => setRec(r.receipt_line_id, "purchase_qty", e.target.value)} /></label>
-                <label>$ per {buyLabel(product, null, 1)}<input className="fig" type="number" step="0.01" value={r.unit_cost ?? ""} onChange={(e) => setRec(r.receipt_line_id, "unit_cost", e.target.value)} /></label>
+                <label>{purchaseLabel(product, 2)}<input className="fig" type="number" step="0.001" value={r.purchase_qty} onChange={(e) => setRec(r.receipt_line_id, "purchase_qty", e.target.value)} /></label>
+                <label>$ per {purchaseLabel(product, 1)}<input className="fig" type="number" step="0.01" value={r.unit_cost ?? ""} onChange={(e) => setRec(r.receipt_line_id, "unit_cost", e.target.value)} /></label>
                 <div className="stat">{money((Number(r.unit_cost) || 0) * (Number(r.purchase_qty) || 0))}</div>
                 <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                   <button className="mini" disabled={busy} onClick={() => saveRec(r)}>Save</button>
