@@ -2902,7 +2902,7 @@ function RecipeEditor({ product, onClose, onSaved }) {
 // are base + sauce + toppings, with each topping portioned by how many toppings the pizza carries.
 const MENU_CATS = ["Pizza", "Wings", "Burgers & Hot Dogs", "Fries & Tenders", "Appetizers & Snacks", "Sides & Dips", "Dessert", "Beverage", "Prep"];
 const RECIPE_UNITS = ["oz", "fl oz", "each", "tsp", "tbsp", "pump", "lb"];
-const STAGES = [["before", "Before oven"], ["after", "After oven"], ["serve", "Serve in/on"], ["hide", "Don't print"]];
+const STAGES = [["before", "Before oven"], ["after", "After oven"], ["side", "Comes with"], ["serve", "Serve in/on"], ["hide", "Don't print"]];
 const stageSelect = (v, onChange, style) => (
   <select value={v || "before"} onChange={(e) => onChange(e.target.value)} style={style}>{STAGES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>);
 const OZ_PER = { oz: 1, ounce: 1, ounces: 1, lb: 16, lbs: 16, pound: 16, pounds: 16, g: 1 / 28.3495, kg: 35.274 };
@@ -3337,10 +3337,11 @@ function recipeCardHTML(r) {
   const row = (l) => { const q = num(l.qty);
     return `<tr><td>${escHtml(l.item_name)}</td><td class="use">${escHtml(l.portion || "")}</td><td class="amt">${q != null ? `${+q.toFixed(2)} ${escHtml(l.unit || "")}` : ""}</td></tr>`; };
   const at = (k) => lines.filter((l) => (l.stage || "before") === k);
-  const before = at("before"), after = at("after"), serve = at("serve");
+  const before = at("before"), after = at("after"), side = at("side"), serve = at("serve");
   const head = (t) => `<tr class="stage"><td colspan="3">${t}</td></tr>`;
-  const rows = (before.length ? (after.length ? head("Before the oven") : "") + before.map(row).join("") : "")
-    + (after.length ? head("After the oven") + after.map(row).join("") : "");
+  const rows = (before.length ? ((after.length || side.length) ? head("Before the oven") : "") + before.map(row).join("") : "")
+    + (after.length ? head("After the oven") + after.map(row).join("") : "")
+    + (side.length ? head("Comes with") + side.map(row).join("") : "");
   return `<section class="card">
     ${r.image_url ? `<img class="photo" src="${escHtml(r.image_url)}" alt="">` : `<div class="photo none">No photo yet</div>`}
     <div class="band"></div>
