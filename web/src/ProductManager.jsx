@@ -3279,7 +3279,7 @@ function PizzaGuide({ comps, byId, onEdit, showCost, prices, onSavePrices }) {
       <div className="stat" style={{ marginBottom: 6 }}>Every pizza — specialty or build-your-own — follows one rule: 1 topping = full portion, 2 toppings → ¾ of each, 3 or more → ½ of each. Scooped toppings land on the nearest half scoop of the 1/4 cup, and the ounces follow the scoop actually used. Each cell shows <b>what the line uses</b>, then ounces{showCost ? "; with costs on, the portion cost and — on a single topping — food cost against the 1-topping price" : ""}. Tap a topping to edit it.</div>
       <div style={{ overflowX: "auto" }}>
         <table className="tbl" style={{ minWidth: 640 }}>
-          <thead><tr><th>Topping</th>{TOPPING_TIERS.map((t) => <th key={t.n}>{t.label}{t.ratio < 1 ? ` (${tierName(t.ratio)})` : ""}</th>)}<th>Kids</th></tr></thead>
+          <thead><tr><th>Topping</th>{TOPPING_TIERS.map((t) => <th key={t.n}>{t.label}{t.ratio < 1 ? ` (${tierName(t.ratio)})` : ""}</th>)}<th>Kids / calzone</th></tr></thead>
           <tbody>{tops.map((c) => (
             <tr key={c.component_id} onClick={() => onEdit(JSON.parse(JSON.stringify(c)))} style={{ cursor: "pointer" }}>
               <td><b>{c.name}</b>{c.estimated && <div>{estChip}</div>}</td>
@@ -3296,7 +3296,7 @@ function PizzaGuide({ comps, byId, onEdit, showCost, prices, onSavePrices }) {
       <div className="stat" style={{ marginBottom: 6 }}>A pizza gets one sauce. A specialty sauce replaces the base pizza's marinara.</div>
       <div style={{ overflowX: "auto" }}>
         <table className="tbl" style={{ minWidth: 520 }}>
-          <thead><tr><th>Sauce</th><th>Large</th><th>Kids</th></tr></thead>
+          <thead><tr><th>Sauce</th><th>Large</th><th>Kids / calzone</th></tr></thead>
           <tbody>{sauces.map((c) => (
             <tr key={c.component_id} onClick={() => onEdit(JSON.parse(JSON.stringify(c)))} style={{ cursor: "pointer" }}>
               <td><b>{c.name}</b>{c.estimated && <div>{estChip}</div>}</td>
@@ -3645,11 +3645,11 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
               {showCost && <> · {money(lc)}{t.n === 1 && ap != null && lc != null ? ` · ${pct(lc / ap)} food cost` : ""}</>}</div>; })}</div>
         </div>
         {stationOf(c) === "pizza" && <div className="group">
-          <div className="group-t">Kids pizza</div>
+          <div className="group-t">Kids / calzone</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <div className="field" style={{ flex: "0 1 90px" }}><label>Amount ({c.unit})</label><input className="fig" type="number" step="any" value={c.kids_qty ?? ""} onChange={(e) => set("kids_qty", e.target.value)} /></div>
             <div className="field" style={{ flex: "1 1 200px" }}><label>What the line uses</label><input value={c.kids_tool || ""} onChange={(e) => set("kids_tool", e.target.value)} /></div>
-            <div className="field" style={{ flex: "0 1 130px" }}><label>Add-on price (kids)</label><input className="fig" type="number" step="0.01" value={c.kids_addon_price ?? ""} onChange={(e) => set("kids_addon_price", e.target.value)} /></div>
+            <div className="field" style={{ flex: "0 1 130px" }}><label>Add-on price (kids / calzone)</label><input className="fig" type="number" step="0.01" value={c.kids_addon_price ?? ""} onChange={(e) => set("kids_addon_price", e.target.value)} /></div>
           </div>
         </div>}
         <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
