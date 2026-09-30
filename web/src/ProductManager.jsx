@@ -3157,6 +3157,16 @@ function MenuRecipes({ products, receipts }) {
   const extra = [...new Set(list.map((r) => r.category || "Other"))].filter((c) => !MENU_CATS.includes(c));
   const blank = { name: "", category: "Pizza", kind: "standard", menu_price: "", method: "", active: true, lines: [], topping_component_ids: [] };
 
+  async function duplicateRow(r) {
+    const name = prompt("Name for the copy", `${r.name} (copy)`);
+    if (!name || !name.trim()) return;
+    try {
+      const lines = (r.lines || []).map((l) => ({ stage: l.stage || "before", product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null,
+        item_name: l.item_name, qty: l.qty, unit: l.unit, factor: l.factor, portion: l.portion, note: l.note, fallback_cost: l.fallback_cost }));
+      await db.saveMenuRecipe({ ...r, recipe_id: null, name: name.trim() }, lines);
+      load();
+    } catch (e) { alert("Copy failed: " + (e.message || e)); }
+  }
   async function moveRow(r, d, grp) {
     const a = grp.slice(); const i = a.findIndex((x) => x.recipe_id === r.recipe_id), j = i + d;
     if (j < 0 || j >= a.length) return;
@@ -3175,7 +3185,8 @@ function MenuRecipes({ products, receipts }) {
             <tr key={r.recipe_id} onClick={() => !reorder && setEdit(JSON.parse(JSON.stringify(r)))} style={{ cursor: reorder ? "default" : "pointer", opacity: r.active ? 1 : 0.55 }}>
               {reorder && <td style={{ whiteSpace: "nowrap" }}>
                 <button className="mini" style={{ padding: "3px 7px" }} disabled={i === 0} onClick={() => moveRow(r, -1, grp)}>↑</button>
-                <button className="mini" style={{ padding: "3px 7px" }} disabled={i === grp.length - 1} onClick={() => moveRow(r, 1, grp)}>↓</button></td>}
+                <button className="mini" style={{ padding: "3px 7px" }} disabled={i === grp.length - 1} onClick={() => moveRow(r, 1, grp)}>↓</button>
+                <button className="mini" style={{ padding: "3px 7px" }} title="Duplicate" onClick={(e) => { e.stopPropagation(); duplicateRow(r); }}>⧉</button></td>}
               <td>{r.image_url && <img src={r.image_url} alt="" style={{ width: 34, height: 34, objectFit: "cover", borderRadius: 6, float: "left", marginRight: 8 }} />}<b>{r.name}</b>{(r.kind === "pizza_base" || r.kind === "wing_base") && <span className="bchip" style={{ marginLeft: 6 }}>base</span>}
                 {r.kind === "pizza_specialty" && <div className="stat">{[compsById[r.sauce_component_id]?.name, ...(r.topping_component_ids || []).map((id) => compsById[id]?.name)].filter(Boolean).join(" · ")}</div>}
                 {r.kind === "wing_specialty" && <div className="stat">{[recipesById[r.base_recipe_id]?.name, compsById[r.sauce_component_id]?.name].filter(Boolean).join(" + ")}</div>}
@@ -3722,6 +3733,21 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
       await db.saveMenuRecipe(r, lines); onSaved();
     } catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
   }
+  async function duplicate() {
+    const name = prompt("Name for the copy", `${r.name} (copy)`);
+    if (!name || !name.trim()) return;
+    setBusy(true);
+    try {
+      const lines = r.lines.map((l) => {
+        const p = l.product_id ? byId[l.product_id] : null;
+        return { stage: l.stage || "before", product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null,
+          item_name: (l.item_name || p?.name || RECIPE_CTX.recipesById[l.sub_recipe_id]?.name || "Unnamed").trim(),
+          qty: num(l.qty), unit: l.unit || null, factor: num(l.factor), portion: l.portion || null, note: l.note || null, fallback_cost: num(l.fallback_cost) };
+      });
+      await db.saveMenuRecipe({ ...r, recipe_id: null, name: name.trim(), updated_by: null, updated_at: null }, lines);
+      onSaved();
+    } catch (e) { alert("Copy failed: " + (e.message || e)); setBusy(false); }
+  }
   async function remove() {
     if (!r.recipe_id) { onClose(); return; }
     if (!confirm(`Delete ${r.name}? This can't be undone. (Unchecking "On the menu" hides it instead.)`)) return;
@@ -3904,6 +3930,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
           <button className="btn btn-primary" disabled={busy} onClick={save}>Save recipe</button>
           <button className="btn btn-ghost" disabled={busy} onClick={onClose}>Cancel</button>
           <button className="btn btn-ghost" disabled={busy} onClick={() => printRecipeCards([r], r.name)} title="Printable card for the team — no costs">🖨 Print card</button>
+          {r.recipe_id && <button className="btn btn-ghost" disabled={busy} onClick={duplicate} title="Save a copy with everything filled in">⧉ Duplicate</button>}
           {r.recipe_id && <button className="btn btn-ghost" disabled={busy} style={{ marginLeft: "auto", color: "#B0271B" }} onClick={remove}>Delete</button>}
         </div>
       </div>
