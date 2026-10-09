@@ -483,7 +483,39 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
   );
 }
 
+// Pick from what the catalog already uses, or type something new. Keeping the
+// existing values in a list stops the near-duplicates ("Bag", "bag", "bags")
+// that break unit matching and split categories in two.
+function Combo({ value, onChange, options, placeholder, allowBlank = true }) {
+  const [adding, setAdding] = useState(false);
+  const seen = new Map();
+  for (const o of (options || [])) {
+    const t = String(o == null ? "" : o).trim();
+    if (t && !seen.has(t.toLowerCase())) seen.set(t.toLowerCase(), t);
+  }
+  const cur = String(value == null ? "" : value).trim();
+  if (cur && !seen.has(cur.toLowerCase())) seen.set(cur.toLowerCase(), cur);
+  const opts = [...seen.values()].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  if (adding) return (
+    <div style={{ display: "flex", gap: 6 }}>
+      <input className="grow" autoFocus placeholder={placeholder} value={value || ""} onChange={(e) => onChange(e.target.value)} />
+      <button className="mini" title="Choose from the list instead" onClick={() => setAdding(false)}>↩</button>
+    </div>
+  );
+  return (
+    <select value={cur} onChange={(e) => { if (e.target.value === "__new__") { onChange(""); setAdding(true); } else onChange(e.target.value); }}>
+      {allowBlank && <option value="">—</option>}
+      {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+      <option value="__new__">➕ Add new…</option>
+    </select>
+  );
+}
+// Weight/volume units the app can actually convert between, so they are always
+// offered even before anything in the catalog uses them.
+const KNOWN_MEASURES = ["each", "oz", "lb", "g", "kg", "fl oz", "cup", "tsp", "tbsp", "qt", "gal", "ml", "l", "ct"];
+
 function Editor({ product, products, vendors, locations, units, onClose, onSaved }) {
+  const catalogVals = (k) => (products || []).map((x) => x[k]);
   const [p, setP] = useState(product);
   const [busy, setBusy] = useState(false);
   const [bc, setBc] = useState("");
@@ -502,7 +534,23 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
 
   function addVendor() {
     const v = vendors.find((x) => !p.vendors.some((pv) => pv.vendor_id === x.vendor_id));
-    if (v) setP((s) => ({ ...s, vendors: [...s.vendors, { vendor_id: v.vendor_id, name: v.name, price: null, primary: s.vendors.length === 0 }] }));
+    if (!v) return;
+    setP((s) => {
+      // A second vendor is usually the same item from someone else, so start as
+      // a copy of the first and change only what differs. The vendor, its item
+      // number and "primary" are never copied.
+      const base = s.vendors[0] || {};
+      const row = {
+        vendor_id: v.vendor_id, name: v.name, primary: s.vendors.length === 0,
+        price: base.price ?? null,
+        packages_per_case: base.packages_per_case ?? null,
+        usage_per_package: base.usage_per_package ?? null,
+        package_unit: base.package_unit ?? null,
+        vendor_sku: "",
+        copied: s.vendors.length > 0,
+      };
+      return { ...s, vendors: [...s.vendors, row] };
+    });
   }
   function addLoc() {
     const l = locations.find((x) => !p.locations.some((pl) => pl.location_id === x.location_id));
@@ -520,9 +568,14 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
   async function save() {
     setBusy(true);
     try {
-      let pid = p.product_id;
-      if (isNew) { pid = await db.createProduct(p); }
-      else await db.updateProduct(p);
+      // count_per_case is a legacy mirror of the pack fields. Anything still
+      // reading it must see the same number the editor shows.
+      // `copied` is a UI-only marker on a vendor row — never send it to the table.
+      const rec = { ...p, count_per_case: usagePerCase(p),
+        vendors: (p.vendors || []).map(({ copied, ...v }) => v) };
+      let pid = rec.product_id;
+      if (isNew) { pid = await db.createProduct(rec); }
+      else await db.updateProduct(rec);
       if (prepOn && pid) { try { await db.setPrepPar(pid, prepUnit, prep); } catch (e) { /* non-fatal */ } }
       onSaved();
     } catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
@@ -552,7 +605,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
           <div className="group-t">Identity</div>
           <div className="frow"><div className="field"><label>Name</label><input value={p.name} onChange={(e) => set("name", e.target.value)} /></div></div>
           <div className="frow">
-            <div className="field"><label>Category</label><input value={p.category || ""} onChange={(e) => set("category", e.target.value)} /></div>
+            <div className="field"><label>Category</label><Combo value={p.category} onChange={(v) => set("category", v)} options={catalogVals("category")} placeholder="new category" /></div>
             <div className="field"><label>Brand</label><input value={p.brand || ""} onChange={(e) => set("brand", e.target.value)} /></div>
           </div>
           <div className="frow"><div className="field"><label>SUPC / Item #</label><input value={p.supc || ""} onChange={(e) => set("supc", e.target.value)} /></div></div>
@@ -569,7 +622,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
         <div className="group">
           <div className="group-t">Sizes & buying</div>
           <div className="frow">
-            <div className="field"><label>Package unit (what you count)</label><input value={p.package_unit || ""} onChange={(e) => set("package_unit", e.target.value)} placeholder="bag, chub, jar, each…" /></div>
+            <div className="field"><label>Package unit (what you count)</label><Combo value={p.package_unit} onChange={(v) => set("package_unit", v)} options={catalogVals("package_unit")} placeholder="bag, chub, jar, each…" /></div>
             <div className="field"><label>Buy by</label>
               <select value={p.buy_by || "case"} onChange={(e) => set("buy_by", e.target.value)}>
                 <option value="case">Case</option><option value="package">Package</option>
@@ -581,12 +634,13 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             <div className="field"><label>Par (in {p.buy_by === "package" ? "packages" : "cases"})</label><input type="number" step="0.1" value={p.not_stocked ? 0 : (p.par_level ?? "")} disabled={!!p.not_stocked} title={p.not_stocked ? "Not-stocked items have no par (won't auto-reorder)" : ""} onChange={(e) => set("par_level", num(e.target.value))} /></div>
           </div>
           <div className="frow">
-            <div className="field"><label>Size unit (what's in a package)</label><input value={p.usage_measure || ""} onChange={(e) => set("usage_measure", e.target.value)} placeholder="each, lb, oz, ct…" /></div>
+            <div className="field"><label>Size unit (what&apos;s in a package)</label><Combo value={p.usage_measure} onChange={(v) => set("usage_measure", v)} options={[...KNOWN_MEASURES, ...catalogVals("usage_measure")]} placeholder="each, lb, oz, ct…" /></div>
             <div className="field"><label>Size per package</label><input type="number" min="0" step="0.001" value={p.usage_per_package ?? ""} onChange={(e) => set("usage_per_package", num(e.target.value))} /></div>
           </div>
           <div className="stat" style={{ marginTop: 2 }}>
             1 case = <b>{num(p.packages_per_case) || 1} {(p.package_unit || "package") + ((num(p.packages_per_case) || 1) === 1 ? "" : "s")}</b>{(num(p.usage_per_package) || 1) > 1 ? <> · 1 {p.package_unit || "package"} = <b>{num(p.usage_per_package) || 1} {p.usage_measure || "each"}</b></> : null}. You count and report in <b>cases &amp; {(p.package_unit || "package") + "s"}</b>; order by the <b>{p.buy_by || "case"}</b>.
           </div>
+          {packProblem(p) && <div className="err" style={{ marginTop: 8 }}><b>This item can&rsquo;t be costed correctly.</b> {packProblem(p)}</div>}
           <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 14, marginTop: 10 }}>
             <input type="checkbox" style={{ marginTop: 3 }} checked={!!p.count_whole_only} onChange={(e) => set("count_whole_only", e.target.checked)} />
             <span>Don&apos;t count in <b>{p.usage_measure || "each"}</b> — count cases and {(p.package_unit || "package") + "s"} only.
@@ -749,6 +803,7 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
                 <label style={{ width: 84 }}><span className="stat">size/pkg</span><input className="fig" type="number" min="0" step="0.001" value={v.usage_per_package ?? ""} placeholder={String(p.usage_per_package ?? 1)} onChange={(e) => upd({ usage_per_package: num(e.target.value) })} /></label>
                 <label style={{ width: 88 }}><span className="stat">pkg name</span><input value={v.package_unit ?? ""} placeholder={p.package_unit || "package"} onChange={(e) => upd({ package_unit: e.target.value })} /></label>
                 <label style={{ width: 96 }}><span className="stat">vendor item #</span><input value={v.vendor_sku ?? ""} onChange={(e) => upd({ vendor_sku: e.target.value })} /></label>
+                {v.copied && <button className="mini" title="Clear the copied pack and price and start this vendor empty" onClick={() => upd({ price: null, packages_per_case: null, usage_per_package: null, package_unit: null, copied: false })}>clear copy</button>}
               </div>
               <div className="stat" style={{ marginTop: 5 }}>
                 case = {r1(vPPC(p, v))} {vPkgName(p, v, 2)} of {r1(vUPP(p, v))} {p.usage_measure || "each"} = <b>{r1(vUnitsPerCase(p, v))} {p.usage_measure || "each"}</b>
@@ -1395,8 +1450,11 @@ function Receive({ products, vendors, reload }) {
       shopping_line_id: r.shopping_line_id, product_id: Number(r.product_id),
       vendor_id: r.vendor_id ? Number(r.vendor_id) : null,
       qty: num(r.qty), unit_cost: (r.case_cost !== "" && r.case_cost != null) ? num(r.case_cost) : null,
-      count_per_case: r.count_per_case ?? byId[r.product_id]?.count_per_case ?? 1,
-      units_per_package: r.units_per_package ?? byId[r.product_id]?.usage_per_package ?? 1,
+      // Pack math is the single source of truth. The legacy count_per_case column
+      // does NOT update when you edit "Size per package", so reading it here was
+      // storing 1 oz for a 25.4 oz bottle and pricing syrup at $6.49/oz.
+      count_per_case: byId[r.product_id] ? usagePerCase(byId[r.product_id]) : (r.count_per_case ?? 1),
+      units_per_package: byId[r.product_id] ? usagePerPack(byId[r.product_id]) : (r.units_per_package ?? 1),
       vendor_units_per_case: r.vendor_units_per_case ?? null, vendor_units_per_package: r.vendor_units_per_package ?? null,
       order_unit: normalizeOrderUnit(r.order_unit, byId[r.product_id]),
     })).filter((r) => r.product_id && num(r.qty) > 0);
@@ -1589,7 +1647,7 @@ function computeItemStats(products, counts, receipts) {
   const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d >= d0) && x.d < d1) ? x.units : 0), 0);
   const stats = {};
   for (const p of products) {
-    const cpc = p.count_per_case || 1;
+    const cpc = usagePerCase(p);
     const it = byItem[famKey(p)];
     if (!it) { stats[p.product_id] = { onhandUnits: 0, usedUnits: 0, suggestCases: 0 }; continue; }
     const weeks = Object.keys(it).sort();
@@ -1634,7 +1692,7 @@ function computeSuggestions(products, counts, receipts, locations) {
     const last = usages.length ? usages[usages.length - 1] : 0;
     const avg = usages.length ? usages.reduce((a, x) => a + x, 0) / usages.length : 0;
     const forecast = 0.6 * last + 0.4 * avg;                   // count units used per week
-    const cpc = p.count_per_case || 1;
+    const cpc = usagePerCase(p);
     const onhandCases = parWeekTotal(p, it, weeks[weeks.length - 1]) / cpc;   // in-use BIB/Icee is partial: excluded from par stock
     const usageCases = forecast / cpc;
     const parCases = Number(p.par_level) || 0;
@@ -2987,6 +3045,25 @@ function lastPaidByProduct(receipts, byId) {
   }
   return out;
 }
+// Can this item produce a believable cost at all?
+// A divisible count unit (oz, lb, cup, ml) with a pack that says one package
+// holds exactly ONE of them is a contradiction: a $6.49 bottle of syrup then
+// reads as $6.49/oz. The size was never filled in. Say so instead of quietly
+// returning a number that looks like a price.
+const DIVISIBLE = (u) => { const k = String(u || "").toLowerCase().trim(); return OZ_PER[k] != null || VOL_TSP[k] != null || FLOZ_PER[k] != null; };
+function packProblem(p) {
+  if (!p) return null;
+  const legacy = num(p.count_per_case);
+  if (legacy != null && Math.abs(legacy - usagePerCase(p)) > 0.001)
+    return `pack fields say 1 case = ${+usagePerCase(p).toFixed(3)} ${measure(p)}, but the stored count_per_case is ${+legacy.toFixed(3)}. Open and re-save this item to put them back in step.`;
+  const m = measure(p), pkg = p.package_unit || "package";
+  if (!DIVISIBLE(m)) return null;                       // counted in eaches/plates/boats — 1:1 is fine
+  const per = usagePerCase(p);
+  if (per > 1.0001) return null;                        // pack math already says how many
+  if (sameUnit(p.size_unit, m) && num(p.size) > 1) return null;
+  return `pack setup says 1 ${pkg} = 1 ${m}. Set how many ${m} are in one ${pkg} (or fill in its size) or every cost off this item is wrong.`;
+}
+
 // The cost per count unit a recipe uses: what we last paid, else the vendor's list price.
 function unitCost(p) {
   if (!p) return null;
@@ -3162,7 +3239,8 @@ function lineCostInfo(l, byId, seen) {
   const p = l.product_id ? byId[l.product_id] : null;
   const cpu = p ? unitCost(p) : null;
   const f = effFactor(l, p);
-  if (p && cpu != null && f != null) return { cost: qty * f * cpu, src: paidInfo(p) ? "invoice" : "app", p };
+  const pp = packProblem(p);
+  if (p && cpu != null && f != null) return { cost: qty * f * cpu, src: pp ? "badpack" : (paidInfo(p) ? "invoice" : "app"), p, why: pp || undefined };
   const why = subWhy ? subWhy : !p ? "not linked to an item" : cpu == null ? "no delivery or vendor price on this item" : `no size on ${p.name} — set 1 ${l.unit} = ? ${measure(p)}`;
   const fb = num(l.fallback_cost);
   if (fb != null) return { cost: qty * fb, src: "vendor", why };
@@ -3174,7 +3252,8 @@ function costLines(lines, byId) {
   return { total, missing, vendor };
 }
 const pct = (x) => (x == null || !isFinite(x)) ? "—" : (x * 100).toFixed(1) + "%";
-const costChip = (c) => c.src === "free" ? <span className="bchip" style={{ background: "#F1F1F3", borderColor: "#B9BCC4", color: "#5b6069" }} title="deliberately free — tap water, ice">no cost</span>
+const costChip = (c) => c.src === "badpack" ? <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={c.why}>check pack size</span>
+  : c.src === "free" ? <span className="bchip" style={{ background: "#F1F1F3", borderColor: "#B9BCC4", color: "#5b6069" }} title="deliberately free — tap water, ice">no cost</span>
   : c.src === "invoice" ? (() => {
       // When the price came in on an alternate, say so — otherwise the number
       // looks like it appeared from nowhere.
@@ -3266,9 +3345,28 @@ function MenuRecipes({ products, receipts }) {
       </table>
     </div>);
 
+  // Every item any recipe actually uses whose pack setup can't yield a real cost.
+  const usedPids = new Set();
+  for (const r of rows) for (const l of (r.lines || [])) if (l.product_id) usedPids.add(l.product_id);
+  for (const c of comps) for (const l of (c.lines || [])) if (l.product_id) usedPids.add(l.product_id);
+  const packBad = [...usedPids].map((id) => byId[id]).filter((p) => p && packProblem(p))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
   return (
     <div>
       {err && <div className="err">{err}</div>}
+      {showCost && packBad.length > 0 && (
+        <div className="err" style={{ marginBottom: 10 }}>
+          <b>{packBad.length} item{packBad.length === 1 ? "" : "s"} can&rsquo;t be costed correctly yet.</b>{" "}
+          Each one is counted in a divisible unit (oz, lb, cup) but its pack setup still says one package holds
+          exactly one of them — so the entire package price lands on a single unit. In <b>Catalog</b>, open each
+          item below and set how many of that unit are really in one package (a 25.4&nbsp;oz bottle of syrup is
+          25.4, not 1).
+          <div style={{ marginTop: 6, fontWeight: 600 }}>
+            {packBad.map((p) => <span key={p.product_id} className="bchip" style={{ marginRight: 6, marginTop: 4, display: "inline-block", background: "#fff", borderColor: "#E0392B", color: "#B0271B" }} title={packProblem(p)}>#{p.product_id} {String(p.name).trim()} · counted in {measure(p)}</span>)}
+          </div>
+        </div>
+      )}
       <div className="toolbar">
         <input placeholder="Search menu recipes…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
         <label className="stat" style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 0 }}>
@@ -3661,7 +3759,7 @@ function WingComponentEditor({ comp, products, byId, sizes, onClose, onSaved, sh
           <div className="field" style={{ marginTop: 8 }}><label>Inventory item</label>
             <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} free={num(c.fallback_cost) === 0 && !c.product_id && !c.sub_recipe_id} products={products} onPick={pick} />
             {c.sub_recipe_id && <div className="stat">{subInfo(c.sub_recipe_id, showCost)}</div>}
-            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}</div>}
+            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}{packProblem(p) && <div style={{ color: "#B0271B", fontWeight: 600 }}>⚠ {packProblem(p)}</div>}</div>}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
             <div className="field" style={{ flex: "0 1 100px" }}><label>Unit</label><select value={c.unit || "oz"} onChange={(e) => setC((s) => ({ ...s, unit: e.target.value, factor: p ? (suggestFactor(p, e.target.value) ?? s.factor) : s.factor }))}>{RECIPE_UNITS.map((u) => <option key={u}>{u}</option>)}</select></div>
@@ -3728,7 +3826,7 @@ function PizzaComponentEditor({ comp, products, byId, onClose, onSaved, showCost
           <div className="field" style={{ marginTop: 8 }}><label>Inventory item</label>
             <ItemPicker productId={c.product_id} subId={c.sub_recipe_id} free={num(c.fallback_cost) === 0 && !c.product_id && !c.sub_recipe_id} products={products} onPick={pick} />
             {c.sub_recipe_id && <div className="stat">{subInfo(c.sub_recipe_id, showCost)}</div>}
-            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}</div>}
+            {p && <div className="stat">counted in {measure(p)}{showCost && <> · {unitCost(p) != null ? `$${unitCost(p).toFixed(4)}/${measure(p)} (${priceNote(p)})` : "no delivery or vendor price"}</>}{packProblem(p) && <div style={{ color: "#B0271B", fontWeight: 600 }}>⚠ {packProblem(p)}</div>}</div>}
           </div>
         </div>
         <div className="group">
@@ -3996,7 +4094,7 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                   <tr key={l._k}>
                     <td>
                       <ItemPicker productId={l.product_id} subId={l.sub_recipe_id} free={isFreeLine(l)} products={products} excludeRecipeId={r.recipe_id} onPick={(v) => pick(l, v)} style={{ width: "100%" }} />
-                      <div className="stat">{sub ? subInfo(sub.recipe_id, showCost) : p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? <>${cpu.toFixed(4)}/{measure(p)} <span style={{ color: paidInfo(p) ? "#0a5c50" : "#9a5b00" }}>({priceNote(p)})</span></> : <span style={{ color: "#B0271B" }}>no delivery or vendor price</span>}</>}</> : isFreeLine(l) ? <span>No cost — tap water, ice, or anything that isn't bought</span> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
+                      <div className="stat">{sub ? subInfo(sub.recipe_id, showCost) : p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? <>${cpu.toFixed(4)}/{measure(p)} <span style={{ color: paidInfo(p) ? "#0a5c50" : "#9a5b00" }}>({priceNote(p)})</span></> : <span style={{ color: "#B0271B" }}>no delivery or vendor price</span>}</>}{packProblem(p) && <div style={{ color: "#B0271B", fontWeight: 600 }}>⚠ {packProblem(p)}</div>}</> : isFreeLine(l) ? <span>No cost — tap water, ice, or anything that isn't bought</span> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
                       {l.item_name && !(sub && l.item_name === sub.name) && (!p || l.item_name !== p.name) && <div className="stat">Recipe says: {l.item_name}</div>}
                     </td>
                     <td><div style={{ display: "flex", gap: 4 }}>
@@ -4552,7 +4650,7 @@ function ItemHistory({ product, locations, openItem, onClose, onChanged }) {
   const [rows, setRows] = useState(null);
   const [recs, setRecs] = useState(null);
   const [busy, setBusy] = useState(false);
-  const cpc = product.count_per_case || 1;
+  const cpc = usagePerCase(product);
   const uMeas = measure(product);
   const today = new Date().toISOString().slice(0, 10);
   const locs = locations || [];
