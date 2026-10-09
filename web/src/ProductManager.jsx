@@ -1549,31 +1549,53 @@ function Receive({ products, vendors, reload }) {
   );
 }
 
-function computeItemStats(products, counts, receipts) {
+// Counts and deliveries keyed by the PRIMARY item, with alternates folded in
+// and converted to the primary's count unit. Merging HERE rather than after
+// the week math matters: otherwise each member's deliveries get windowed by
+// its OWN count dates, so cheese bought as the alternate lands outside the
+// primary's week and disappears from Received.
+const famKey = (p) => String(p && p.backup_for ? p.backup_for : p && p.product_id);
+function familyMaps(products, counts, receipts) {
+  const byId = Object.fromEntries((products || []).map((p) => [p.product_id, p]));
+  const rootKey = (pid) => { const p = byId[pid], r = p && p.backup_for; return String(r && byId[r] ? r : pid); };
+  const ratio = (pid) => {
+    const p = byId[pid]; if (!p || !p.backup_for || !byId[p.backup_for]) return 1;
+    return altRatio(p, byId[p.backup_for]) ?? 1;   // can't convert -> treat 1:1 rather than drop the stock
+  };
   const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
   const byItem = {};
-  for (const c of counts) {
+  for (const c of counts || []) {
     const w = wkk(c.counted_at);
-    const it = (byItem[c.product_id] ||= {}); const wo = (it[w] ||= {});
+    const it = (byItem[rootKey(c.product_id)] ||= {}); const wo = (it[w] ||= {});
     const t = new Date(c.counted_at).getTime();
-    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
+    const slot = `${c.product_id}:${c.location_id}`;   // an alternate on the same shelf is its own slot
+    if (!wo[slot] || t >= wo[slot].t) wo[slot] = { qty: Number(c.qty) * ratio(c.product_id), t, d: c.counted_at.slice(0, 10), lid: c.location_id, pid: c.product_id };
   }
   const recByItem = {};
-  for (const r of receipts) for (const l of (r.receipt_line || [])) {
-    (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || Number(l.purchase_qty) || 0 });
+  for (const r of receipts || []) for (const l of (r.receipt_line || [])) {
+    (recByItem[rootKey(l.product_id)] ||= []).push({
+      d: String(r.received_date).slice(0, 10),
+      units: (Number(l.qty_count_units) || Number(l.purchase_qty) || 0) * ratio(l.product_id),
+      pid: l.product_id,
+    });
   }
+  return { byId, byItem, recByItem, rootKey, ratio };
+}
+
+function computeItemStats(products, counts, receipts) {
+  const { byItem, recByItem } = familyMaps(products, counts, receipts);
   const wtotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
   const wdate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;
   const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d >= d0) && x.d < d1) ? x.units : 0), 0);
   const stats = {};
   for (const p of products) {
     const cpc = p.count_per_case || 1;
-    const it = byItem[p.product_id];
+    const it = byItem[famKey(p)];
     if (!it) { stats[p.product_id] = { onhandUnits: 0, usedUnits: 0, suggestCases: 0 }; continue; }
     const weeks = Object.keys(it).sort();
     const usages = [];
     for (let i = 1; i < weeks.length; i++) {
-      const recd = between(recByItem[p.product_id] || [], wdate(it, weeks[i - 1]), wdate(it, weeks[i]));
+      const recd = between(recByItem[famKey(p)] || [], wdate(it, weeks[i - 1]), wdate(it, weeks[i]));
       let u = wtotal(it, weeks[i - 1]) + recd - wtotal(it, weeks[i]); if (u < 0) u = 0; usages.push(u);
     }
     const last = usages.length ? usages[usages.length - 1] : 0;
@@ -1590,34 +1612,22 @@ function computeItemStats(products, counts, receipts) {
 
 function computeSuggestions(products, counts, receipts, locations) {
   const locName = Object.fromEntries((locations || []).map((l) => [l.location_id, l.name]));
-  const parWeekTotal = (p, it, w) => Object.entries(it[w]).reduce((a, [lid, x]) => {
+  const parWeekTotal = (p, it, w) => Object.values(it[w]).reduce((a, x) => {
     const partialItem = wholeOnly(p) || /icee/i.test(p.category || "") || /icee/i.test(p.name || "");
-    return a + ((partialItem && isInUseLoc(locName[lid])) ? 0 : x.qty);
+    return a + ((partialItem && isInUseLoc(locName[x.lid])) ? 0 : x.qty);
   }, 0);
-  const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
-  const byItem = {};
-  for (const c of counts) {
-    const w = wkk(c.counted_at);
-    const it = (byItem[c.product_id] ||= {});
-    const wo = (it[w] ||= {});
-    const t = new Date(c.counted_at).getTime();
-    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
-  }
-  const recByItem = {};
-  for (const r of receipts) for (const l of (r.receipt_line || [])) {
-    (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || (Number(l.purchase_qty) || 0) });
-  }
+  const { byItem, recByItem } = familyMaps(products, counts, receipts);
   const wtotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
   const wdate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;
   const between = (rl, d0, d1) => rl.reduce((a, x) => a + (((d0 == null || x.d >= d0) && x.d < d1) ? x.units : 0), 0);
   const out = [];
   for (const p of products) {
     if (p.backup_for || p.not_stocked) continue;               // alternates order via main item; not-stocked never auto-reorders
-    const it = byItem[p.product_id]; if (!it) continue;        // need at least one count to know on-hand
+    const it = byItem[famKey(p)]; if (!it) continue;        // need at least one count to know on-hand
     const weeks = Object.keys(it).sort();
     const usages = [];
     for (let i = 1; i < weeks.length; i++) {
-      const recd = between(recByItem[p.product_id] || [], wdate(it, weeks[i - 1]), wdate(it, weeks[i]));
+      const recd = between(recByItem[famKey(p)] || [], wdate(it, weeks[i - 1]), wdate(it, weeks[i]));
       let u = wtotal(it, weeks[i - 1]) + recd - wtotal(it, weeks[i]); if (u < 0) u = 0;
       usages.push(u);
     }
@@ -2951,7 +2961,29 @@ function lastPaidByProduct(receipts, byId) {
       : (unitsPerPurchase(byId?.[l.product_id]) ? uc / unitsPerPurchase(byId[l.product_id]) : null);
     const d = r.received_date || "";
     const cur = out[l.product_id];
-    if (per != null && per > 0 && (!cur || d > cur.date)) out[l.product_id] = { per, date: d };
+    if (per != null && per > 0 && (!cur || d > cur.date)) out[l.product_id] = { per, date: d, from: l.product_id };
+  }
+  // Alternates are the same ingredient, so the family shares one price: whichever
+  // member was delivered most recently sets the cost for all of them, converted
+  // into each one's own count unit. Buying the backup brand updates the recipe.
+  const all = Object.values(byId || {});
+  for (const primary of all) {
+    if (primary.backup_for) continue;
+    const fam = [primary].concat(all.filter((x) => Number(x.backup_for) === Number(primary.product_id)));
+    if (fam.length < 2) continue;
+    let best = null;
+    for (const m of fam) {
+      const e = out[m.product_id];
+      if (e && (!best || (e.date || "") > (best.e.date || ""))) best = { m, e };
+    }
+    if (!best) continue;
+    for (const m of fam) {
+      if (m.product_id === best.m.product_id) continue;
+      // best.e.per is $ per ONE of best.m's count units; r = m's units in one of best.m's
+      const r = unitConv(measure(best.m), measure(m));
+      if (r == null || !(r > 0)) continue;
+      out[m.product_id] = { per: best.e.per / r, date: best.e.date, from: best.m.product_id };
+    }
   }
   return out;
 }
@@ -3002,6 +3034,26 @@ function sizePerUsageUnit(p, unit) {
 }
 // What a recipe line should be measured in for this product, unless you say otherwise.
 const naturalUnit = (p) => String(p?.size_unit || measure(p) || "each").toLowerCase().trim();
+
+// --- Alternates -----------------------------------------------------------
+// An alternate (backup_for) is the SAME ingredient from a different vendor or
+// pack. Everything about it belongs to the item it backs up: its stock, its
+// deliveries, its usage and its price. These two helpers are what every
+// rollup goes through, so "interchangeable" means one thing everywhere.
+//   rootId  — the primary this product reports under (itself, if it is one)
+//   altRatio — primary count units in ONE of the alternate's count units.
+//              pound -> pound is 1; oz -> pound is 0.0625. null means the
+//              units can't be converted, so we do NOT merge and silently
+//              corrupt the numbers.
+const rootId = (p) => Number(p?.backup_for || p?.product_id);
+function altRatio(alt, primary) {
+  if (!alt || !primary) return null;
+  if (alt.product_id === primary.product_id) return 1;
+  return unitConv(measure(alt), measure(primary));
+}
+// Every product reporting under `primary`, primary first.
+const familyOf = (primary, products) =>
+  [primary].concat((products || []).filter((x) => Number(x.backup_for) === Number(primary?.product_id)));
 function suggestFactor(p, unit) {
   if (!p) return null;
   const m = String(measure(p)).toLowerCase().trim(), u = String(unit || "").toLowerCase().trim();
@@ -3110,7 +3162,7 @@ function lineCostInfo(l, byId, seen) {
   const p = l.product_id ? byId[l.product_id] : null;
   const cpu = p ? unitCost(p) : null;
   const f = effFactor(l, p);
-  if (p && cpu != null && f != null) return { cost: qty * f * cpu, src: paidInfo(p) ? "invoice" : "app" };
+  if (p && cpu != null && f != null) return { cost: qty * f * cpu, src: paidInfo(p) ? "invoice" : "app", p };
   const why = subWhy ? subWhy : !p ? "not linked to an item" : cpu == null ? "no delivery or vendor price on this item" : `no size on ${p.name} — set 1 ${l.unit} = ? ${measure(p)}`;
   const fb = num(l.fallback_cost);
   if (fb != null) return { cost: qty * fb, src: "vendor", why };
@@ -3123,7 +3175,12 @@ function costLines(lines, byId) {
 }
 const pct = (x) => (x == null || !isFinite(x)) ? "—" : (x * 100).toFixed(1) + "%";
 const costChip = (c) => c.src === "free" ? <span className="bchip" style={{ background: "#F1F1F3", borderColor: "#B9BCC4", color: "#5b6069" }} title="deliberately free — tap water, ice">no cost</span>
-  : c.src === "invoice" ? <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }} title="what we last paid for it">invoice</span>
+  : c.src === "invoice" ? (() => {
+      // When the price came in on an alternate, say so — otherwise the number
+      // looks like it appeared from nowhere.
+      const inf = paidInfo(c.p), via = inf && inf.from && c.p && inf.from !== c.p.product_id ? RECIPE_CTX.byId?.[inf.from] : null;
+      return <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }} title={via ? `last paid, bought as ${via.name}` : "what we last paid for it"}>invoice{via ? " · alt" : ""}</span>;
+    })()
   : c.src === "recipe" ? <span className="bchip" style={{ background: "#EEF0FF", borderColor: "#5A5FC8", color: "#3a3f9e" }}>house</span>
   : c.src === "app" ? <span className="bchip" style={{ background: "#E6F4EF", borderColor: "#0E7C6B", color: "#0a5c50" }}>app</span>
   : c.src === "vendor" ? <span className="bchip" style={{ background: "#FFF3DC", borderColor: "#E0A320", color: "#7a5200" }} title={c.why}>vendor</span>
@@ -4423,21 +4480,9 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
   const r1 = (n) => Math.round(n * 10) / 10;
   // per item: counts grouped by ISO week; the LATEST count within a week IS that week's number
   // (so recounting the same item daily just updates the number — it never adds).
-  const wkk = (d) => weekStart(d.slice(0, 10)).toISOString().slice(0, 10);
-  const byItem = {};
-  for (const c of counts) {
-    const w = wkk(c.counted_at);
-    const it = (byItem[c.product_id] ||= {}); const wo = (it[w] ||= {});
-    const t = new Date(c.counted_at).getTime();
-    if (!wo[c.location_id] || t >= wo[c.location_id].t) wo[c.location_id] = { qty: Number(c.qty), t, d: c.counted_at.slice(0, 10) };
-  }
-  const recByItem = {};
-  for (const r of receipts) for (const l of (r.receipt_line || [])) {
-    (recByItem[l.product_id] ||= []).push({ d: String(r.received_date).slice(0, 10), units: Number(l.qty_count_units) || Number(l.purchase_qty) || 0 });
-  }
+  const { byId, byItem, recByItem } = familyMaps(products, counts, receipts);
   const wkTotal = (it, w) => Object.values(it[w]).reduce((a, x) => a + x.qty, 0);
   const wkDate = (it, w) => Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d;   // the week's representative (latest) count date
-  const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
   const label = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
   const pids = [...new Set([...Object.keys(byItem), ...Object.keys(recByItem)])];
   const raw = pids.map((pid) => {
@@ -4461,22 +4506,10 @@ function WeeklyReviewReport({ counts, receipts, products, onOpen, reload }) {
     const used = (prev != null && cur != null) ? prev + rec - cur : null;
     return { pid, p: byId[pid], dPrev, dCur, prev, cur, rec, recDates, pend, pendDates, used };
   }).filter((r) => r.p);
-  // Merge each alternate into the item it backs up: one combined line, still orderable separately.
-  const byRoot = {};
-  for (const r of raw) { const root = r.p.backup_for || Number(r.pid); (byRoot[root] ||= []).push(r); }
-  const rows = Object.entries(byRoot).map(([rootStr, members]) => {
-    const root = Number(rootStr);
-    const primary = byId[root] || members.find((m) => !m.p.backup_for)?.p || members[0].p;
-    const alts = members.filter((m) => m.p.product_id !== root).map((m) => m.p.name);
-    const anyPrev = members.some((m) => m.prev != null), anyCur = members.some((m) => m.cur != null);
-    const s = (f) => members.reduce((a, m) => a + (m[f] || 0), 0);
-    const prev = anyPrev ? s("prev") : null, cur = anyCur ? s("cur") : null;
-    const rec = s("rec"), pend = s("pend");
-    const pm = members.find((m) => m.p.product_id === root) || members[0];
-    const recDates = [...new Set(members.flatMap((m) => m.recDates || []))].sort();
-    const pendDates = [...new Set(members.flatMap((m) => m.pendDates || []))].sort();
-    return { pid: rootStr, p: primary, alts, prev, cur, rec, pend, recDates, pendDates, dPrev: pm.dPrev, dCur: pm.dCur, used: (prev != null && cur != null) ? prev + rec - cur : null };
-  }).sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
+  // The family was merged in familyMaps, so each raw row IS the combined item.
+  const rows = raw
+    .map((r) => ({ ...r, alts: familyOf(r.p, products).slice(1).map((x) => x.name) }))
+    .sort((a, b) => (a.p.category || "~").localeCompare(b.p.category || "~") || a.p.name.localeCompare(b.p.name));
   if (!rows.length) return <div className="note">No counts or deliveries logged yet.</div>;
   let lastCat = null;
   return (
