@@ -4694,10 +4694,12 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                   {fld("pump_uplift", "pump CO₂ (%)", "any")}
                 </div>
                 <div className="note" style={{ marginTop: 8 }}>
-                  A {qtyText(a.cup)} oz cup at {f.ice_pct}% ice holds <b>{qtyText(a.liquid)} oz</b> of drink →
-                  {" "}<b>{qtyText(a.syrup)} oz syrup</b> + {qtyText(a.water)} oz water →
-                  {" "}<b>{qtyText(a.co2)} lb CO₂</b>.
-                  <div className="stat">That is {Math.round(640 / a.syrup)} servings from a 5-gallon bag.</div>
+                  Per ounce of cup: <b>{qtyText(a.syrup / (a.cup || 1))} oz syrup</b> and <b>{qtyText(a.co2 / (a.cup || 1))} lb CO₂</b>.
+                  <div style={{ marginTop: 4 }}>
+                    So a <b>{qtyText(a.cup)} oz</b> cup = <b>{qtyText(a.syrup)} oz syrup</b> + {qtyText(a.water)} oz water
+                    + <b>{qtyText(a.co2)} lb CO₂</b> ({qtyText(a.liquid)} oz of drink, the rest ice).
+                  </div>
+                  <div className="stat">{Math.round(640 / a.syrup)} servings from a 5-gallon bag. Change the cup size and every amount follows.</div>
                 </div>
               </div>);
           })()}
