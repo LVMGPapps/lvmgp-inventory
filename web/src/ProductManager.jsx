@@ -4687,7 +4687,24 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
           <div className="group-t">Fountain drink</div>
           <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 14 }}>
             <input type="checkbox" style={{ marginTop: 3 }} checked={!!r.fountain}
-              onChange={(e) => set("fountain", e.target.checked ? { ...FOUNTAIN_DEFAULTS } : null)} />
+              onChange={(e) => {
+                if (!e.target.checked) { set("fountain", null); return; }
+                const f = { ...FOUNTAIN_DEFAULTS };
+                const a = fountainAmounts(f);
+                setR((s2) => {
+                  const lines = [...(s2.lines || [])];
+                  // CO2 is part of every carbonated fountain drink, so add it rather
+                  // than leaving it to be remembered. Links the tank if it's findable.
+                  if (!lines.some((l) => l.role === "co2")) {
+                    const tank = (products || []).find((p) => /co\s*2|carbon\s*dioxide/i.test(p.name || ""));
+                    lines.push({ _k: nextKey.current++, role: "co2", product_id: tank?.product_id ?? null,
+                      item_name: tank?.name || "CO2", qty: +a.co2.toFixed(6),
+                      unit: tank ? (measure(tank) || "lb") : "lb", factor: null, stage: "before",
+                      portion: "", note: "carbonates the water only, +5% for the syrup pumps" });
+                  }
+                  return { ...s2, fountain: f, lines };
+                });
+              }} />
             <span>Work the amounts out from the cup.
               <div className="stat">Set a line&rsquo;s <b>Fills in</b> to <b>fountain syrup</b> or <b>fountain CO₂</b> and its amount is
                 calculated, not typed. Change the cup size and both follow.</div></span>
@@ -4708,6 +4725,13 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                   {fld("co2_gal_per_lb", "gal per lb CO₂", "any")}
                   {fld("pump_uplift", "pump CO₂ (%)", "any")}
                 </div>
+                {!r.lines.some((l) => l.role === "co2") &&
+                  <div className="note" style={{ borderColor: "#E0A320", background: "#FFF8E1", marginTop: 8 }}>
+                    No line is set to <b>fountain CO₂</b>, so CO₂ isn&rsquo;t being costed. Add an ingredient and set its
+                    <b> Fills in</b> to fountain CO₂.</div>}
+                {r.lines.some((l) => l.role === "co2" && !l.product_id) &&
+                  <div className="note" style={{ borderColor: "#E0A320", background: "#FFF8E1", marginTop: 8 }}>
+                    The CO₂ line isn&rsquo;t linked to an item yet, so it costs nothing. Pick your CO₂ tank on that line.</div>}
                 <div className="note" style={{ marginTop: 8 }}>
                   Per ounce of cup: <b>{qtyText(a.syrup / (a.cup || 1))} oz syrup</b> and <b>{qtyText(a.co2 / (a.cup || 1))} lb CO₂</b>.
                   <div style={{ marginTop: 4 }}>
