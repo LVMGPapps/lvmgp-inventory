@@ -2970,7 +2970,10 @@ function RecipeEditor({ product, onClose, onSaved }) {
 // are base + sauce + toppings, with each topping portioned by how many toppings the pizza carries.
 const MENU_CATS = ["Pizza", "Wings", "Burgers & Hot Dogs", "Fries & Tenders", "Appetizers & Snacks", "Sides & Dips", "Dessert", "Beverage", "Prep"];
 const RECIPE_UNITS = ["oz", "fl oz", "each", "tsp", "tbsp", "pump", "lb"];
-const STAGES = [["before", "Before oven"], ["after", "After oven"], ["side", "Comes with"], ["serve", "Serve in/on"], ["hide", "Don't print"]];
+const STAGES = [["before", "Before oven"], ["after", "After oven"], ["side", "Comes with"], ["pack", "Paper & packaging"], ["serve", "Serve in/on"], ["hide", "Don't print"]];
+// Paper goods are a real cost but not a food cost, so they are totalled apart:
+// a 30% food cost that quietly includes boats and lids isn't a food cost.
+const isPackLine = (l) => (l?.stage || "before") === "pack";
 const stageSelect = (v, onChange, style) => (
   <select value={v || "before"} onChange={(e) => onChange(e.target.value)} style={style}>{STAGES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>);
 const OZ_PER = { oz: 1, ounce: 1, ounces: 1, lb: 16, lbs: 16, pound: 16, pounds: 16, g: 1 / 28.3495, kg: 35.274 };
@@ -3284,6 +3287,27 @@ function lineCostInfo(l, byId, seen) {
   if (fb != null) return { cost: qty * fb, src: "vendor", why };
   return { cost: null, src: "none", why };
 }
+// The WHOLE recipe costed once per interchangeable option — what a Dirty Soda
+// costs by flavor, cream and cup included, instead of a recipe per flavor.
+// Any other choice lines stay at their headline pick, so each table reads as
+// "this recipe, with this one thing swapped".
+function costByChoice(lines, byId) {
+  const infos = lines.map((l) => lineCostInfo(l, byId));
+  const base = infos.reduce((t, c) => t + (c.cost ?? 0), 0);
+  const groups = [];
+  lines.forEach((l, i) => {
+    const opts = optionCosts(l, byId).filter((o) => o.cost != null);
+    if (opts.length < 2) return;
+    const rest = base - (infos[i].cost ?? 0);          // the recipe minus this line
+    groups.push({
+      label: l.item_name || choiceName(l, byId) || "Choice",
+      qty: l.qty, unit: l.unit,
+      rows: opts.map((o) => ({ ...o, total: rest + o.cost })).sort((a, b) => a.total - b.total),
+    });
+  });
+  return groups.length ? groups : null;
+}
+
 // With interchangeable lines a recipe has a cost SPAN, not a single number.
 // Returns null when nothing on the recipe is a choice.
 function costSpan(lines, byId) {
@@ -3296,9 +3320,13 @@ function costSpan(lines, byId) {
   return any ? { lo, hi } : null;
 }
 function costLines(lines, byId) {
-  let total = 0, missing = 0, vendor = 0;
-  for (const l of lines) { const c = lineCostInfo(l, byId); if (c.cost == null) missing++; else total += c.cost; if (c.src === "vendor") vendor++; }
-  return { total, missing, vendor };
+  let total = 0, missing = 0, vendor = 0, pack = 0;
+  for (const l of lines) {
+    const c = lineCostInfo(l, byId);
+    if (c.cost == null) missing++; else { total += c.cost; if (isPackLine(l)) pack += c.cost; }
+    if (c.src === "vendor") vendor++;
+  }
+  return { total, missing, vendor, pack, food: total - pack };
 }
 const pct = (x) => (x == null || !isFinite(x)) ? "—" : (x * 100).toFixed(1) + "%";
 const costChip = (c) => c.src === "choice" ? <span className="bchip" style={{ background: "#EEF0FF", borderColor: "#5A5FC8", color: "#3a3f9e" }} title={(c.usedDefault ? "costed at the flavor marked default" : "no default marked — costed at the dearest flavor") + ". " + c.why}>choice{c.usedDefault ? "" : " · max"}</span>
@@ -3538,11 +3566,12 @@ function recipeCardHTML(r) {
   const row = (l) => { const q = num(l.qty);
     return `<tr><td>${escHtml(l.item_name)}</td><td class="use">${escHtml(l.portion || "")}</td><td class="amt">${q != null ? `${+q.toFixed(2)} ${escHtml(l.unit || "")}` : ""}</td></tr>`; };
   const at = (k) => lines.filter((l) => (l.stage || "before") === k);
-  const before = at("before"), after = at("after"), side = at("side"), serve = at("serve");
+  const before = at("before"), after = at("after"), side = at("side"), serve = at("serve"), pack = at("pack");
   const head = (t) => `<tr class="stage"><td colspan="3">${t}</td></tr>`;
   const rows = (before.length ? ((after.length || side.length) ? head("Before the oven") : "") + before.map(row).join("") : "")
     + (after.length ? head("After the oven") + after.map(row).join("") : "")
-    + (side.length ? head("Comes with") + side.map(row).join("") : "");
+    + (side.length ? head("Comes with") + side.map(row).join("") : "")
+    + (pack.length ? head("Paper &amp; packaging") + pack.map(row).join("") : "");
   return `<section class="card">
     <header class="head">
       <div class="eyebrow">${escHtml(r.category || "")}</div>
@@ -4075,8 +4104,11 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
               return sp && sp.hi - sp.lo > 0.0005
                 ? <div style={{ fontSize: 15, alignSelf: "center", color: "#3a3f9e" }} title="Depends which interchangeable item is used">{money(sp.lo)}–{money(sp.hi)} by choice</div>
                 : null; })()}
+            {rc.pack > 0.0005 && <div style={{ fontSize: 15, alignSelf: "center" }} title="Boats, cups, plates, liners — counted apart from the food">
+              food <span className="fig">{money(rc.food)}</span> · paper <span className="fig">{money(rc.pack)}</span></div>}
             {isPrep ? <div>Per {r.yield_unit || "unit"} <span className="fig">{num(r.yield_qty) ? `$${(rc.total / num(r.yield_qty)).toFixed(4)}` : "— set the batch yield"}</span></div>
-              : <div style={fc > 0.3 ? { color: "#B0271B" } : undefined}>Food cost <span className="fig">{pct(fc)}</span></div>}
+              : <div style={fc > 0.3 ? { color: "#B0271B" } : undefined}>Food cost <span className="fig">{pct(fc)}</span>
+                {rc.pack > 0.0005 && price ? <span className="stat" style={{ marginTop: 0 }}> · {pct(rc.food / price)} without paper</span> : null}</div>}
             {rc.missing > 0 && <div style={{ color: "#B0271B", fontSize: 15, alignSelf: "center" }}>{rc.missing} line{rc.missing === 1 ? "" : "s"} not costed</div>}
             {rc.vendor > 0 && <div style={{ color: "#9a5b00", fontSize: 15, alignSelf: "center" }}>{rc.vendor} using vendor-system cost</div>}
           </div>}
@@ -4132,6 +4164,38 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
             <div className="stat" style={{ marginTop: 6 }}>These lines come from the base{isWing ? " and the sauce chart" : ", the sauce and the topping guide"} — change the amounts there and everything built on them updates. The arrows set the order for <b>this</b> recipe only, on screen and on the printed card. The ✕ leaves a line out of this recipe without changing the base. Add anything extra ({isWing ? "ranch, a garnish" : "a drizzle, a garnish"}) below.</div>
           </div>
         )}
+
+        {showCost && (() => {
+          const groups = costByChoice(all, byId);
+          if (!groups) return null;
+          const price = num(r.menu_price);
+          return (
+            <div className="group">
+              <div className="group-t">Cost by choice</div>
+              <div className="stat" style={{ marginBottom: 8 }}>
+                The whole {r.name || "recipe"} costed once per option — everything else included. Cheapest first.
+              </div>
+              {groups.map((g, gi) => (
+                <div key={gi} style={{ marginBottom: 12 }}>
+                  <div className="stat" style={{ marginBottom: 4 }}><b>{g.label}</b>{g.qty != null ? ` — ${+Number(g.qty).toFixed(2)} ${g.unit}` : ""}</div>
+                  <table className="tbl" style={{ minWidth: 420 }}>
+                    <thead><tr><th>Option</th><th style={{ textAlign: "right" }}>{r.name || "Recipe"} cost</th>{price ? <th style={{ textAlign: "right" }}>Food cost</th> : null}<th style={{ textAlign: "right" }}>vs cheapest</th></tr></thead>
+                    <tbody>{g.rows.map((o, k) => {
+                      const d = o.total - g.rows[0].total;
+                      return (
+                        <tr key={o.product_id} style={o.is_default ? { background: "#EEF0FF" } : undefined}>
+                          <td>{o.is_default ? "★ " : ""}{o.p.name}{o.bad && <span style={{ color: "#B0271B" }} title={packProblem(o.p)}> ⚠</span>}</td>
+                          <td className="fig">{money(o.total)}</td>
+                          {price ? <td className="fig" style={o.total / price > 0.3 ? { color: "#B0271B" } : undefined}>{pct(o.total / price)}</td> : null}
+                          <td className="fig" style={{ color: d > 0.0005 ? "#B0271B" : "#71757E" }}>{k === 0 ? "—" : "+" + money(d)}</td>
+                        </tr>);
+                    })}</tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          );
+        })()}
 
         <div className="group">
           <div className="group-t">{isSpec ? (isWing ? "Extras on these wings" : "Extras on this pizza") : "Ingredients"}</div>
