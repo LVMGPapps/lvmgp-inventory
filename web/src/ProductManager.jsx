@@ -3853,6 +3853,7 @@ function MenuRecipes({ products, receipts }) {
   const [topPrices, setTopPrices] = useState({});
   const [compare, setCompare] = useState(false);
   const [whatIf, setWhatIf] = useState(false);
+  const [rcat, setRcat] = useState("");
   const [showCost, setShowCost] = useState(() => { try { return localStorage.getItem("lvmgp.menuCosts") !== "off"; } catch { return true; } });
   const flipCost = () => setShowCost((v) => { const n = !v; try { localStorage.setItem("lvmgp.menuCosts", n ? "on" : "off"); } catch { /* private mode */ } return n; });
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
@@ -3868,7 +3869,14 @@ function MenuRecipes({ products, receipts }) {
   const compsById = Object.fromEntries(comps.map((c) => [c.component_id, c]));
   RECIPE_CTX = { recipesById, compsById, byId, paid: lastPaidByProduct(receipts, byId) };
   const ord = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name);
-  const list = rows.filter((r) => (showOff || r.active) && (!q || r.name.toLowerCase().includes(q.toLowerCase()))).sort(ord);
+  const list = rows.filter((r) => (showOff || r.active)
+    && (!q || r.name.toLowerCase().includes(q.toLowerCase()))
+    && (!rcat || String(r.category || "Other").trim().toLowerCase() === rcat)).sort(ord);
+  const rcatList = (() => {
+    const m = new Map();
+    for (const r of rows) { const k = String(r.category || "Other").trim().toLowerCase(); if (!m.has(k)) m.set(k, String(r.category || "Other").trim()); }
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  })();
   const extra = [...new Set(list.map((r) => r.category || "Other"))].filter((c) => !MENU_CATS.includes(c));
   const blank = { name: "", category: "Pizza", kind: "standard", menu_price: "", method: "", active: true, lines: [], topping_component_ids: [] };
 
@@ -3948,6 +3956,10 @@ function MenuRecipes({ products, receipts }) {
       )}
       <div className="toolbar">
         <input placeholder="Search menu recipes…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
+        <select value={rcat} onChange={(e) => setRcat(e.target.value)} title="Show one menu section">
+          <option value="">All sections</option>
+          {rcatList.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
         <label className="stat" style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 0 }}>
           <input type="checkbox" checked={showOff} onChange={(e) => setShowOff(e.target.checked)} />show inactive</label>
         <button className="mini" title="Cost two or three builds side by side" onClick={() => setCompare(true)}>⇄ Compare</button>
@@ -4584,9 +4596,12 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <div className="field" style={{ flex: "2 1 220px" }}><label>Recipe name</label><input value={r.name || ""} onChange={(e) => set("name", e.target.value)} /></div>
             <div className="field" style={{ flex: "1 1 150px" }}><label>Category</label>
-              <select value={r.category || ""} onChange={(e) => { const v = e.target.value; setR((s) => ({ ...s, category: v, kind: v === "Prep" ? "prep" : (s.kind === "prep" ? "standard" : s.kind) })); }}>
-                {[...new Set([...MENU_CATS, r.category].filter(Boolean))].map((c) => <option key={c} value={c}>{c}</option>)}
-              </select></div>
+              {/* Menu sections, not product categories — but it should let you add one
+                  the same way the catalog does, and offer the ones already in use. */}
+              <Combo value={r.category} allowBlank={false}
+                options={[...MENU_CATS, ...(recipes || []).map((x) => x.category)]}
+                placeholder="new menu section"
+                onChange={(v) => setR((s) => ({ ...s, category: v, kind: v === "Prep" ? "prep" : (s.kind === "prep" ? "standard" : s.kind) }))} /></div>
             {r.category === "Pizza" && <div className="field" style={{ flex: "1 1 150px" }}><label>Type</label>
               <select value={r.kind || "standard"} onChange={(e) => setKind(e.target.value)}>
                 <option value="pizza_base">Pizza base</option><option value="pizza_specialty">Specialty pizza</option><option value="standard">Other</option></select></div>}
