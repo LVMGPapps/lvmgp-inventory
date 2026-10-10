@@ -3199,6 +3199,15 @@ function unitConv(from, to) {
 // Prep recipes (house-made) are costed from their own lines, so line costing needs the full recipe set.
 // MenuRecipes refreshes this on every render.
 let RECIPE_CTX = { recipesById: {}, compsById: {}, byId: {}, paid: {} };
+// A price you are considering but have not bought. Setting it makes every cost
+// in the app recompute as if that were the real price, so "what if" uses the
+// same maths as the live numbers instead of a parallel calculator that drifts.
+let COST_OVERRIDE = null;
+function withOverride(map, fn) {
+  const prev = COST_OVERRIDE;
+  COST_OVERRIDE = map;
+  try { return fn(); } finally { COST_OVERRIDE = prev; }
+}
 // What each item actually cost per count unit on its most recent delivery:
 // total spent on that line ÷ the count units it brought in.
 // How many count units one PURCHASE unit holds, from the product's own pack setup —
@@ -3301,6 +3310,7 @@ function packProblem(p) {
 // The cost per count unit a recipe uses: what we last paid, else the vendor's list price.
 function unitCost(p) {
   if (!p) return null;
+  if (COST_OVERRIDE && COST_OVERRIDE[p.product_id] != null) return COST_OVERRIDE[p.product_id];
   const paid = RECIPE_CTX.paid?.[p.product_id];
   return paid && paid.per > 0 ? paid.per : costPerCount(p);
 }
@@ -3552,6 +3562,108 @@ const estChip = <span className="bchip" style={{ background: "#FFF3DC", borderCo
 // fountain cup against a 20 oz, say. Lines are matched on the product (or prep
 // recipe) they use, so a swapped cup lands on its own row and everything that
 // didn't change lines up.
+// Price something you are only considering. Nothing is saved and no product is
+// created — you type what a case would cost and what is in it, and every recipe
+// using that item is re-costed on the spot.
+function WhatIf({ rows, recipesById, compsById, byId, products, onClose }) {
+  const [pid, setPid] = useState(null);
+  const [price, setPrice] = useState("");       // what a case / pack would cost
+  const [per, setPer] = useState("case");       // what that price buys
+  const [sizeEach, setSizeEach] = useState(""); // units in it — blank = same as today
+  const p = pid ? byId[pid] : null;
+
+  const nowPer = p ? unitCost(p) : null;
+  const unitsIn = p ? (per === "case" ? usagePerCase(p) : per === "package" ? usagePerPack(p) : 1) : null;
+  const units = num(sizeEach) ?? unitsIn;
+  const newPer = (num(price) != null && units) ? num(price) / units : null;
+
+  // every recipe that touches this item, before and after
+  const hits = [];
+  if (p && newPer != null) {
+    for (const r of rows) {
+      const lines = builtLines(r, recipesById, compsById);
+      const uses = lines.some((l) => l.product_id === p.product_id || lineOptions(l).some((o) => o.product_id === p.product_id));
+      if (!uses) continue;
+      const before = costLines(lines, byId).total;
+      const after = withOverride({ [p.product_id]: newPer }, () => costLines(lines, byId).total);
+      hits.push({ r, before, after, price: num(r.menu_price) });
+    }
+    hits.sort((a, b) => (b.before - b.after) - (a.before - a.after));
+  }
+
+  return (
+    <div className="overlay">
+      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 860 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <h2 style={{ marginBottom: 2 }}>What if this cost less?</h2>
+          <button className="mini" onClick={onClose}>✕</button>
+        </div>
+        <div className="stat" style={{ marginBottom: 10 }}>
+          For something you haven&rsquo;t bought yet — a quote, or a different pack. Nothing is saved and no product is created.
+        </div>
+
+        <div className="field" style={{ marginBottom: 8 }}>
+          <label>Item to re-price</label>
+          <ItemPicker productId={pid} subId={null} free={false} products={products} onPick={(v) => setPid(resolvePick(v, byId, "oz").product_id)} style={{ width: "100%" }} />
+        </div>
+
+        {p && <>
+          <div className="stat" style={{ marginBottom: 8 }}>
+            Today: <b>{nowPer != null ? money(nowPer) : "no price"}</b>/{measure(p)} · {caseMakeup(p)}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
+            <label style={{ width: 120 }}><span className="stat">new price</span>
+              <input className="fig" type="number" step="0.01" placeholder="$" value={price} onChange={(e) => setPrice(e.target.value)} /></label>
+            <label style={{ width: 130 }}><span className="stat">per</span>
+              <select value={per} onChange={(e) => setPer(e.target.value)}>
+                <option value="case">case</option>
+                <option value="package">{pkgName(p, 1)}</option>
+                <option value="unit">{measure(p)}</option>
+              </select></label>
+            <label style={{ width: 150 }}><span className="stat">holding how many {measure(p)}</span>
+              <input className="fig" type="number" step="any" placeholder={unitsIn != null ? String(+Number(unitsIn).toFixed(3)) : ""} value={sizeEach} onChange={(e) => setSizeEach(e.target.value)} /></label>
+          </div>
+
+          {newPer != null && (
+            <div className="note" style={{ marginBottom: 12 }}>
+              <b>{money(newPer)}/{measure(p)}</b>
+              {nowPer != null && <> against {money(nowPer)} today —{" "}
+                <b style={{ color: newPer < nowPer ? "#0a5c50" : "#B0271B" }}>
+                  {newPer < nowPer ? "saves " : "costs "}{money(Math.abs(nowPer - newPer))}/{measure(p)}
+                  {" "}({((newPer / nowPer - 1) * 100).toFixed(1)}%)
+                </b></>}
+            </div>
+          )}
+
+          {newPer != null && (hits.length ? (
+            <div style={{ overflowX: "auto" }}>
+              <table className="tbl" style={{ minWidth: 560 }}>
+                <thead><tr><th>Recipe</th><th style={{ textAlign: "right" }}>Now</th><th style={{ textAlign: "right" }}>If</th><th style={{ textAlign: "right" }}>Change</th><th style={{ textAlign: "right" }}>Food cost</th></tr></thead>
+                <tbody>{hits.map((h, i) => {
+                  const d = h.before - h.after;
+                  return (
+                    <tr key={i}>
+                      <td>{h.r.name}</td>
+                      <td className="fig">{money(h.before)}</td>
+                      <td className="fig"><b>{money(h.after)}</b></td>
+                      <td className="fig" style={{ color: d > 0 ? "#0a5c50" : d < 0 ? "#B0271B" : "#71757E" }}>
+                        {d === 0 ? "—" : (d > 0 ? "−" : "+") + money(Math.abs(d))}</td>
+                      <td className="fig">{h.price ? <>{pct(h.after / h.price)}<div className="stat">was {pct(h.before / h.price)}</div></> : "—"}</td>
+                    </tr>);
+                })}</tbody>
+              </table>
+              <div className="stat" style={{ marginTop: 8 }}>
+                Across these recipes that is <b>{money(hits.reduce((a, h) => a + (h.before - h.after), 0))}</b> per one of each.
+                Multiply by how many you sell: <b>{money(hits.reduce((a, h) => a + (h.before - h.after), 0) * 100)}</b> per 100 of each.
+              </div>
+            </div>
+          ) : <div className="note">No recipe uses {p.name} yet, so there is nothing to re-cost. The price difference above still stands.</div>)}
+        </>}
+      </div>
+    </div>
+  );
+}
+
 function CompareRecipes({ rows, recipesById, compsById, byId, onClose }) {
   const [picked, setPicked] = useState([]);
   const [q, setQ] = useState("");
@@ -3655,6 +3767,7 @@ function MenuRecipes({ products, receipts }) {
   const [editComp, setEditComp] = useState(null);
   const [topPrices, setTopPrices] = useState({});
   const [compare, setCompare] = useState(false);
+  const [whatIf, setWhatIf] = useState(false);
   const [showCost, setShowCost] = useState(() => { try { return localStorage.getItem("lvmgp.menuCosts") !== "off"; } catch { return true; } });
   const flipCost = () => setShowCost((v) => { const n = !v; try { localStorage.setItem("lvmgp.menuCosts", n ? "on" : "off"); } catch { /* private mode */ } return n; });
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
@@ -3734,6 +3847,7 @@ function MenuRecipes({ products, receipts }) {
   return (
     <div>
       {compare && <CompareRecipes rows={rows} recipesById={recipesById} compsById={compsById} byId={byId} onClose={() => setCompare(false)} />}
+      {whatIf && <WhatIf rows={rows} recipesById={recipesById} compsById={compsById} byId={byId} products={products} onClose={() => setWhatIf(false)} />}
       {err && <div className="err">{err}</div>}
       {showCost && packBad.length > 0 && (
         <div className="err" style={{ marginBottom: 10 }}>
@@ -3752,6 +3866,7 @@ function MenuRecipes({ products, receipts }) {
         <label className="stat" style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 0 }}>
           <input type="checkbox" checked={showOff} onChange={(e) => setShowOff(e.target.checked)} />show inactive</label>
         <button className="mini" title="Cost two or three builds side by side" onClick={() => setCompare(true)}>⇄ Compare</button>
+        <button className="mini" title="Try a price you haven't paid yet" onClick={() => setWhatIf(true)}>🧪 What if</button>
         <button className="mini" onClick={flipCost} title="Hide costs for a line-staff view"
           style={showCost ? { background: "#0E7C6B", color: "#fff", borderColor: "#0E7C6B" } : undefined}>{showCost ? "$ Costs shown" : "Costs hidden"}</button>
         <button className="mini" onClick={() => setReorder((v) => !v)} style={reorder ? { background: "#101012", color: "#fff" } : undefined}>{reorder ? "Done ordering" : "Reorder"}</button>
