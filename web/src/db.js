@@ -821,6 +821,7 @@ export async function saveMenuRecipe(r, lines) {
     method: r.method || null,
     image_url: r.image_url || null,
     serve_note: r.serve_note || null,
+    fountain: r.fountain ?? null,          // fountain-drink settings; amounts are derived from these
     active: r.active !== false,
     updated_at: new Date().toISOString(),
     updated_by: await whoAmI(),
