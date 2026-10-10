@@ -3382,6 +3382,102 @@ const costChip = (c) => c.src === "choice" ? <span className="bchip" style={{ ba
   : <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={c.why}>none</span>;
 const estChip = <span className="bchip" style={{ background: "#FFF3DC", borderColor: "#E0A320", color: "#7a5200" }} title="Placeholder amount — weigh it">not weighed</span>;
 
+// Side-by-side costing for two or three builds of the same thing — a 24 oz
+// fountain cup against a 20 oz, say. Lines are matched on the product (or prep
+// recipe) they use, so a swapped cup lands on its own row and everything that
+// didn't change lines up.
+function CompareRecipes({ rows, recipesById, compsById, byId, onClose }) {
+  const [picked, setPicked] = useState([]);
+  const [q, setQ] = useState("");
+  const list = rows.filter((r) => !q || r.name.toLowerCase().includes(q.toLowerCase()));
+  const toggle = (id) => setPicked((s) => s.includes(id) ? s.filter((x) => x !== id) : (s.length >= 3 ? s : [...s, id]));
+
+  const cols = picked.map((id) => {
+    const r = recipesById[id];
+    const lines = builtLines(r, recipesById, compsById);
+    const cells = new Map();
+    for (const l of lines) {
+      const key = l.product_id ? `p${l.product_id}` : l.sub_recipe_id ? `r${l.sub_recipe_id}` : `n${String(l.item_name || "").toLowerCase()}`;
+      const c = lineCostInfo(l, byId);
+      const prev = cells.get(key);
+      cells.set(key, { label: l.item_name, qty: (prev?.qty || 0) + (num(l.qty) || 0), unit: l.unit,
+                      cost: (prev?.cost || 0) + (c.cost || 0), pack: isPackLine(l) });
+    }
+    const rc = costLines(lines, byId);
+    return { r, cells, rc, price: num(r.menu_price) };
+  });
+
+  const keys = [];
+  for (const c of cols) for (const k of c.cells.keys()) if (!keys.includes(k)) keys.push(k);
+  keys.sort((a, b) => {
+    const pa = cols.some((c) => c.cells.get(a)?.pack), pb = cols.some((c) => c.cells.get(b)?.pack);
+    if (pa !== pb) return pa ? 1 : -1;                       // paper goods at the bottom
+    const la = cols.map((c) => c.cells.get(a)?.label).find(Boolean) || "";
+    const lb = cols.map((c) => c.cells.get(b)?.label).find(Boolean) || "";
+    return la.localeCompare(lb);
+  });
+  const base = cols[0];
+
+  return (
+    <div className="overlay">
+      <div className="sheet" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 980 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <h2 style={{ marginBottom: 2 }}>Compare builds</h2>
+          <button className="mini" onClick={onClose}>✕</button>
+        </div>
+        <div className="stat" style={{ marginBottom: 10 }}>
+          Pick two or three (duplicate a recipe first, change the packaging or amounts on the copy, then compare).
+          Everything is costed off the same delivery prices, so the difference is only what you changed.
+        </div>
+        <input placeholder="Find a recipe…" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: "100%", marginBottom: 8 }} />
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, maxHeight: 132, overflowY: "auto" }}>
+          {list.map((r) => {
+            const on = picked.includes(r.recipe_id);
+            return <button key={r.recipe_id} className="mini" onClick={() => toggle(r.recipe_id)}
+              style={on ? { background: "#101012", color: "#fff", borderColor: "#101012" } : undefined}>{on ? "✓ " : ""}{r.name}</button>;
+          })}
+        </div>
+
+        {cols.length < 2 ? <div className="note">Choose at least two.</div> : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="tbl" style={{ minWidth: 620 }}>
+              <thead><tr><th>Ingredient</th>{cols.map((c, i) => <th key={i} style={{ textAlign: "right" }}>{c.r.name}</th>)}</tr></thead>
+              <tbody>
+                {keys.map((k) => {
+                  const any = cols.map((c) => c.cells.get(k));
+                  const differs = new Set(any.map((x) => x ? Math.round((x.cost || 0) * 10000) : -1)).size > 1;
+                  return (
+                    <tr key={k} style={differs ? { background: "#FFFBF0" } : undefined}>
+                      <td>{any.find(Boolean)?.label}{any.find(Boolean)?.pack && <span className="stat"> · paper</span>}</td>
+                      {any.map((x, i) => <td key={i} className="fig">{x ? <>{money(x.cost)}<div className="stat">{+Number(x.qty).toFixed(2)} {x.unit}</div></> : <span className="stat">—</span>}</td>)}
+                    </tr>);
+                })}
+                <tr style={{ borderTop: "2px solid #191B1F", fontWeight: 700 }}>
+                  <td>Total</td>
+                  {cols.map((c, i) => <td key={i} className="fig">{money(c.rc.total)}
+                    {i > 0 && <div className="stat" style={{ color: c.rc.total < base.rc.total ? "#0a5c50" : "#B0271B" }}>
+                      {c.rc.total < base.rc.total ? "−" : "+"}{money(Math.abs(c.rc.total - base.rc.total))} vs {base.r.name}</div>}</td>)}
+                </tr>
+                <tr><td>of which paper</td>{cols.map((c, i) => <td key={i} className="fig">{money(c.rc.pack)}</td>)}</tr>
+                <tr><td>Menu price</td>{cols.map((c, i) => <td key={i} className="fig">{c.price ? money(c.price) : "—"}</td>)}</tr>
+                <tr><td>Food cost</td>{cols.map((c, i) => <td key={i} className="fig" style={c.price && c.rc.total / c.price > 0.3 ? { color: "#B0271B" } : undefined}>{c.price ? pct(c.rc.total / c.price) : "—"}</td>)}</tr>
+                <tr><td>Margin per unit</td>{cols.map((c, i) => <td key={i} className="fig">{c.price ? money(c.price - c.rc.total) : "—"}</td>)}</tr>
+              </tbody>
+            </table>
+            <div className="stat" style={{ marginTop: 8 }}>Shaded rows are where the builds differ. Totals use each recipe&rsquo;s own amounts, so a smaller cup that holds less soda shows both changes at once.</div>
+            {base && cols.slice(1).map((c, i) => {
+              const d = base.rc.total - c.rc.total;
+              return Math.abs(d) > 0.0005 ? <div key={i} className="note" style={{ marginTop: 8 }}>
+                <b>{c.r.name}</b> saves <b>{money(d)}</b> per unit against {base.r.name} — <b>{money(d * 100)}</b> per 100 sold, <b>{money(d * 1000)}</b> per 1,000.
+              </div> : null;
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MenuRecipes({ products, receipts }) {
   const [rows, setRows] = useState(null);
   const [comps, setComps] = useState([]);
@@ -3392,6 +3488,7 @@ function MenuRecipes({ products, receipts }) {
   const [edit, setEdit] = useState(null);
   const [editComp, setEditComp] = useState(null);
   const [topPrices, setTopPrices] = useState({});
+  const [compare, setCompare] = useState(false);
   const [showCost, setShowCost] = useState(() => { try { return localStorage.getItem("lvmgp.menuCosts") !== "off"; } catch { return true; } });
   const flipCost = () => setShowCost((v) => { const n = !v; try { localStorage.setItem("lvmgp.menuCosts", n ? "on" : "off"); } catch { /* private mode */ } return n; });
   const byId = Object.fromEntries(products.map((p) => [p.product_id, p]));
@@ -3470,6 +3567,7 @@ function MenuRecipes({ products, receipts }) {
 
   return (
     <div>
+      {compare && <CompareRecipes rows={rows} recipesById={recipesById} compsById={compsById} byId={byId} onClose={() => setCompare(false)} />}
       {err && <div className="err">{err}</div>}
       {showCost && packBad.length > 0 && (
         <div className="err" style={{ marginBottom: 10 }}>
@@ -3487,6 +3585,7 @@ function MenuRecipes({ products, receipts }) {
         <input placeholder="Search menu recipes…" value={q} onChange={(e) => setQ(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
         <label className="stat" style={{ display: "flex", gap: 5, alignItems: "center", marginTop: 0 }}>
           <input type="checkbox" checked={showOff} onChange={(e) => setShowOff(e.target.checked)} />show inactive</label>
+        <button className="mini" title="Cost two or three builds side by side" onClick={() => setCompare(true)}>⇄ Compare</button>
         <button className="mini" onClick={flipCost} title="Hide costs for a line-staff view"
           style={showCost ? { background: "#0E7C6B", color: "#fff", borderColor: "#0E7C6B" } : undefined}>{showCost ? "$ Costs shown" : "Costs hidden"}</button>
         <button className="mini" onClick={() => setReorder((v) => !v)} style={reorder ? { background: "#101012", color: "#fff" } : undefined}>{reorder ? "Done ordering" : "Reorder"}</button>
