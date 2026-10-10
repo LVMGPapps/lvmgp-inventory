@@ -47,7 +47,16 @@ const vCostPerUnit = (p, v) => (v?.price != null ? Number(v.price) / vUnitsPerCa
 const vPkgName = (p, v, n) => (v?.package_unit || p.package_unit || "package") + (n === 1 ? "" : "s");
 const unitsPerBuy = (p, ou) => { const o = ou || p.buy_by || "case"; return o === "case" ? usagePerCase(p) : o === "package" ? usagePerPack(p) : 1; };
 const measure = (p) => p.usage_measure || p.count_unit || "each";   // the size unit inside a package (internal math only)
-const pkgName = (p, n) => (p.package_unit || "package") + (n === 1 ? "" : "s");
+// "pounds" + "s" was giving "poundss"; some units are already plural or don't
+// take one at all.
+const plural = (w) => {
+  const t = String(w || "").trim();
+  if (!t) return "";
+  if (/^(each|ea|ct|count)$/i.test(t)) return t;        // "eaches" is not a word anyone says
+  if (/(s|sh|ch|x|z)$/i.test(t)) return /s$/i.test(t) ? t : t + "es";
+  return t + "s";
+};
+const pkgName = (p, n) => (n === 1 ? (p.package_unit || "package") : plural(p.package_unit || "package"));
 const wholeOnly = (p) => !!p.count_whole_only || /fountain/i.test(p.category || "");   // count whole units, no partial/each
 const buyLabel = (p, ou, n) => { const o = ou || p.buy_by || "case"; const one = n === 1; return o === "case" ? (one ? "case" : "cases") : o === "package" ? pkgName(p, n) : measure(p); };
 const caseMakeup = (p) => { const ppc = Number(p.packages_per_case) || 1, upp = Number(p.usage_per_package) || 1; return ppc > 1 ? `case = ${ppc} ${pkgName(p, 2)} of ${r1(upp)} ${measure(p)}` : `case = ${r1(upp)} ${measure(p)}`; };
@@ -751,12 +760,12 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
             <div className="field"><label>Size per package</label><input type="number" min="0" step="0.001" value={p.usage_per_package ?? ""} onChange={(e) => set("usage_per_package", num(e.target.value))} /></div>
           </div>
           <div className="stat" style={{ marginTop: 2 }}>
-            1 case = <b>{num(p.packages_per_case) || 1} {(p.package_unit || "package") + ((num(p.packages_per_case) || 1) === 1 ? "" : "s")}</b>{(num(p.usage_per_package) || 1) > 1 ? <> · 1 {p.package_unit || "package"} = <b>{num(p.usage_per_package) || 1} {p.usage_measure || "each"}</b></> : null}. You count and report in <b>cases &amp; {(p.package_unit || "package") + "s"}</b>; order by the <b>{p.buy_by || "case"}</b>.
+            1 case = <b>{num(p.packages_per_case) || 1} {(p.package_unit || "package") + ((num(p.packages_per_case) || 1) === 1 ? "" : "s")}</b>{(num(p.usage_per_package) || 1) > 1 ? <> · 1 {p.package_unit || "package"} = <b>{num(p.usage_per_package) || 1} {p.usage_measure || "each"}</b></> : null}. You count and report in <b>cases &amp; {plural(p.package_unit || "package")}</b>; order by the <b>{p.buy_by || "case"}</b>.
           </div>
           {packProblem(p) && <div className="err" style={{ marginTop: 8 }}><b>This item can&rsquo;t be costed correctly.</b> {packProblem(p)}</div>}
           <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 14, marginTop: 10 }}>
             <input type="checkbox" style={{ marginTop: 3 }} checked={!!p.count_whole_only} onChange={(e) => set("count_whole_only", e.target.checked)} />
-            <span>Don&apos;t count in <b>{p.usage_measure || "each"}</b> — count cases and {(p.package_unit || "package") + "s"} only.
+            <span>Don&apos;t count in <b>{p.usage_measure || "each"}</b> — count cases and {plural(p.package_unit || "package")} only.
               <div className="stat">The size unit still drives costing and $/{p.usage_measure || "each"}; it just won&apos;t appear as a box on the count screen.</div></span>
           </label>
         </div>
@@ -3280,10 +3289,13 @@ function packProblem(p) {
     return `pack fields say 1 case = ${+usagePerCase(p).toFixed(3)} ${measure(p)}, but the stored count_per_case is ${+legacy.toFixed(3)}. Open and re-save this item to put them back in step.`;
   const m = measure(p), pkg = p.package_unit || "package";
   if (!DIVISIBLE(m)) return null;                       // counted in eaches/plates/boats — 1:1 is fine
+  // If the package IS the unit — bought and counted by the pound, by the gallon —
+  // then "1 package = 1 unit" is simply true, not a missing size.
+  if (unitConv(pkg, m) === 1) return null;
   const per = usagePerCase(p);
   if (per > 1.0001) return null;                        // pack math already says how many
   if (sameUnit(p.size_unit, m) && num(p.size) > 1) return null;
-  return `pack setup says 1 ${pkg} = 1 ${m}. Set how many ${m} are in one ${pkg} (or fill in its size) or every cost off this item is wrong.`;
+  return `the pack setup says one ${pkg} holds just 1 ${m}, so the whole price of a ${pkg} is landing on a single ${m}. Set "size per package" to how many ${m} are really in one ${pkg} — a 25.4 oz bottle is 25.4, not 1.`;
 }
 
 // The cost per count unit a recipe uses: what we last paid, else the vendor's list price.
