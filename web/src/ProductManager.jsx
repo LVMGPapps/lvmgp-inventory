@@ -3045,6 +3045,33 @@ function lastPaidByProduct(receipts, byId) {
   }
   return out;
 }
+// A "choice" line: one slot on the recipe, several interchangeable products.
+// "Make It Dirty" is 2 pumps of syrup — the flavor is the guest's pick, so the
+// recipe is one line with many options rather than one recipe per flavor.
+const lineOptions = (l) => Array.isArray(l?.options) ? l.options.filter((o) => o && o.product_id) : [];
+// A choice line owns no single product, so name it after the default one.
+function choiceName(l, byId) {
+  const o = lineOptions(l); if (!o.length) return null;
+  const d = (byId || {})[(o.find((x) => x.is_default) || o[0]).product_id];
+  return d ? `${d.name} (or any of ${o.length})` : null;
+}
+function optionCosts(l, byId) {
+  const qty = num(l?.qty);
+  return lineOptions(l).map((o) => {
+    const p = (byId || {})[o.product_id];
+    if (!p) return null;
+    const cpu = unitCost(p), f = num(l.factor) ?? suggestFactor(p, l.unit);
+    const cost = (qty != null && cpu != null && f != null) ? qty * f * cpu : null;
+    return { product_id: o.product_id, p, is_default: !!o.is_default, cost, bad: !!packProblem(p) };
+  }).filter(Boolean);
+}
+// Headline cost for a choice line: the flavor marked default, else the dearest
+// one — a menu price set off the cheapest flavor loses money on the rest.
+function chooseOption(priced) {
+  if (!priced.length) return null;
+  return priced.find((o) => o.is_default) || priced.reduce((a, b) => (b.cost > a.cost ? b : a));
+}
+
 // Can this item produce a believable cost at all?
 // A divisible count unit (oz, lb, cup, ml) with a pack that says one package
 // holds exactly ONE of them is a contradiction: a $6.49 bottle of syrup then
@@ -3227,6 +3254,17 @@ function lineCostInfo(l, byId, seen) {
   const qty = num(l.qty);
   if (qty == null) return { cost: null, src: "noqty", why: "no amount" };
   if (isFreeLine(l)) return { cost: 0, src: "free" };            // tap water, ice — costs nothing but belongs on the recipe
+  const opts = optionCosts(l, byId);
+  if (opts.length) {
+    const priced = opts.filter((o) => o.cost != null);
+    if (!priced.length) return { cost: null, src: "none", why: "none of the choices has a cost yet", opts };
+    const picked = chooseOption(priced);
+    const lo = priced.reduce((a, b) => (b.cost < a.cost ? b : a));
+    const hi = priced.reduce((a, b) => (b.cost > a.cost ? b : a));
+    return { cost: picked.cost, src: "choice", p: picked.p, opts, picked, lo, hi,
+             usedDefault: !!priced.find((o) => o.is_default),
+             why: `${priced.length} choices, ${money(lo.cost)}–${money(hi.cost)}` };
+  }
   let subWhy = null;
   if (l.sub_recipe_id) {
     const sub = RECIPE_CTX.recipesById[l.sub_recipe_id];
@@ -3246,13 +3284,25 @@ function lineCostInfo(l, byId, seen) {
   if (fb != null) return { cost: qty * fb, src: "vendor", why };
   return { cost: null, src: "none", why };
 }
+// With interchangeable lines a recipe has a cost SPAN, not a single number.
+// Returns null when nothing on the recipe is a choice.
+function costSpan(lines, byId) {
+  let lo = 0, hi = 0, any = false;
+  for (const l of lines) {
+    const c = lineCostInfo(l, byId);
+    if (c.src === "choice" && c.lo && c.hi) { lo += c.lo.cost; hi += c.hi.cost; any = true; }
+    else if (c.cost != null) { lo += c.cost; hi += c.cost; }
+  }
+  return any ? { lo, hi } : null;
+}
 function costLines(lines, byId) {
   let total = 0, missing = 0, vendor = 0;
   for (const l of lines) { const c = lineCostInfo(l, byId); if (c.cost == null) missing++; else total += c.cost; if (c.src === "vendor") vendor++; }
   return { total, missing, vendor };
 }
 const pct = (x) => (x == null || !isFinite(x)) ? "—" : (x * 100).toFixed(1) + "%";
-const costChip = (c) => c.src === "badpack" ? <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={c.why}>check pack size</span>
+const costChip = (c) => c.src === "choice" ? <span className="bchip" style={{ background: "#EEF0FF", borderColor: "#5A5FC8", color: "#3a3f9e" }} title={(c.usedDefault ? "costed at the flavor marked default" : "no default marked — costed at the dearest flavor") + ". " + c.why}>choice{c.usedDefault ? "" : " · max"}</span>
+  : c.src === "badpack" ? <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={c.why}>check pack size</span>
   : c.src === "free" ? <span className="bchip" style={{ background: "#F1F1F3", borderColor: "#B9BCC4", color: "#5b6069" }} title="deliberately free — tap water, ice">no cost</span>
   : c.src === "invoice" ? (() => {
       // When the price came in on an alternate, say so — otherwise the number
@@ -3300,7 +3350,7 @@ function MenuRecipes({ products, receipts }) {
     if (!name || !name.trim()) return;
     try {
       const lines = (r.lines || []).map((l) => ({ stage: l.stage || "before", product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null,
-        item_name: l.item_name, qty: l.qty, unit: l.unit, factor: l.factor, portion: l.portion, note: l.note, fallback_cost: l.fallback_cost }));
+        item_name: l.item_name, qty: l.qty, unit: l.unit, factor: l.factor, portion: l.portion, note: l.note, fallback_cost: l.fallback_cost, options: l.options ?? null }));
       await db.saveMenuRecipe({ ...r, recipe_id: null, name: name.trim() }, lines);
       load();
     } catch (e) { alert("Copy failed: " + (e.message || e)); }
@@ -3930,8 +3980,8 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
     try {
       const lines = r.lines.map((l) => {
         const p = l.product_id ? byId[l.product_id] : null;
-        return { stage: l.stage || "before", product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null, item_name: (l.item_name || p?.name || RECIPE_CTX.recipesById[l.sub_recipe_id]?.name || "Unnamed").trim(), qty: num(l.qty), unit: l.unit || null,
-          factor: num(l.factor), portion: l.portion || null, note: l.note || null, fallback_cost: num(l.fallback_cost) };
+        return { stage: l.stage || "before", product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null, item_name: (l.item_name || p?.name || RECIPE_CTX.recipesById[l.sub_recipe_id]?.name || choiceName(l, byId) || "Unnamed").trim(), qty: num(l.qty), unit: l.unit || null,
+          factor: num(l.factor), portion: l.portion || null, note: l.note || null, fallback_cost: num(l.fallback_cost), options: lineOptions(l).length ? lineOptions(l) : null };
       });
       await db.saveMenuRecipe(r, lines); onSaved();
     } catch (e) { alert("Save failed: " + (e.message || e)); setBusy(false); }
@@ -3944,8 +3994,8 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
       const lines = r.lines.map((l) => {
         const p = l.product_id ? byId[l.product_id] : null;
         return { stage: l.stage || "before", product_id: l.product_id || null, sub_recipe_id: l.sub_recipe_id || null,
-          item_name: (l.item_name || p?.name || RECIPE_CTX.recipesById[l.sub_recipe_id]?.name || "Unnamed").trim(),
-          qty: num(l.qty), unit: l.unit || null, factor: num(l.factor), portion: l.portion || null, note: l.note || null, fallback_cost: num(l.fallback_cost) };
+          item_name: (l.item_name || p?.name || RECIPE_CTX.recipesById[l.sub_recipe_id]?.name || choiceName(l, byId) || "Unnamed").trim(),
+          qty: num(l.qty), unit: l.unit || null, factor: num(l.factor), portion: l.portion || null, note: l.note || null, fallback_cost: num(l.fallback_cost), options: lineOptions(l).length ? lineOptions(l) : null };
       });
       await db.saveMenuRecipe({ ...r, recipe_id: null, name: name.trim(), updated_by: null, updated_at: null }, lines);
       onSaved();
@@ -4021,6 +4071,10 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
           </div>
           {showCost && <div style={{ display: "flex", gap: 22, marginTop: 12, flexWrap: "wrap", fontFamily: "'Barlow Condensed',sans-serif", fontSize: 20, fontWeight: 700 }}>
             <div>{isPrep ? "Batch cost" : "Cost"} <span className="fig">{money(rc.total)}</span></div>
+            {(() => { const sp = costSpan(r.lines, byId);
+              return sp && sp.hi - sp.lo > 0.0005
+                ? <div style={{ fontSize: 15, alignSelf: "center", color: "#3a3f9e" }} title="Depends which interchangeable item is used">{money(sp.lo)}–{money(sp.hi)} by choice</div>
+                : null; })()}
             {isPrep ? <div>Per {r.yield_unit || "unit"} <span className="fig">{num(r.yield_qty) ? `$${(rc.total / num(r.yield_qty)).toFixed(4)}` : "— set the batch yield"}</span></div>
               : <div style={fc > 0.3 ? { color: "#B0271B" } : undefined}>Food cost <span className="fig">{pct(fc)}</span></div>}
             {rc.missing > 0 && <div style={{ color: "#B0271B", fontSize: 15, alignSelf: "center" }}>{rc.missing} line{rc.missing === 1 ? "" : "s"} not costed</div>}
@@ -4090,10 +4144,18 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                 const sub = l.sub_recipe_id ? RECIPE_CTX.recipesById[l.sub_recipe_id] : null;
                 const p = !sub && l.product_id ? byId[l.product_id] : null, cpu = p ? unitCost(p) : null, c = lineCostInfo(l, byId);
                 const subConv = sub ? unitConv(l.unit, sub.yield_unit) : null;
+                const opts = lineOptions(l);
+                const setOpts = (next) => setLine(l._k, { options: next.length ? next : null });
                 return (
-                  <tr key={l._k}>
+                  <Fragment key={l._k}>
+                  <tr>
                     <td>
                       <ItemPicker productId={l.product_id} subId={l.sub_recipe_id} free={isFreeLine(l)} products={products} excludeRecipeId={r.recipe_id} onPick={(v) => pick(l, v)} style={{ width: "100%" }} />
+                      {!sub && <div style={{ marginTop: 4 }}>
+                        <button className="mini" title="Let this line be any one of several items — the guest picks the flavor" onClick={() => setOpts(opts.length ? [] : (l.product_id ? [{ product_id: l.product_id, is_default: true }] : []))}>
+                          {opts.length ? "✓ interchangeable" : "⇄ make interchangeable"}
+                        </button>
+                      </div>}
                       <div className="stat">{sub ? subInfo(sub.recipe_id, showCost) : p ? <>#{p.product_id} · counted in {measure(p)}{showCost && <> · {cpu != null ? <>${cpu.toFixed(4)}/{measure(p)} <span style={{ color: paidInfo(p) ? "#0a5c50" : "#9a5b00" }}>({priceNote(p)})</span></> : <span style={{ color: "#B0271B" }}>no delivery or vendor price</span>}</>}{packProblem(p) && <div style={{ color: "#B0271B", fontWeight: 600 }}>⚠ {packProblem(p)}</div>}</> : isFreeLine(l) ? <span>No cost — tap water, ice, or anything that isn't bought</span> : <span style={{ color: "#B0271B" }}>Pick the item this line uses</span>}</div>
                       {l.item_name && !(sub && l.item_name === sub.name) && (!p || l.item_name !== p.name) && <div className="stat">Recipe says: {l.item_name}</div>}
                     </td>
@@ -4128,7 +4190,40 @@ function MenuRecipeEditor({ recipe, products, byId, recipes, comps, onClose, onS
                       <button className="mini" style={{ padding: "4px 7px" }} disabled={i === r.lines.length - 1} onClick={() => move(l._k, 1)}>↓</button>
                       <button className="mini mini-danger" style={{ padding: "4px 7px" }} onClick={() => dropLine(l._k)}>✕</button>
                     </td>
-                  </tr>);
+                  </tr>
+                  {opts.length > 0 && (() => {
+                    const rows = optionCosts(l, byId);
+                    const priced = rows.filter((o) => o.cost != null);
+                    const base = priced.length ? (priced.find((o) => o.is_default) || priced.reduce((a, b) => (b.cost < a.cost ? b : a))) : null;
+                    return (
+                    <tr>
+                      <td colSpan={showCost ? 7 : 6} style={{ background: "#F7F8FB" }}>
+                        <div className="stat" style={{ marginTop: 0, marginBottom: 6 }}>
+                          <b>Interchangeable choices</b> — same amount ({l.qty ?? "?"} {l.unit}), any one of these.
+                          The one marked ★ sets this recipe&rsquo;s cost; with none marked the dearest is used so a menu price is never set off the cheapest flavor.
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                          {rows.map((o) => (
+                            <span key={o.product_id} className="bchip" style={{ display: "inline-flex", alignItems: "center", gap: 6, background: o.is_default ? "#EEF0FF" : "#fff", borderColor: o.is_default ? "#5A5FC8" : "#C9CCD2" }}>
+                              <button className="mini" style={{ padding: "0 4px", border: "none", background: "none" }} title={o.is_default ? "This is the default" : "Make this the default"}
+                                onClick={() => setOpts(opts.map((x) => ({ ...x, is_default: x.product_id === o.product_id })))}>{o.is_default ? "★" : "☆"}</button>
+                              {o.p.name}
+                              {showCost && <b>{o.cost != null ? money(o.cost) : "—"}</b>}
+                              {showCost && base && o.cost != null && Math.abs(o.cost - base.cost) > 0.0005 &&
+                                <span style={{ color: o.cost > base.cost ? "#B0271B" : "#0a5c50" }}>{o.cost > base.cost ? "+" : "−"}{money(Math.abs(o.cost - base.cost))}</span>}
+                              {o.bad && <span style={{ color: "#B0271B" }} title={packProblem(o.p)}>⚠</span>}
+                              <button className="mini mini-danger" style={{ padding: "0 5px" }} onClick={() => setOpts(opts.filter((x) => x.product_id !== o.product_id))}>✕</button>
+                            </span>
+                          ))}
+                        </div>
+                        <ItemPicker productId={null} subId={null} free={false} products={products} excludeRecipeId={r.recipe_id}
+                          onPick={(v) => { const id = resolvePick(v, byId, l.unit).product_id;
+                            if (id && !opts.some((x) => x.product_id === id)) setOpts([...opts, { product_id: id, is_default: opts.length === 0 }]); }}
+                          style={{ maxWidth: 320 }} />
+                      </td>
+                    </tr>);
+                  })()}
+                  </Fragment>);
               })}</tbody>
             </table>
           </div>
