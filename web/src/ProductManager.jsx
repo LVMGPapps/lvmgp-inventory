@@ -298,6 +298,17 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
   const [finding, setFinding] = useState(false);
   const [locFilter, setLocFilter] = useState("");
   const [venFilter, setVenFilter] = useState("");
+  const [catFilter, setCatFilter] = useState("");
+  const [packOnly, setPackOnly] = useState(false);
+  // Categories are free text and some rows carry stray trailing spaces or case
+  // differences ("Candy" vs "Candy "), so group on a normalised key or the same
+  // shelf shows up as two filters.
+  const catKey = (p) => String(p?.category || "").trim().toLowerCase();
+  const catList = (() => {
+    const m = new Map();
+    for (const p of products) { const k = catKey(p); if (k && !m.has(k)) m.set(k, String(p.category).trim()); }
+    return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  })();
   const [sortBy, setSortBy] = useState("az");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [showNotStocked, setShowNotStocked] = useState(false);
@@ -348,6 +359,8 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
     if (q && !(p.name.toLowerCase().includes(q.toLowerCase()) || (p.brand || "").toLowerCase().includes(q.toLowerCase()))) return false;
     if (locFilter && !(p.locations || []).some((l) => String(l.location_id) === locFilter)) return false;
     if (venFilter && !(p.vendors || []).some((v) => String(v.vendor_id) === venFilter)) return false;
+    if (catFilter && catKey(p) !== catFilter) return false;
+    if (packOnly && !packProblem(p)) return false;
     if (gapFilter) {
       const g = gapsFor(p);
       if (!g.length) return false;
@@ -356,12 +369,24 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
     return true;
   });
   const oh = (p) => onhand[p.product_id]?.total ?? 0;
+  const cpuOf = (p) => { const v = vCostPerUnit(p, (p.vendors || []).find((x) => x.primary) || (p.vendors || [])[0]); return v == null ? null : v; };
+  const recvOf = (p) => lastReceipt[p.product_id]?.received_date || "";
+  const nulLast = (x) => (x == null ? -Infinity : x);
   const sorters = {
     az: (a, b) => a.name.localeCompare(b.name),
     za: (a, b) => b.name.localeCompare(a.name),
     cat: (a, b) => (a.category || "~").localeCompare(b.category || "~") || a.name.localeCompare(b.name),
     ohhi: (a, b) => oh(b) - oh(a) || a.name.localeCompare(b.name),
     ohlo: (a, b) => oh(a) - oh(b) || a.name.localeCompare(b.name),
+    costhi: (a, b) => nulLast(cpuOf(b)) - nulLast(cpuOf(a)) || a.name.localeCompare(b.name),
+    costlo: (a, b) => nulLast(cpuOf(a)) - nulLast(cpuOf(b)) || a.name.localeCompare(b.name),
+    recent: (a, b) => recvOf(b).localeCompare(recvOf(a)) || a.name.localeCompare(b.name),
+    stale: (a, b) => recvOf(a).localeCompare(recvOf(b)) || a.name.localeCompare(b.name),
+    vendor: (a, b) => {
+      const n = (p) => ((p.vendors || []).find((x) => x.primary) || (p.vendors || [])[0])?.name || "~";
+      return n(a).localeCompare(n(b)) || a.name.localeCompare(b.name);
+    },
+    par: (a, b) => (num(b.par_level) || 0) - (num(a.par_level) || 0) || a.name.localeCompare(b.name),
   };
   list = [...list].sort(sorters[sortBy] || sorters.az);
 
@@ -377,6 +402,10 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
           <option value="">All locations</option>
           {locations.map((l) => <option key={l.location_id} value={l.location_id}>{l.name}</option>)}
         </select>
+        <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)}>
+          <option value="">All categories</option>
+          {catList.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+        </select>
         <select value={venFilter} onChange={(e) => setVenFilter(e.target.value)}>
           <option value="">All vendors</option>
           {vendors.map((v) => <option key={v.vendor_id} value={v.vendor_id}>{v.name}</option>)}
@@ -387,6 +416,12 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
           <option value="cat">Sort: Category</option>
           <option value="ohhi">Sort: On hand (high→low)</option>
           <option value="ohlo">Sort: On hand (low→high)</option>
+          <option value="costhi">Sort: Cost/unit (high→low)</option>
+          <option value="costlo">Sort: Cost/unit (low→high)</option>
+          <option value="recent">Sort: Received (newest)</option>
+          <option value="stale">Sort: Received (oldest)</option>
+          <option value="vendor">Sort: Vendor</option>
+          <option value="par">Sort: Par (high→low)</option>
         </select>
         <span className="stat" style={{ alignSelf: "center" }}>{list.length} item{list.length === 1 ? "" : "s"}</span>
         <button className="mini" onClick={() => setFlaggedOnly((v) => !v)} style={flaggedOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : (flaggedCount ? { borderColor: "#E0392B", color: "#E0392B" } : undefined)}>🚩 Needs recount{flaggedCount ? ` (${flaggedCount})` : ""}</button>
@@ -394,7 +429,10 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
         <button className="mini" onClick={() => setShowDiscontinued((v) => !v)} style={showDiscontinued ? { background: "#7a5b00", color: "#fff", borderColor: "#7a5b00" } : undefined}>{showDiscontinued ? "← Back to catalog" : "Discontinued"}</button>
         <button className="mini" title="Check the case → package → size unit math for every item" onClick={() => setUnitMath(true)}>📐 Unit math</button>
 
-        {(locFilter || venFilter || q || flaggedOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setQ(""); setFlaggedOnly(false); }}>Clear</button>}
+        {(() => { const n = products.filter((p) => packProblem(p)).length;
+          return n ? <button className="mini" title="Items whose pack setup can't produce a correct cost" onClick={() => setPackOnly((v) => !v)}
+            style={packOnly ? { background: "#E0392B", color: "#fff", borderColor: "#E0392B" } : { borderColor: "#E0392B", color: "#E0392B" }}>⚠ Pack setup ({n})</button> : null; })()}
+        {(locFilter || venFilter || catFilter || q || flaggedOnly || packOnly) && <button className="mini" onClick={() => { setLocFilter(""); setVenFilter(""); setCatFilter(""); setQ(""); setFlaggedOnly(false); setPackOnly(false); }}>Clear</button>}
       </div>
       {gapFilter && (
         <div className="note" style={{ borderColor: "#E68A00", background: "#FFF8E1", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
