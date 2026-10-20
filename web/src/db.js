@@ -935,10 +935,13 @@ export async function getPosSales(fromISO, toISO) {
     .select("sold_hour, pos_product_id, is_modifier, item_name, category, qty, amount")
     .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("pos_product_id"));
 }
-export async function getPosUsage(fromISO, toISO) {
-  return pageAll(() => supabase.from("v_pos_usage")
-    .select("sold_hour, product_id, source_item, qty")
-    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("product_id").order("source_item"));
+export async function getPosUsage(fromISO, toISO, productIds) {
+  return pageAll(() => {
+    let q = supabase.from("v_pos_usage").select("sold_hour, product_id, source_item, qty")
+      .gte("sold_hour", fromISO).lt("sold_hour", toISO);
+    if (productIds && productIds.length) q = q.in("product_id", productIds);
+    return q.order("sold_hour").order("product_id").order("source_item");
+  });
 }
 export async function getPosUnmatched(fromISO, toISO) {
   return pageAll(() => supabase.from("v_pos_unmatched")
@@ -950,5 +953,6 @@ export async function getPosSyncStatus() {
     .select("sale_day, synced_at").order("sale_day", { ascending: false }).limit(1);
   if (error) throw error;
   const { data: last } = await supabase.from("pos_sync_log").select("synced_at").order("synced_at", { ascending: false }).limit(1);
-  return { lastDay: data?.[0]?.sale_day || null, lastSync: last?.[0]?.synced_at || null };
+  const { data: first } = await supabase.from("pos_current_batch").select("sale_day").order("sale_day", { ascending: true }).limit(1);
+  return { lastDay: data?.[0]?.sale_day || null, lastSync: last?.[0]?.synced_at || null, firstDay: first?.[0]?.sale_day || null };
 }

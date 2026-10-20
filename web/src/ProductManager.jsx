@@ -5209,17 +5209,31 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
   const [status, setStatus] = useState(null);
   const per = periods.find((p) => p.key === pk) || periods[periods.length - 1];
   const fromT = per ? per.a.end + 1 : 0, toT = per ? (per.b ? per.b.end : Date.now()) : 0;
+  // Continuous-use items (soda BIBs) are counted by estimating what's left in the open bag, so one
+  // week on its own is mostly estimate noise. They're compared over the last several count weeks
+  // (as far back as POS sales go) and that average rate is applied to this week's sales.
+  const SPAN_WEEKS = 8;
+  const contRoots = [...new Set(allProducts.filter((p) => p.continuous_use).map((p) => Number(p.backup_for || p.product_id)))];
+  const contIds = allProducts.filter((p) => contRoots.includes(Number(p.backup_for || p.product_id))).map((p) => p.product_id);
+  const bIdx = per && per.b ? sessions.indexOf(per.b) : -1;
+  const firstSaleT = status?.firstDay ? new Date(status.firstDay + "T00:00:00").getTime() : null;
+  let spanA = per ? per.a : null;
+  if (bIdx > 0 && firstSaleT) {
+    for (let i = bIdx - 1; i >= Math.max(0, bIdx - SPAN_WEEKS); i--) { if (sessions[i].end >= firstSaleT) spanA = sessions[i]; else break; }
+  }
 
-  useEffect(() => { db.getPosSyncStatus().then(setStatus).catch(() => {}); }, []);
+  useEffect(() => { db.getPosSyncStatus().then((x) => setStatus(x || {})).catch(() => setStatus({})); }, []);
   useEffect(() => {
-    if (!per) return;
+    if (!per || status === null) return;
     let live = true; setData(null); setErr("");
     const f = new Date(fromT).toISOString(), t = new Date(toT).toISOString();
-    Promise.all([db.getPosSales(f, t), db.getPosUsage(f, t), db.getPosUnmatched(f, t)])
-      .then(([sales, usage, unmatched]) => { if (live) setData({ sales, usage, unmatched }); })
+    const spanF = spanA && spanA !== per.a ? new Date(spanA.end + 1).toISOString() : null;
+    Promise.all([db.getPosSales(f, t), db.getPosUsage(f, t), db.getPosUnmatched(f, t),
+                 spanF && contIds.length ? db.getPosUsage(spanF, t, contIds) : Promise.resolve(null)])
+      .then(([sales, usage, unmatched, spanUsage]) => { if (live) setData({ sales, usage, unmatched, spanUsage }); })
       .catch((e) => { if (live) setErr(e.message || String(e)); });
     return () => { live = false; };
-  }, [pk, sessions.length]);
+  }, [pk, sessions.length, status === null]);
 
   if (!per) return <div className="note">This report needs at least two weekly counts.</div>;
 
@@ -5255,6 +5269,8 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
     should[k] = (should[k] || 0) + q;
     const m = (srcs[k] ||= {}); m[u.source_item] = (m[u.source_item] || 0) + q;
   }
+  let spanShould = null;
+  if (data.spanUsage) { spanShould = {}; for (const u of data.spanUsage) { const k = rootKey(u.product_id); spanShould[k] = (spanShould[k] || 0) + (Number(u.qty) || 0) * ratio(u.product_id); } }
   const visible = new Set(products.map((p) => String(rootKey(p.product_id))));
   const keys = [...new Set([...Object.keys(should), ...(wkB ? Object.keys(byItem).filter((k) => byItem[k][wkA] || byItem[k][wkB]) : [])])].filter((k) => visible.has(k) && byId[k]);
   const rows = keys.map((k) => {
@@ -5263,12 +5279,25 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
     const dA = dOf(it, wkA) || new Date(per.a.end).toISOString().slice(0, 10);
     const dB = wkB ? (dOf(it, wkB) || new Date(per.b.end).toISOString().slice(0, 10)) : "9999-12-31";
     const rec = (recByItem[k] || []).filter((x) => x.d >= dA && x.d < dB).reduce((s, x) => s + x.units, 0);
-    const used = a != null && b != null ? a + rec - b : null;
+    let used = a != null && b != null ? a + rec - b : null;
     const sh = should[k] || 0;
+    let smooth = null;
+    if (p.continuous_use && b != null && spanShould && spanA && spanA !== per.a) {
+      const a0 = tot(it, spanA.wk);
+      const d0 = dOf(it, spanA.wk) || new Date(spanA.end).toISOString().slice(0, 10);
+      const rec0 = (recByItem[k] || []).filter((x) => x.d >= d0 && x.d < dB).reduce((s2, x) => s2 + x.units, 0);
+      const spanUsed = a0 != null ? a0 + rec0 - b : null;
+      const spanSh = spanShould[k] || 0;
+      if (spanUsed != null && spanUsed > 0 && spanSh > 0) {         // a bag count that went UP with no delivery stays a count issue
+        const weeks = Math.max(1, Math.round((per.b.end - spanA.end) / (7 * 864e5)));
+        smooth = { weeks, ratio: spanUsed / spanSh, weekUsed: used, spanUsed, spanSh };
+        used = sh * smooth.ratio;                     // this week's sales at the long-run usage rate
+      }
+    }
     const v = used != null ? used - sh : null;
     const c = costOf(p);
-    const status = used == null ? "not counted" : (b > a + rec + 1e-6 || used < -1e-6) ? "count issue" : sh === 0 ? (used > 1e-6 ? "not on a recipe" : "no movement") : v / sh > 0.15 ? "over" : v / sh < -0.15 ? "under" : "on target";
-    return { k, p, a, b, rec, used, sh, v, pct: sh ? v / sh : null, usd: v != null && c != null ? v * c : null, status, alts: familyOf(p, allProducts).length - 1 };
+    const status = used == null ? "not counted" : !smooth && (b > a + rec + 1e-6 || used < -1e-6) ? "count issue" : sh === 0 ? (used > 1e-6 ? "not on a recipe" : "no movement") : v / sh > 0.15 ? "over" : v / sh < -0.15 ? "under" : "on target";
+    return { k, p, a, b, rec, used, sh, v, smooth, pct: sh ? v / sh : null, usd: v != null && c != null ? v * c : null, status, alts: familyOf(p, allProducts).length - 1 };
   }).filter((r) => r.sh > 1e-6 || (r.used != null && Math.abs(r.used) > 1e-6));
   // ---------- Summary: revenue vs. expected vs. actual cost ----------
   let foodRev = 0, alcRev = 0;
@@ -5382,7 +5411,7 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
             return (
               <Fragment key={r.k}>
                 <tr style={{ cursor: "pointer" }} onClick={() => setOpenRow(open ? null : r.k)}>
-                  <td><b>{r.p.name}</b>{r.alts > 0 && <span className="stat"> · incl. {r.alts} option{r.alts === 1 ? "" : "s"}</span>}<div><span className="bchip" style={{ background: bg, color: fg, borderColor: fg }}>{r.status}{r.pct != null && isFinite(r.pct) && (r.status === "over" || r.status === "under") ? ` ${r.pct > 0 ? "+" : ""}${Math.round(r.pct * 100)}%` : ""}</span></div></td>
+                  <td><b>{r.p.name}</b>{r.alts > 0 && <span className="stat"> · incl. {r.alts} option{r.alts === 1 ? "" : "s"}</span>}{r.smooth && <span className="stat"> · avg of {r.smooth.weeks} wks</span>}<div><span className="bchip" style={{ background: bg, color: fg, borderColor: fg }}>{r.status}{r.pct != null && isFinite(r.pct) && (r.status === "over" || r.status === "under") ? ` ${r.pct > 0 ? "+" : ""}${Math.round(r.pct * 100)}%` : ""}</span></div></td>
                   <td className="fig" style={{ textAlign: "right" }}>{q(r.p, r.a)}</td>
                   <td className="fig" style={{ textAlign: "right", color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? fmtQty(r.p, r.rec) : "—"}</td>
                   <td className="fig" style={{ textAlign: "right" }}>{q(r.p, r.b)}</td>
@@ -5392,6 +5421,7 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
                   <td className="fig" style={{ textAlign: "right" }}>{r.usd == null ? "—" : (r.usd < 0 ? "-" : "") + money(Math.abs(r.usd))}</td>
                 </tr>
                 {open && <tr><td colSpan={8} style={{ background: "#FAFAF7" }}>
+                  {r.smooth && <div className="stat" style={{ marginBottom: 4 }}><b>Smoothed:</b> counted on an estimate of the open bag, so it's compared over the last {r.smooth.weeks} count weeks — used {fmtQty(r.p, r.smooth.spanUsed)} vs. sales say {fmtQty(r.p, r.smooth.spanSh)} ({Math.round((r.smooth.ratio - 1) * 100)}% {r.smooth.ratio >= 1 ? "over" : "under"}). This week alone the counts show {q(r.p, r.smooth.weekUsed)}.</div>}
                   {src.length ? <div className="stat"><b>Sales say {fmtQty(r.p, r.sh)}, from:</b> {src.slice(0, 12).map(([s, v]) => `${s} ${fmtQty(r.p, v)}`).join(" · ")}{src.length > 12 ? ` · +${src.length - 12} more` : ""}</div>
                     : <div className="stat">No menu item uses this in its recipe — anything used is either waste, comps, or an item without a recipe.</div>}
                   <button className="mini" style={{ marginTop: 6 }} onClick={(e) => { e.stopPropagation(); onOpen && onOpen(r.p); }}>Count history</button>
