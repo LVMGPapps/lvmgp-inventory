@@ -5188,6 +5188,11 @@ function countSessions(counts) {
   }).filter((s) => s.n >= 10).sort((a, b) => a.end - b.end);    // ignore weeks with only a handful of spot counts
 }
 
+// POS categories that count as food & beverage revenue (alcohol isn't stocked in this app).
+const FOOD_CATS = new Set(["Pizza", "Pizza Modifiers", "Food", "Modifiers", "Party Food", "Beverages", "Beverage Modifiers",
+  "Fountain Beverages", "Bottled Beverages", "Sweets", "Snacks"]);
+const ALCOHOL_CATS = new Set(["Alcohol", "Beer", "12 oz Beer", "24 oz Beer", "Wine"]);
+
 function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onOpen }) {
   const sessions = countSessions(counts);
   const fmtD = (t) => new Date(t).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
@@ -5237,58 +5242,6 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
   if (!data) return <div>{head}<div className="empty">Loading sales…</div></div>;
   if (!data.sales.length) return <div>{head}<div className="note">No POS sales have been sent for this period yet. Sales arrive each night from the Parafait server.</div></div>;
 
-  // ---------- What sold ----------
-  if (view === "sold") {
-    const agg = {};
-    for (const r of data.sales) {
-      const k = r.pos_product_id + (r.is_modifier ? "m" : "");
-      const a = (agg[k] ||= { name: r.item_name, cat: r.category || "Other", mod: r.is_modifier, qty: 0, amt: 0 });
-      a.qty += Number(r.qty) || 0; a.amt += Number(r.amount) || 0;
-    }
-    // Free choices (flavor picks, no-charge toppings) are hidden unless asked for; charged add-ons
-    // and items sold inside a package (party pizzas, pitchers) always show.
-    const rows = Object.values(agg).filter((a) => (a.qty || a.amt) && (showMods || !a.mod || Math.abs(a.amt) > 0.005));
-    const byCat = {};
-    for (const a of rows) (byCat[a.cat] ||= []).push(a);
-    const cats = Object.entries(byCat).map(([c, xs]) => ({ c, xs: xs.sort((a, b) => b.amt - a.amt || b.qty - a.qty), amt: xs.reduce((s, x) => s + x.amt, 0), qty: xs.reduce((s, x) => s + x.qty, 0) }))
-      .sort((a, b) => b.amt - a.amt);
-    const total = cats.reduce((s, c) => s + c.amt, 0);
-    return (
-      <div>{head}
-        <div className="toolbar" style={{ marginBottom: 8 }}>
-          <b>{fmtUSD(total)}</b><span className="stat">across {rows.length} items</span>
-          <label className="stat" style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto" }}><input type="checkbox" checked={showMods} onChange={(e) => setShowMods(e.target.checked)} /> include free choices (flavors, no-charge toppings)</label>
-        </div>
-        <div style={{ overflowX: "auto" }}>
-          <table className="tbl" style={{ border: "none", minWidth: 420 }}>
-            <thead><tr><th>Item</th><th style={{ textAlign: "right" }}>Sold</th><th style={{ textAlign: "right" }}>Sales $</th></tr></thead>
-            <tbody>{cats.map((c) => (
-              <Fragment key={c.c}>
-                <tr><td colSpan={3} style={{ background: "#F4F1EA", fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", fontSize: 13, padding: "6px 8px" }}>{c.c} <span className="stat" style={{ textTransform: "none", fontWeight: 400 }}>· {fmtUSD(c.amt)}</span></td></tr>
-                {c.xs.map((a, i) => <tr key={i}><td>{a.name}{a.mod && <span className="stat"> · in a package / add-on</span>}</td><td className="fig" style={{ textAlign: "right" }}>{+a.qty.toFixed(2)}</td><td className="fig" style={{ textAlign: "right" }}>{a.amt ? money(a.amt) : "—"}</td></tr>)}
-              </Fragment>
-            ))}</tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
-
-  // ---------- Not in recipes ----------
-  if (view === "unmatched") {
-    const agg = {};
-    for (const r of data.unmatched) { const k = r.item_name + "|" + r.reason; const a = (agg[k] ||= { name: r.item_name, why: r.reason, qty: 0 }); a.qty += Number(r.qty) || 0; }
-    const rows = Object.values(agg).sort((a, b) => b.qty - a.qty);
-    return (
-      <div>{head}
-        <div className="stat" style={{ marginBottom: 8 }}>These sold but have no recipe or portion in the app, so the inventory they use isn't in "Should have used". Add a recipe (Recipes tab) or a portion to close the gap.</div>
-        {!rows.length ? <div className="note">Everything sold this period is covered by a recipe. ✓</div> :
-          <table className="tbl" style={{ border: "none" }}><thead><tr><th>Item</th><th>Why</th><th style={{ textAlign: "right" }}>Times</th></tr></thead>
-            <tbody>{rows.map((r, i) => <tr key={i}><td>{r.name}</td><td className="stat">{r.why}</td><td className="fig" style={{ textAlign: "right" }}>{+r.qty.toFixed(2)}</td></tr>)}</tbody></table>}
-      </div>
-    );
-  }
-
   // ---------- Used vs. sales ----------
   const { byId, byItem, recByItem, rootKey, ratio } = familyMaps(allProducts, counts, receipts);
   const paid = lastPaidByProduct(receipts, byId, onhand);
@@ -5317,6 +5270,89 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
     const status = used == null ? "not counted" : (b > a + rec + 1e-6 || used < -1e-6) ? "count issue" : sh === 0 ? (used > 1e-6 ? "not on a recipe" : "no movement") : v / sh > 0.15 ? "over" : v / sh < -0.15 ? "under" : "on target";
     return { k, p, a, b, rec, used, sh, v, pct: sh ? v / sh : null, usd: v != null && c != null ? v * c : null, status, alts: familyOf(p, allProducts).length - 1 };
   }).filter((r) => r.sh > 1e-6 || (r.used != null && Math.abs(r.used) > 1e-6));
+  // ---------- Summary: revenue vs. expected vs. actual cost ----------
+  let foodRev = 0, alcRev = 0;
+  for (const r of data.sales) {
+    const c = String(r.category || "");
+    if (FOOD_CATS.has(c)) foodRev += Number(r.amount) || 0;
+    else if (ALCOHOL_CATS.has(c)) alcRev += Number(r.amount) || 0;
+  }
+  let expCost = 0, actCost = 0, assumed = 0, noCost = 0;
+  for (const r of rows) {
+    const c = costOf(r.p);
+    if (c == null) { noCost++; continue; }
+    expCost += r.sh * c;
+    const clean = r.status === "over" || r.status === "under" || r.status === "on target" || r.status === "not on a recipe" || r.status === "no movement";
+    if (clean && r.used != null) actCost += r.used * c; else { actCost += r.sh * c; if (r.sh > 0) assumed++; }
+  }
+  const pct = (x) => (foodRev > 0 ? ` · ${(x / foodRev * 100).toFixed(1)}%` : "");
+  const summary = (
+    <div style={{ marginBottom: 12 }}>
+      <div className="tiles" style={{ marginBottom: 6 }}>
+        <div className="tile dark"><div className="k">Food revenue</div><div className="v fig">{fmtUSD(foodRev)}</div><div className="stat" style={{ color: "#C9CCD2" }}>food, drinks & sweets{alcRev ? ` · alcohol ${fmtUSD(alcRev)} not included` : ""}</div></div>
+        <div className="tile"><div className="k">Expected cost</div><div className="v fig">{fmtUSD(expCost)}</div><div className="stat">sales × recipes{pct(expCost)}</div></div>
+        <div className="tile"><div className="k">Actual cost</div><div className="v fig">{per.b ? fmtUSD(actCost) : "—"}</div><div className="stat">{per.b ? <>from your counts{pct(actCost)}</> : "after the next weekly count"}</div></div>
+        {per.b && <div className="tile"><div className="k">Gap</div><div className="v fig" style={{ color: actCost - expCost > 0 ? "#B0271B" : "#0a5c50" }}>{(actCost - expCost < 0 ? "-" : "") + fmtUSD(Math.abs(actCost - expCost))}</div><div className="stat">{foodRev > 0 ? `${((actCost - expCost) / foodRev * 100).toFixed(1)} points of revenue` : "actual − expected"}</div></div>}
+      </div>
+      <div className="stat">
+        Cost = blended cost of the newest deliveries on hand. {per.b && assumed > 0 ? `${assumed} item${assumed === 1 ? "" : "s"} with a count/receiving problem or no count are taken at the recipe amount, so the real gap may be larger. ` : ""}
+        {noCost > 0 ? `${noCost} item${noCost === 1 ? " has" : "s have"} no price yet and ${noCost === 1 ? "isn't" : "aren't"} included.` : ""}
+      </div>
+    </div>
+  );
+
+  // ---------- What sold ----------
+  if (view === "sold") {
+    const agg = {};
+    for (const r of data.sales) {
+      const k = r.pos_product_id + (r.is_modifier ? "m" : "");
+      const a = (agg[k] ||= { name: r.item_name, cat: r.category || "Other", mod: r.is_modifier, qty: 0, amt: 0 });
+      a.qty += Number(r.qty) || 0; a.amt += Number(r.amount) || 0;
+    }
+    // Free choices (flavor picks, no-charge toppings) are hidden unless asked for; charged add-ons
+    // and items sold inside a package (party pizzas, pitchers) always show.
+    const rows = Object.values(agg).filter((a) => (a.qty || a.amt) && (showMods || !a.mod || Math.abs(a.amt) > 0.005));
+    const byCat = {};
+    for (const a of rows) (byCat[a.cat] ||= []).push(a);
+    const cats = Object.entries(byCat).map(([c, xs]) => ({ c, xs: xs.sort((a, b) => b.amt - a.amt || b.qty - a.qty), amt: xs.reduce((s, x) => s + x.amt, 0), qty: xs.reduce((s, x) => s + x.qty, 0) }))
+      .sort((a, b) => b.amt - a.amt);
+    const total = cats.reduce((s, c) => s + c.amt, 0);
+    return (
+      <div>{head}{summary}
+        <div className="toolbar" style={{ marginBottom: 8 }}>
+          <b>{fmtUSD(total)}</b><span className="stat">across {rows.length} items</span>
+          <label className="stat" style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto" }}><input type="checkbox" checked={showMods} onChange={(e) => setShowMods(e.target.checked)} /> include free choices (flavors, no-charge toppings)</label>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table className="tbl" style={{ border: "none", minWidth: 420 }}>
+            <thead><tr><th>Item</th><th style={{ textAlign: "right" }}>Sold</th><th style={{ textAlign: "right" }}>Sales $</th></tr></thead>
+            <tbody>{cats.map((c) => (
+              <Fragment key={c.c}>
+                <tr><td colSpan={3} style={{ background: "#F4F1EA", fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", fontSize: 13, padding: "6px 8px" }}>{c.c} <span className="stat" style={{ textTransform: "none", fontWeight: 400 }}>· {fmtUSD(c.amt)}</span></td></tr>
+                {c.xs.map((a, i) => <tr key={i}><td>{a.name}{a.mod && <span className="stat"> · in a package / add-on</span>}</td><td className="fig" style={{ textAlign: "right" }}>{+a.qty.toFixed(2)}</td><td className="fig" style={{ textAlign: "right" }}>{a.amt ? money(a.amt) : "—"}</td></tr>)}
+              </Fragment>
+            ))}</tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- Not in recipes ----------
+  if (view === "unmatched") {
+    const agg = {};
+    for (const r of data.unmatched) { const k = r.item_name + "|" + r.reason; const a = (agg[k] ||= { name: r.item_name, why: r.reason, qty: 0 }); a.qty += Number(r.qty) || 0; }
+    const rows = Object.values(agg).sort((a, b) => b.qty - a.qty);
+    return (
+      <div>{head}{summary}
+        <div className="stat" style={{ marginBottom: 8 }}>These sold but have no recipe or portion in the app, so the inventory they use isn't in "Should have used". Add a recipe (Recipes tab) or a portion to close the gap.</div>
+        {!rows.length ? <div className="note">Everything sold this period is covered by a recipe. ✓</div> :
+          <table className="tbl" style={{ border: "none" }}><thead><tr><th>Item</th><th>Why</th><th style={{ textAlign: "right" }}>Times</th></tr></thead>
+            <tbody>{rows.map((r, i) => <tr key={i}><td>{r.name}</td><td className="stat">{r.why}</td><td className="fig" style={{ textAlign: "right" }}>{+r.qty.toFixed(2)}</td></tr>)}</tbody></table>}
+      </div>
+    );
+  }
+
   const ORDER = { over: 0, "count issue": 1, under: 2, "not on a recipe": 3, "not counted": 4, "on target": 5, "no movement": 6 };
   rows.sort((x, y) => (ORDER[x.status] - ORDER[y.status]) || (Math.abs(y.usd || 0) - Math.abs(x.usd || 0)));
   const COLOR = { over: ["#FDECEA", "#B0271B"], "count issue": ["#FFF3E0", "#9a5b00"], under: ["#E3EEF9", "#243B6B"], "on target": ["#E6F4F0", "#0a5c50"], "not on a recipe": ["#F2F4F8", "#4a4f57"], "not counted": ["#F2F4F8", "#4a4f57"], "no movement": ["#F2F4F8", "#999"] };
@@ -5324,7 +5360,7 @@ function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onO
   const n = (s) => rows.filter((r) => r.status === s).length;
   const q = (p, v) => v == null ? "—" : (v < 0 ? "-" : "") + fmtQty(p, Math.abs(v));
   return (
-    <div>{head}
+    <div>{head}{summary}
       {!per.b && <div className="note" style={{ marginBottom: 8 }}>No closing count yet — "Used" fills in after the next weekly count. "Should have used" is sales so far.</div>}
       <div className="toolbar" style={{ marginBottom: 8, gap: 6, flexWrap: "wrap" }}>
         <span className="bchip" style={{ background: COLOR.over[0], color: COLOR.over[1], borderColor: COLOR.over[1] }}>{n("over")} over recipe · {fmtUSD(overUsd)}</span>
