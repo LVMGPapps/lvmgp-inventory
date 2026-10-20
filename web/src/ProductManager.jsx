@@ -4983,6 +4983,7 @@ const REPORT_INFO = {
   notcounted: { blurb: "Stocked items with no count logged this week." },
   stale:      { blurb: "Stock sitting in a location it shouldn't be — zero it out." },
   attention:  { blurb: "Items missing costs, conversions, vendors or locations." },
+  salesusage: { blurb: "What the POS sold between counts, what it should have used, and how far off the counts are." },
   review:     { blurb: "Last count → received → this count → what got used." },
   onhand:     { blurb: "Current quantity of every item, broken out by location." },
   value:      { blurb: "What your inventory is worth, grouped by category." },
@@ -5078,6 +5079,7 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
     ["notcounted", `Not counted this week (${notCountedStocked})`, <NotCountedReport products={fProducts} counts={fCounts} locations={locations} onOpen={setDetail} reload={reload} />],
     ["stale", `Stray stock by location (${staleLocs})`, <StaleLocationsReport products={fProducts} counts={fCounts} locations={locations} onOpen={setDetail} reload={reload} />],
     ["attention", `Needs attention (${attention.length})`, <NeedsAttentionReport attention={attention} onOpen={setDetail} openItem={openItem} />],
+    ["salesusage", "Sales & usage (sold vs. used)", <SalesUsageReport products={fProducts} allProducts={products} counts={counts} receipts={receipts || []} onhand={onhand} onOpen={setDetail} />],
     ["review", "Weekly review (last → received → this → used)", <WeeklyReviewReport counts={fCounts} receipts={recs} products={fProducts} onOpen={setDetail} reload={reload} />],
     ["onhand", "On hand — by location", <OnHandReport products={fProducts} onhand={fOnhand} />],
     ["value", "Inventory value — by category", <ValueReport valByCat={valByCat} total={invValue} />],
@@ -5161,6 +5163,208 @@ function Dashboard({ products, onhand, vendors, locations, counts, receipts, rel
       <div className="note">Every report now lives in the <b>Reporting</b> tab — including the ones behind the tiles above.</div>
 
       {detail && <ItemHistory product={detail} locations={locations} openItem={openItem} onClose={() => setDetail(null)} onChanged={() => { reload && reload(); }} />}
+    </div>
+  );
+}
+
+// ---- Sales & usage --------------------------------------------------------
+// What the POS sold between two weekly counts, the inventory those sales SHOULD
+// have used (from the recipes), and what the counts say was actually used.
+// Sales arrive nightly from the Parafait server (see lvmgp_sales_sync.py).
+function countSessions(counts) {
+  // One session per count week: the weekly count is the first burst of counts that week;
+  // a later spot count in the same week doesn't move the session.
+  const byWk = {};
+  for (const c of counts || []) {
+    const t = new Date(c.counted_at).getTime();
+    const w = weekStart(c.counted_at.slice(0, 10)).toISOString().slice(0, 10);
+    (byWk[w] ||= []).push(t);
+  }
+  return Object.entries(byWk).map(([wk, ts]) => {
+    ts.sort((a, b) => a - b);
+    const first = ts[0];
+    const end = ts.filter((t) => t - first <= 12 * 3600e3).pop();
+    return { wk, start: first, end, n: ts.length };
+  }).filter((s) => s.n >= 10).sort((a, b) => a.end - b.end);    // ignore weeks with only a handful of spot counts
+}
+
+function SalesUsageReport({ products, allProducts, counts, receipts, onhand, onOpen }) {
+  const sessions = countSessions(counts);
+  const fmtD = (t) => new Date(t).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  const fmtDT = (t) => new Date(t).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const periods = [];
+  for (let i = 1; i < sessions.length; i++) periods.push({ key: sessions[i].wk, a: sessions[i - 1], b: sessions[i], label: `${fmtD(sessions[i - 1].end)} → ${fmtD(sessions[i].end)}` });
+  if (sessions.length) { const last = sessions[sessions.length - 1]; periods.push({ key: "open", a: last, b: null, label: `Since ${fmtD(last.end)} (sales so far, no closing count yet)` }); }
+  const [pk, setPk] = useState(() => (periods.length > 1 ? periods[periods.length - 2].key : periods[0]?.key));
+  const [view, setView] = useState("usage");            // usage | sold | unmatched
+  const [showMods, setShowMods] = useState(false);
+  const [openRow, setOpenRow] = useState(null);
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [status, setStatus] = useState(null);
+  const per = periods.find((p) => p.key === pk) || periods[periods.length - 1];
+  const fromT = per ? per.a.end + 1 : 0, toT = per ? (per.b ? per.b.end : Date.now()) : 0;
+
+  useEffect(() => { db.getPosSyncStatus().then(setStatus).catch(() => {}); }, []);
+  useEffect(() => {
+    if (!per) return;
+    let live = true; setData(null); setErr("");
+    const f = new Date(fromT).toISOString(), t = new Date(toT).toISOString();
+    Promise.all([db.getPosSales(f, t), db.getPosUsage(f, t), db.getPosUnmatched(f, t)])
+      .then(([sales, usage, unmatched]) => { if (live) setData({ sales, usage, unmatched }); })
+      .catch((e) => { if (live) setErr(e.message || String(e)); });
+    return () => { live = false; };
+  }, [pk, sessions.length]);
+
+  if (!per) return <div className="note">This report needs at least two weekly counts.</div>;
+
+  const head = (
+    <div>
+      <div className="toolbar" style={{ marginBottom: 8, flexWrap: "wrap" }}>
+        <select value={per.key} onChange={(e) => { setPk(e.target.value); setOpenRow(null); }}>
+          {periods.slice().reverse().map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+        </select>
+        {[["usage", "Used vs. sales"], ["sold", "What sold"], ["unmatched", "Not in recipes"]].map(([k, l]) =>
+          <button key={k} className="mini" onClick={() => setView(k)} style={view === k ? { background: "#243B6B", color: "#fff", borderColor: "#243B6B" } : undefined}>{l}</button>)}
+      </div>
+      <div className="stat" style={{ marginBottom: 10 }}>
+        Sales from {fmtDT(fromT)} to {per.b ? fmtDT(toT) : "now"} — the time between the two counts.
+        {status && <> · Sales last sent from the POS {status.lastSync ? fmtDT(new Date(status.lastSync).getTime()) : "never"}{status.lastDay ? ` (through ${new Date(status.lastDay + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" })})` : ""}.</>}
+      </div>
+    </div>
+  );
+  if (err) return <div>{head}<div className="note" style={{ borderColor: "#E0392B" }}>Couldn't load sales: {err}</div></div>;
+  if (!data) return <div>{head}<div className="empty">Loading sales…</div></div>;
+  if (!data.sales.length) return <div>{head}<div className="note">No POS sales have been sent for this period yet. Sales arrive each night from the Parafait server.</div></div>;
+
+  // ---------- What sold ----------
+  if (view === "sold") {
+    const agg = {};
+    for (const r of data.sales) {
+      const k = r.pos_product_id + (r.is_modifier ? "m" : "");
+      const a = (agg[k] ||= { name: r.item_name, cat: r.category || "Other", mod: r.is_modifier, qty: 0, amt: 0 });
+      a.qty += Number(r.qty) || 0; a.amt += Number(r.amount) || 0;
+    }
+    // Free choices (flavor picks, no-charge toppings) are hidden unless asked for; charged add-ons
+    // and items sold inside a package (party pizzas, pitchers) always show.
+    const rows = Object.values(agg).filter((a) => (a.qty || a.amt) && (showMods || !a.mod || Math.abs(a.amt) > 0.005));
+    const byCat = {};
+    for (const a of rows) (byCat[a.cat] ||= []).push(a);
+    const cats = Object.entries(byCat).map(([c, xs]) => ({ c, xs: xs.sort((a, b) => b.amt - a.amt || b.qty - a.qty), amt: xs.reduce((s, x) => s + x.amt, 0), qty: xs.reduce((s, x) => s + x.qty, 0) }))
+      .sort((a, b) => b.amt - a.amt);
+    const total = cats.reduce((s, c) => s + c.amt, 0);
+    return (
+      <div>{head}
+        <div className="toolbar" style={{ marginBottom: 8 }}>
+          <b>{fmtUSD(total)}</b><span className="stat">across {rows.length} items</span>
+          <label className="stat" style={{ display: "flex", gap: 6, alignItems: "center", marginLeft: "auto" }}><input type="checkbox" checked={showMods} onChange={(e) => setShowMods(e.target.checked)} /> include free choices (flavors, no-charge toppings)</label>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table className="tbl" style={{ border: "none", minWidth: 420 }}>
+            <thead><tr><th>Item</th><th style={{ textAlign: "right" }}>Sold</th><th style={{ textAlign: "right" }}>Sales $</th></tr></thead>
+            <tbody>{cats.map((c) => (
+              <Fragment key={c.c}>
+                <tr><td colSpan={3} style={{ background: "#F4F1EA", fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em", fontSize: 13, padding: "6px 8px" }}>{c.c} <span className="stat" style={{ textTransform: "none", fontWeight: 400 }}>· {fmtUSD(c.amt)}</span></td></tr>
+                {c.xs.map((a, i) => <tr key={i}><td>{a.name}{a.mod && <span className="stat"> · in a package / add-on</span>}</td><td className="fig" style={{ textAlign: "right" }}>{+a.qty.toFixed(2)}</td><td className="fig" style={{ textAlign: "right" }}>{a.amt ? money(a.amt) : "—"}</td></tr>)}
+              </Fragment>
+            ))}</tbody>
+          </table>
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- Not in recipes ----------
+  if (view === "unmatched") {
+    const agg = {};
+    for (const r of data.unmatched) { const k = r.item_name + "|" + r.reason; const a = (agg[k] ||= { name: r.item_name, why: r.reason, qty: 0 }); a.qty += Number(r.qty) || 0; }
+    const rows = Object.values(agg).sort((a, b) => b.qty - a.qty);
+    return (
+      <div>{head}
+        <div className="stat" style={{ marginBottom: 8 }}>These sold but have no recipe or portion in the app, so the inventory they use isn't in "Should have used". Add a recipe (Recipes tab) or a portion to close the gap.</div>
+        {!rows.length ? <div className="note">Everything sold this period is covered by a recipe. ✓</div> :
+          <table className="tbl" style={{ border: "none" }}><thead><tr><th>Item</th><th>Why</th><th style={{ textAlign: "right" }}>Times</th></tr></thead>
+            <tbody>{rows.map((r, i) => <tr key={i}><td>{r.name}</td><td className="stat">{r.why}</td><td className="fig" style={{ textAlign: "right" }}>{+r.qty.toFixed(2)}</td></tr>)}</tbody></table>}
+      </div>
+    );
+  }
+
+  // ---------- Used vs. sales ----------
+  const { byId, byItem, recByItem, rootKey, ratio } = familyMaps(allProducts, counts, receipts);
+  const paid = lastPaidByProduct(receipts, byId, onhand);
+  const costOf = (p) => (paid[p.product_id]?.per > 0 ? paid[p.product_id].per : costPerCount(p));
+  const wkA = per.a.wk, wkB = per.b ? per.b.wk : null;
+  const tot = (it, w) => it && it[w] ? Object.values(it[w]).reduce((s, x) => s + x.qty, 0) : null;
+  const dOf = (it, w) => it && it[w] ? Object.values(it[w]).reduce((a, x) => (x.t >= a.t ? x : a)).d : null;
+  const should = {}, srcs = {};
+  for (const u of data.usage) {
+    const k = rootKey(u.product_id), q = (Number(u.qty) || 0) * ratio(u.product_id);
+    should[k] = (should[k] || 0) + q;
+    const m = (srcs[k] ||= {}); m[u.source_item] = (m[u.source_item] || 0) + q;
+  }
+  const visible = new Set(products.map((p) => String(rootKey(p.product_id))));
+  const keys = [...new Set([...Object.keys(should), ...(wkB ? Object.keys(byItem).filter((k) => byItem[k][wkA] || byItem[k][wkB]) : [])])].filter((k) => visible.has(k) && byId[k]);
+  const rows = keys.map((k) => {
+    const p = byId[k], it = byItem[k];
+    const a = tot(it, wkA), b = wkB ? tot(it, wkB) : null;
+    const dA = dOf(it, wkA) || new Date(per.a.end).toISOString().slice(0, 10);
+    const dB = wkB ? (dOf(it, wkB) || new Date(per.b.end).toISOString().slice(0, 10)) : "9999-12-31";
+    const rec = (recByItem[k] || []).filter((x) => x.d >= dA && x.d < dB).reduce((s, x) => s + x.units, 0);
+    const used = a != null && b != null ? a + rec - b : null;
+    const sh = should[k] || 0;
+    const v = used != null ? used - sh : null;
+    const c = costOf(p);
+    const status = used == null ? "not counted" : (b > a + rec + 1e-6 || used < -1e-6) ? "count issue" : sh === 0 ? (used > 1e-6 ? "not on a recipe" : "no movement") : v / sh > 0.15 ? "over" : v / sh < -0.15 ? "under" : "on target";
+    return { k, p, a, b, rec, used, sh, v, pct: sh ? v / sh : null, usd: v != null && c != null ? v * c : null, status, alts: familyOf(p, allProducts).length - 1 };
+  }).filter((r) => r.sh > 1e-6 || (r.used != null && Math.abs(r.used) > 1e-6));
+  const ORDER = { over: 0, "count issue": 1, under: 2, "not on a recipe": 3, "not counted": 4, "on target": 5, "no movement": 6 };
+  rows.sort((x, y) => (ORDER[x.status] - ORDER[y.status]) || (Math.abs(y.usd || 0) - Math.abs(x.usd || 0)));
+  const COLOR = { over: ["#FDECEA", "#B0271B"], "count issue": ["#FFF3E0", "#9a5b00"], under: ["#E3EEF9", "#243B6B"], "on target": ["#E6F4F0", "#0a5c50"], "not on a recipe": ["#F2F4F8", "#4a4f57"], "not counted": ["#F2F4F8", "#4a4f57"], "no movement": ["#F2F4F8", "#999"] };
+  const overUsd = rows.filter((r) => r.status === "over").reduce((s, r) => s + (r.usd || 0), 0);
+  const n = (s) => rows.filter((r) => r.status === s).length;
+  const q = (p, v) => v == null ? "—" : (v < 0 ? "-" : "") + fmtQty(p, Math.abs(v));
+  return (
+    <div>{head}
+      {!per.b && <div className="note" style={{ marginBottom: 8 }}>No closing count yet — "Used" fills in after the next weekly count. "Should have used" is sales so far.</div>}
+      <div className="toolbar" style={{ marginBottom: 8, gap: 6, flexWrap: "wrap" }}>
+        <span className="bchip" style={{ background: COLOR.over[0], color: COLOR.over[1], borderColor: COLOR.over[1] }}>{n("over")} over recipe · {fmtUSD(overUsd)}</span>
+        <span className="bchip" style={{ background: COLOR["count issue"][0], color: COLOR["count issue"][1], borderColor: COLOR["count issue"][1] }}>{n("count issue")} count/receiving issues</span>
+        <span className="bchip" style={{ background: COLOR.under[0], color: COLOR.under[1], borderColor: COLOR.under[1] }}>{n("under")} under</span>
+        <span className="bchip" style={{ background: COLOR["on target"][0], color: COLOR["on target"][1], borderColor: COLOR["on target"][1] }}>{n("on target")} on target</span>
+      </div>
+      <div className="stat" style={{ marginBottom: 8 }}>Used = first count + received − second count. Should have used = sales × recipes. Over / under means more than 15% off. Tap a row to see which menu items drove it.</div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="tbl" style={{ border: "none", minWidth: 680 }}>
+          <thead><tr>
+            <th>Item</th><th style={{ textAlign: "right" }}>Count</th><th style={{ textAlign: "right" }}>+ Rec'd</th><th style={{ textAlign: "right" }}>Count</th>
+            <th style={{ textAlign: "right" }}>= Used</th><th style={{ textAlign: "right" }}>Sales say</th><th style={{ textAlign: "right" }}>Variance</th><th style={{ textAlign: "right" }}>$</th>
+          </tr></thead>
+          <tbody>{rows.map((r) => {
+            const [bg, fg] = COLOR[r.status];
+            const open = openRow === r.k;
+            const src = Object.entries(srcs[r.k] || {}).sort((a, b) => b[1] - a[1]);
+            return (
+              <Fragment key={r.k}>
+                <tr style={{ cursor: "pointer" }} onClick={() => setOpenRow(open ? null : r.k)}>
+                  <td><b>{r.p.name}</b>{r.alts > 0 && <span className="stat"> · incl. {r.alts} option{r.alts === 1 ? "" : "s"}</span>}<div><span className="bchip" style={{ background: bg, color: fg, borderColor: fg }}>{r.status}{r.pct != null && isFinite(r.pct) && (r.status === "over" || r.status === "under") ? ` ${r.pct > 0 ? "+" : ""}${Math.round(r.pct * 100)}%` : ""}</span></div></td>
+                  <td className="fig" style={{ textAlign: "right" }}>{q(r.p, r.a)}</td>
+                  <td className="fig" style={{ textAlign: "right", color: r.rec ? "#0a5c50" : "#B7BBC4" }}>{r.rec ? fmtQty(r.p, r.rec) : "—"}</td>
+                  <td className="fig" style={{ textAlign: "right" }}>{q(r.p, r.b)}</td>
+                  <td className="fig" style={{ textAlign: "right", fontWeight: 600 }}>{q(r.p, r.used)}</td>
+                  <td className="fig" style={{ textAlign: "right" }}>{r.sh ? fmtQty(r.p, r.sh) : "—"}</td>
+                  <td className="fig" style={{ textAlign: "right", fontWeight: 600, color: r.v == null ? "#B7BBC4" : r.v > 0 ? "#B0271B" : "#243B6B" }}>{r.v == null ? "—" : (r.v > 0 ? "+" : "") + q(r.p, r.v)}</td>
+                  <td className="fig" style={{ textAlign: "right" }}>{r.usd == null ? "—" : (r.usd < 0 ? "-" : "") + money(Math.abs(r.usd))}</td>
+                </tr>
+                {open && <tr><td colSpan={8} style={{ background: "#FAFAF7" }}>
+                  {src.length ? <div className="stat"><b>Sales say {fmtQty(r.p, r.sh)}, from:</b> {src.slice(0, 12).map(([s, v]) => `${s} ${fmtQty(r.p, v)}`).join(" · ")}{src.length > 12 ? ` · +${src.length - 12} more` : ""}</div>
+                    : <div className="stat">No menu item uses this in its recipe — anything used is either waste, comps, or an item without a recipe.</div>}
+                  <button className="mini" style={{ marginTop: 6 }} onClick={(e) => { e.stopPropagation(); onOpen && onOpen(r.p); }}>Count history</button>
+                </td></tr>}
+              </Fragment>
+            );
+          })}</tbody>
+        </table>
+      </div>
     </div>
   );
 }

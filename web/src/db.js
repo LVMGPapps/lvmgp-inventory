@@ -917,3 +917,38 @@ export async function setMenuSetting(key, value) {
     .upsert({ key, value, updated_at: new Date().toISOString(), updated_by: await whoAmI() }, { onConflict: "key" });
   if (error) throw error;
 }
+
+// ---- POS sales (Parafait), sent nightly by the server script ----------------
+// Hourly rows; the views only return the newest upload for each day.
+async function pageAll(build) {
+  const out = []; const size = 1000;
+  for (let from = 0; ; from += size) {
+    const { data, error } = await build().range(from, from + size - 1);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < size) break;
+  }
+  return out;
+}
+export async function getPosSales(fromISO, toISO) {
+  return pageAll(() => supabase.from("v_pos_sales")
+    .select("sold_hour, pos_product_id, is_modifier, item_name, category, qty, amount")
+    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("pos_product_id"));
+}
+export async function getPosUsage(fromISO, toISO) {
+  return pageAll(() => supabase.from("v_pos_usage")
+    .select("sold_hour, product_id, source_item, qty")
+    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("product_id").order("source_item"));
+}
+export async function getPosUnmatched(fromISO, toISO) {
+  return pageAll(() => supabase.from("v_pos_unmatched")
+    .select("sold_hour, item_name, reason, qty")
+    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("item_name"));
+}
+export async function getPosSyncStatus() {
+  const { data, error } = await supabase.from("pos_current_batch")
+    .select("sale_day, synced_at").order("sale_day", { ascending: false }).limit(1);
+  if (error) throw error;
+  const { data: last } = await supabase.from("pos_sync_log").select("synced_at").order("synced_at", { ascending: false }).limit(1);
+  return { lastDay: data?.[0]?.sale_day || null, lastSync: last?.[0]?.synced_at || null };
+}
