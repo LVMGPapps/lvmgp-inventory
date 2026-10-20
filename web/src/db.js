@@ -103,7 +103,7 @@ export async function createProduct(p) {
     usage_measure: p.usage_measure || p.count_unit || "each",
     usage_per_package: Number(p.usage_per_package) || 1,
     use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
-    backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
+    backup_for: p.backup_for ?? null, count_by_sku: !!p.count_by_sku, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
     needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null, fridge_shelf_days: (p.fridge_shelf_days === "" || p.fridge_shelf_days == null) ? null : Number(p.fridge_shelf_days),
     needs_prep: !!p.needs_prep, prep_notes: p.prep_notes || null, prep_advance_hours: (p.prep_advance_hours === "" || p.prep_advance_hours == null) ? null : Number(p.prep_advance_hours), prep_to_freezer: !!p.prep_to_freezer,
     cook_directions: p.cook_directions || null, cook_temp: p.cook_temp || null, cook_time: p.cook_time || null, cook_image_url: p.cook_image_url ?? null,
@@ -139,7 +139,7 @@ export async function updateProduct(p) {
     usage_measure: p.usage_measure || p.count_unit || "each",
     usage_per_package: Number(p.usage_per_package) || 1,
     use_unit: p.usage_measure || p.use_unit, use_per_count: p.use_per_count, par_level: p.not_stocked ? 0 : p.par_level, image_url: p.image_url ?? null,
-    backup_for: p.backup_for ?? null, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
+    backup_for: p.backup_for ?? null, count_by_sku: !!p.count_by_sku, not_stocked: !!p.not_stocked, count_whole_only: !!p.count_whole_only,
     needs_thaw: !!p.needs_thaw, thaw_hours: (p.thaw_hours === "" || p.thaw_hours == null) ? null : Number(p.thaw_hours), thaw_location_id: p.thaw_location_id ? Number(p.thaw_location_id) : null, fridge_shelf_days: (p.fridge_shelf_days === "" || p.fridge_shelf_days == null) ? null : Number(p.fridge_shelf_days),
     needs_prep: !!p.needs_prep, prep_notes: p.prep_notes || null, prep_advance_hours: (p.prep_advance_hours === "" || p.prep_advance_hours == null) ? null : Number(p.prep_advance_hours), prep_to_freezer: !!p.prep_to_freezer,
     cook_directions: p.cook_directions || null, cook_temp: p.cook_temp || null, cook_time: p.cook_time || null, cook_image_url: p.cook_image_url ?? null,
@@ -916,4 +916,39 @@ export async function setMenuSetting(key, value) {
   const { error } = await supabase.from("menu_setting")
     .upsert({ key, value, updated_at: new Date().toISOString(), updated_by: await whoAmI() }, { onConflict: "key" });
   if (error) throw error;
+}
+
+// ---- POS sales (Parafait), sent nightly by the server script ----------------
+// Hourly rows; the views only return the newest upload for each day.
+async function pageAll(build) {
+  const out = []; const size = 1000;
+  for (let from = 0; ; from += size) {
+    const { data, error } = await build().range(from, from + size - 1);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < size) break;
+  }
+  return out;
+}
+export async function getPosSales(fromISO, toISO) {
+  return pageAll(() => supabase.from("v_pos_sales")
+    .select("sold_hour, pos_product_id, is_modifier, item_name, category, qty, amount")
+    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("pos_product_id"));
+}
+export async function getPosUsage(fromISO, toISO) {
+  return pageAll(() => supabase.from("v_pos_usage")
+    .select("sold_hour, product_id, source_item, qty")
+    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("product_id").order("source_item"));
+}
+export async function getPosUnmatched(fromISO, toISO) {
+  return pageAll(() => supabase.from("v_pos_unmatched")
+    .select("sold_hour, item_name, reason, qty")
+    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("item_name"));
+}
+export async function getPosSyncStatus() {
+  const { data, error } = await supabase.from("pos_current_batch")
+    .select("sale_day, synced_at").order("sale_day", { ascending: false }).limit(1);
+  if (error) throw error;
+  const { data: last } = await supabase.from("pos_sync_log").select("synced_at").order("synced_at", { ascending: false }).limit(1);
+  return { lastDay: data?.[0]?.sale_day || null, lastSync: last?.[0]?.synced_at || null };
 }
