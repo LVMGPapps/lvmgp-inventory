@@ -207,13 +207,16 @@ export default function App() {
       // items keep their last count. This is computed here, not written as rows.
       const prodById = Object.fromEntries(p.map((x) => [x.product_id, x]));
       const wkOf = (t) => t ? weekStart(new Date(t).toISOString().slice(0, 10)).getTime() : 0;
+      // Keyed by the ITEM (family root), not the SKU: once "Pizza Cheese" is counted this week,
+      // an old count sitting on a purchase option (e.g. Premium Pizza Blend) no longer adds stock.
+      const famRoot = (id) => { let x = prodById[id], g = 0; while (x && x.backup_for && prodById[x.backup_for] && g++ < 5) x = prodById[x.backup_for]; return x ? x.product_id : id; };
       const newestWk = {};
-      for (const r of Object.values(latest)) { const w = wkOf(r.t); if (w > (newestWk[r.product_id] || 0)) newestWk[r.product_id] = w; }
+      for (const r of Object.values(latest)) { const w = wkOf(r.t), k = famRoot(r.product_id); if (w > (newestWk[k] || 0)) newestWk[k] = w; }
       const map = {};
       for (const r of Object.values(latest)) {
         const prod = prodById[r.product_id] || {};
         const hold = prod.not_stocked || prod.menu === "events";
-        const stale = !hold && wkOf(r.t) < (newestWk[r.product_id] || 0);   // counted, but this location is a week behind
+        const stale = !hold && wkOf(r.t) < (newestWk[famRoot(r.product_id)] || 0);   // counted, but this location is a week behind
         const qty = stale ? 0 : r.qty;
         const m = map[r.product_id] || (map[r.product_id] = { byLoc: {}, total: 0 });
         m.byLoc[locName[r.location_id] || "?"] = qty;
@@ -298,7 +301,7 @@ export default function App() {
         {tab === "shopping" && <Shopping products={products} vendors={vendors} onhand={onhand} counts={counts} receipts={receipts} locations={locations} />}
         {tab === "waste" && <Waste products={products} locations={locations} reload={reload} />}
         {tab === "prep" && <PrepSheet products={products} reload={reload} />}
-        {tab === "recipes" && <Recipes products={products} receipts={receipts} reload={reload} />}
+        {tab === "recipes" && <Recipes products={products} receipts={receipts} reload={reload} onhand={onhand} />}
         {tab === "reports" && <Dashboard mode="dashboard" openReport={openReport} openCatalogGaps={openCatalogGaps} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "reporting" && <Dashboard mode="reports" reportKey={reportKey} setReportKey={setReportKey} openCatalogGaps={openCatalogGaps} products={products} onhand={onhand} vendors={vendors} locations={locations} counts={counts} receipts={receipts} reload={reload} openItem={openItem} />}
         {tab === "users" && <Users />}
@@ -601,7 +604,7 @@ function Catalog({ products, vendors, locations, units, onhand, counts, receipts
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4, margin: "8px 0 6px" }}>
                 {p.not_stocked && <span className="bchip" style={{ background: "#EEE", borderColor: "#B7BBC4", color: "#555" }}>Not stocked</span>}
                 {p.needs_recount && <span className="bchip" style={{ background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || ""}>🚩 Recount{p.recount_note ? ` · ${p.recount_note}` : ""}</span>}
-                {p.backup_for && <span className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>✳ Alt for {products.find((x) => x.product_id === p.backup_for)?.name || "item"}</span>}
+                {p.backup_for && <span className="bchip" style={{ background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>✳ Option of {products.find((x) => x.product_id === p.backup_for)?.name || "item"}</span>}
                 {gapsFor(p).map((g) => <span key={g.key} className="bchip" style={{ background: "#FFF8E1", borderColor: "#E68A00", color: "#9a5b00" }} title="Missing — the numbers aren't reliable until this is filled in">⚠ No {g.label}</span>)}
               </div>
 
@@ -814,17 +817,26 @@ function Editor({ product, products, vendors, locations, units, onClose, onSaved
           </label>
           <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14 }}>
             <input type="checkbox" checked={isBackup} onChange={(e) => { setIsBackup(e.target.checked); if (!e.target.checked) set("backup_for", null); }} />
-            This item is a backup / alternate for another item
+            This is a purchase option (another SKU / vendor / brand) of an item we use
           </label>
           {isBackup && (
             <select style={{ marginTop: 8, width: "100%" }} value={p.backup_for ?? ""} onChange={(e) => set("backup_for", e.target.value ? Number(e.target.value) : null)}>
-              <option value="">— choose the item it backs up —</option>
+              <option value="">— choose the item it's bought as —</option>
               {(products || []).filter((x) => x.product_id !== p.product_id && !x.backup_for)
                 .slice().sort((a, b) => a.name.localeCompare(b.name))
                 .map((x) => <option key={x.product_id} value={x.product_id}>{x.name}</option>)}
             </select>
           )}
-          {isBackup && <div className="stat" style={{ marginTop: 6 }}>Counted together with its main item, and shown as “Alternate for …” on the order list.</div>}
+          {isBackup && <div className="stat" style={{ marginTop: 6 }}>Receive it under its own name so the price and vendor are right; it is counted, used in recipes and costed as the item it belongs to (blended cost, oldest stock used first).</div>}
+          {!isBackup && (products || []).some((x) => Number(x.backup_for) === Number(p.product_id)) && (
+            <>
+              <div className="stat" style={{ marginTop: 10 }}>Purchase options: {(products || []).filter((x) => Number(x.backup_for) === Number(p.product_id)).map((x) => x.name).join(", ")}</div>
+              <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 14, marginTop: 6 }}>
+                <input type="checkbox" checked={!!p.count_by_sku} onChange={(e) => set("count_by_sku", e.target.checked)} />
+                Count each option separately (flavors) — so you can see which ones are selling
+              </label>
+            </>
+          )}
         </div>
 
         <div className="group">
@@ -1136,11 +1148,23 @@ function printCountSheet(products, locations, areaId, az = false) {
   const areas = areaId ? locations.filter((l) => String(l.location_id) === String(areaId)) : locations;
   let body = "";
   for (const loc of areas) {
-    const items = products.filter((p) => (p.locations || []).some((l) => l.location_id === loc.location_id));
+    // Same rule as the Count screen: an item's purchase options print as ONE line (the item),
+    // unless the item is set to count each option separately (flavors).
+    const byIdP = Object.fromEntries(products.map((x) => [x.product_id, x]));
+    const opts = {};
+    for (const x of products) if (x.backup_for && byIdP[x.backup_for]) (opts[x.backup_for] ||= []).push(x);
+    const locOf = (p) => (p.locations || []).find((l) => l.location_id === loc.location_id);
+    const items = [];
+    for (const p of products) {
+      const head = p.backup_for ? byIdP[p.backup_for] : null;
+      if (head && !head.count_by_sku) continue;                         // counted under its item
+      const fam = !p.backup_for && !p.count_by_sku ? (opts[p.product_id] || []) : [];
+      if (locOf(p) || fam.some(locOf)) items.push(p);
+    }
     if (!items.length) continue;
     const groups = {};
     for (const p of items) {
-      const a = (p.locations || []).find((l) => l.location_id === loc.location_id);
+      const a = locOf(p) || (opts[p.product_id] || []).map(locOf).find(Boolean);
       const code = a?.unit_code || "Unassigned shelf";
       const sort = a?.unit_sort ?? 9e9;
       (groups[code] = groups[code] || { sort, items: [] }).items.push(p);
@@ -1163,7 +1187,9 @@ function printCountSheet(products, locations, areaId, az = false) {
         const hint = ppc > 1
           ? `1 case = ${ppc} ${pkg}${ppc === 1 ? "" : "s"}${upp > 1 ? ` · 1 ${pkg} = ${upp} ${meas}` : ""}`
           : (upp > 1 ? `1 ${pkg} = ${upp} ${meas}` : "");
-        body += `<tr><td class="nm">${esc(p.name)}${hint ? `<div class="hint">${esc(hint)}</div>` : ""}</td>${az ? `<td>${esc(shelfLabel[p.product_id] || "")}</td>` : ""}<td class="box"></td><td class="box"></td><td class="box">${esc(meas)}</td></tr>`;
+        const inc = !p.backup_for && !p.count_by_sku && (opts[p.product_id] || []).length ? `Includes ${(opts[p.product_id]).map((x) => x.name).join(", ")}` : "";
+        const fullHint = [hint, inc].filter(Boolean).join(" · ");
+        body += `<tr><td class="nm">${esc(p.name)}${fullHint ? `<div class="hint">${esc(fullHint)}</div>` : ""}</td>${az ? `<td>${esc(shelfLabel[p.product_id] || "")}</td>` : ""}<td class="box"></td><td class="box"></td><td class="box">${esc(meas)}</td></tr>`;
       }
       body += `</tbody></table>`;
     }
@@ -1222,7 +1248,8 @@ function Count({ products, locations, onhand, reload, onPending }) {
   const setRow = (key, f, v) => setDraft((d) => ({ ...d, [key]: { ...(d[key] || {}), [f]: v } }));
 
   const loc = locations.find((l) => String(l.location_id) === String(locId));
-  const unitFor = (p) => (p.locations || []).find((l) => l.location_id === loc?.location_id);
+  const unitFor = (p) => (p.locations || []).find((l) => l.location_id === loc?.location_id)
+    || (!p.backup_for && !p.count_by_sku ? products.filter((x) => Number(x.backup_for) === Number(p.product_id)).flatMap((x) => x.locations || []).find((l) => l.location_id === loc?.location_id) : undefined);
   const inLoc = (p) => (p.locations || []).some((l) => l.location_id === loc?.location_id);
   // A–Z drops the shelf grouping, so each row carries its shelf (or location) as a chip instead.
   const shelfOf = (p) => loc
@@ -1230,6 +1257,34 @@ function Count({ products, locations, onhand, reload, onPending }) {
     : ((p.locations || []).find((l) => l.primary)?.name || (p.locations || [])[0]?.name || "");
   const backupsBy = {};
   for (const p of products) if (p.backup_for) (backupsBy[p.backup_for] ||= []).push(p);
+  // An ITEM with purchase options (SKUs) is counted once, as the item — "how much pizza cheese
+  // do we have" — no matter which vendor's bag it came in. Only items set to "count each option
+  // separately" (Gatorade flavors) show a row per option.
+  const merged = (head) => !!(backupsBy[head.product_id] || []).length && !head.count_by_sku;
+  const famLocs = (p) => [p].concat(backupsBy[p.product_id] || []).flatMap((x) => x.locations || []);
+  // Stock of the whole item, in the item's own count unit.
+  const famHere = (head, locName) => [head].concat(backupsBy[head.product_id] || []).reduce((t, m) => {
+    const v = Number(locName ? onhand[m.product_id]?.byLoc?.[locName] : onhand[m.product_id]?.total) || 0;
+    return t + v * (m.product_id === head.product_id ? 1 : (altRatio(m, head) ?? 1));
+  }, 0);
+  // Counting the item replaces whatever was last recorded against its options here, so an old
+  // count on "Premium Pizza Blend" can't sit on top of a new "Pizza Cheese" count.
+  function withFamilyZeros(entries) {
+    const have = new Set(entries.map((e) => e.product_id + "|" + e.location_id));
+    const out = entries.slice();
+    for (const e of entries) {
+      const head = products.find((x) => x.product_id === e.product_id);
+      if (!head || !merged(head)) continue;
+      const lname = locations.find((l) => l.location_id === e.location_id)?.name;
+      for (const b of backupsBy[head.product_id]) {
+        if (have.has(b.product_id + "|" + e.location_id)) continue;
+        if (!(Number(onhand[b.product_id]?.byLoc?.[lname]) > 0)) continue;
+        out.push({ product_id: b.product_id, location_id: e.location_id, cases: 0, loose: 0, qty: 0 });
+        have.add(b.product_id + "|" + e.location_id);
+      }
+    }
+    return out;
+  }
 
   // Heads = non-backup, stocked items in this location (or whose alternate is in this location).
   let heads = loc
@@ -1265,7 +1320,8 @@ function Count({ products, locations, onhand, reload, onPending }) {
     return entered.map(([k, e]) => {
       const pid = Number(k);
       const p = products.find((x) => x.product_id === pid);
-      const locId2 = loc ? loc.location_id : ((p.locations || []).find((l) => l.primary)?.location_id ?? (p.locations || [])[0]?.location_id ?? null);
+      const fl = famLocs(p);
+      const locId2 = loc ? loc.location_id : (fl.find((l) => l.primary)?.location_id ?? fl[0]?.location_id ?? null);
       const units = (num(e.cases) || 0) * usagePerCase(p) + (num(e.packages) || 0) * usagePerPack(p) + (num(e.units) || 0) + (num(e.loose) || 0);
       return { product_id: pid, location_id: locId2, cases: num(e.cases) || 0, loose: units - (num(e.cases) || 0) * usagePerCase(p), qty: units };
     }).filter((e) => e.location_id != null);
@@ -1273,7 +1329,7 @@ function Count({ products, locations, onhand, reload, onPending }) {
 
   // SPOT COUNT — saves only what you typed. Nothing else is touched.
   async function save() {
-    const entries = draftEntries();
+    const entries = withFamilyZeros(draftEntries());
     if (!entries.length) { alert("These items don't have a location set yet — add one in Catalog, or pick a location above."); return; }
     try {
       const r = await db.postCounts(entries);
@@ -1292,16 +1348,21 @@ function Count({ products, locations, onhand, reload, onPending }) {
   function submitSection() {
     if (!loc) { alert("Pick the section you just counted."); return; }
     const typed = new Set(entered.map(([k]) => Number(k)));
-    const all = products.filter((p) => !p.backup_for && (p.locations || []).some((l) => l.location_id === loc.location_id));
+    const here = (p) => (p.locations || []).some((l) => l.location_id === loc.location_id);
+    const all = products.filter((p) => {
+      if (!p.backup_for) return here(p) || (merged(p) && (backupsBy[p.product_id] || []).some(here));
+      const head = products.find((x) => x.product_id === p.backup_for);
+      return !!(head && head.count_by_sku && here(p));       // flavors counted one by one
+    });
     const missing = all.filter((p) => !typed.has(p.product_id))
-      .map((p) => ({ p, qty: Number(onhand[p.product_id]?.byLoc?.[loc.name]) || 0, action: "zero", c: "", k: "" }))
+      .map((p) => ({ p, qty: merged(p) ? famHere(p, loc.name) : (Number(onhand[p.product_id]?.byLoc?.[loc.name]) || 0), action: "zero", c: "", k: "" }))
       .sort((a, b) => b.qty - a.qty || a.p.name.localeCompare(b.p.name));
     setReview({ missing, counted: typed.size });
   }
   const setRev = (pid, patch) => setReview((r) => ({ ...r, missing: r.missing.map((m) => m.p.product_id === pid ? { ...m, ...patch } : m) }));
 
   async function confirmSection() {
-    const entries = draftEntries();
+    let entries = draftEntries();
     const toFlag = [];
     for (const m of (review?.missing || [])) {
       if (m.action === "flag") { toFlag.push(m.p.product_id); continue; }         // keep last count, mark for recount
@@ -1309,6 +1370,7 @@ function Count({ products, locations, onhand, reload, onPending }) {
       if (m.action === "count") units = (num(m.c) || 0) * usagePerCase(m.p) + (num(m.k) || 0) * usagePerPack(m.p);
       entries.push({ product_id: m.p.product_id, location_id: loc.location_id, cases: num(m.c) || 0, loose: units - (num(m.c) || 0) * usagePerCase(m.p), qty: units });
     }
+    entries = withFamilyZeros(entries);
     setBusy(true);
     try {
       let r = { saved: 0, queued: 0 };
@@ -1336,7 +1398,8 @@ function Count({ products, locations, onhand, reload, onPending }) {
   function renderRow(p, alt) {
     const key = String(p.product_id);
     const e = draft[key] || {};
-    const here = (loc ? onhand[p.product_id]?.byLoc?.[loc.name] : onhand[p.product_id]?.total) ?? 0;
+    const fam = !alt && merged(p) ? backupsBy[p.product_id] : null;
+    const here = fam ? famHere(p, loc ? loc.name : null) : ((loc ? onhand[p.product_id]?.byLoc?.[loc.name] : onhand[p.product_id]?.total) ?? 0);
     const uMeas = measure(p);
     const upc = usagePerCase(p), upp = usagePerPack(p);
     const whole = wholeOnly(p);
@@ -1347,7 +1410,7 @@ function Count({ products, locations, onhand, reload, onPending }) {
     const style = { ...(hot ? { background: "#FFF8E1", borderRadius: 8 } : {}), ...(alt ? { paddingLeft: 14 } : {}), gridTemplateColumns: whole ? (showCase ? "1fr 46px 60px 84px" : "1fr 72px 96px") : showCase ? "1fr 46px 52px 54px 84px" : "1fr 58px 60px 90px" };
     return (
       <div className="crow" key={p.product_id} style={style}>
-        <div>{sortAZ && shelfOf(p) && <span className="bchip" style={{ marginRight: 6, background: "#F2F4F8", borderColor: "#C9CCD2", color: "#4a4f57" }} title="Shelf">{shelfOf(p)}</span>}{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Alternate</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{whole ? `count whole ${pkgName(p, 2)}` + (showCase ? ` · 1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)}` : "") : (showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : "") + `1 ${p.package_unit || "package"} = ${upp} ${uMeas}`} · here {fmtQty(p, here)}</div></div>
+        <div>{sortAZ && shelfOf(p) && <span className="bchip" style={{ marginRight: 6, background: "#F2F4F8", borderColor: "#C9CCD2", color: "#4a4f57" }} title="Shelf">{shelfOf(p)}</span>}{alt && <span className="bchip" style={{ marginRight: 6, background: "#FFF3E0", borderColor: "#E68A00", color: "#9a5b00" }}>Option</span>}{p.needs_recount && <span className="bchip" style={{ marginRight: 6, background: "#FDECEA", borderColor: "#E0392B", color: "#B0271B" }} title={p.recount_note || "Flagged for recount"}>🚩</span>}<b>{p.name}</b><div className="stat">{whole ? `count whole ${pkgName(p, 2)}` + (showCase ? ` · 1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)}` : "") : (showCase ? `1 case = ${num(p.packages_per_case) || 1} ${pkgName(p, 2)} · ` : "") + `1 ${p.package_unit || "package"} = ${upp} ${uMeas}`} · here {fmtQty(p, here)}{fam && <div style={{ color: "#0a5c50" }}>Count every bag/brand here as {p.name} — includes {fam.map((b) => b.name).join(", ")}</div>}</div></div>
         {showCase && <label>Cases<input className="fig" type="number" min="0" value={e.cases ?? ""} onChange={(ev) => setRow(key, "cases", ev.target.value)} /></label>}
         <label>{pkgName(p, 2)}<input className="fig" type="number" min="0" value={e.packages ?? ""} onChange={(ev) => setRow(key, "packages", ev.target.value)} /></label>
         {!whole && <label>+ {uMeas}<input className="fig" type="number" min="0" step="0.01" value={e.units ?? ""} onChange={(ev) => setRow(key, "units", ev.target.value)} /></label>}
@@ -1465,7 +1528,7 @@ function Count({ products, locations, onhand, reload, onPending }) {
           <div className="vgroup-h"><span className="vname">{sortAZ ? "🔤 A–Z" : loc ? "▸ " + g : "📍 " + g}</span><span className="stat">{grp.items.length} items</span></div>
           {grp.items.map((head) => {
             const backups = backupsBy[head.product_id] || [];
-            if (!backups.length) return renderRow(head, false);
+            if (!backups.length || merged(head)) return renderRow(head, false);
             return (
               <div key={"h" + head.product_id} style={{ border: "1px solid #ECEEF1", borderRadius: 10, marginBottom: 6 }}>
                 {renderRow(head, false)}
@@ -1973,7 +2036,7 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
               const optional = p.not_stocked || (Number(p.par_level) || 0) <= 0;
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
-                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{optional && <span className="bchip" style={{ marginLeft: 6, background: "#EEE", borderColor: "#B7BBC4", color: "#666" }}>{p.not_stocked ? "not stocked" : "no par"}</span>}{p.backup_for && <span className="stat"> · Alternate for {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{fmtQty(p, stats[p.product_id]?.usedUnits ?? 0)}</b>{optional ? "" : <> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</>}</div></div>
+                  <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{optional && <span className="bchip" style={{ marginLeft: 6, background: "#EEE", borderColor: "#B7BBC4", color: "#666" }}>{p.not_stocked ? "not stocked" : "no par"}</span>}{p.backup_for && <span className="stat"> · Purchase option of {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{fmtQty(p, stats[p.product_id]?.usedUnits ?? 0)}</b>{optional ? "" : <> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</>}</div></div>
                   <select value={l.vendor_id ?? ""} onChange={(e) => setVendor(l, Number(e.target.value))} disabled={done}>
                     <option value="">No vendor</option>
                     {vendors.map((vv) => { const pv = (p.vendors || []).find((x) => x.vendor_id === vv.vendor_id); return <option key={vv.vendor_id} value={vv.vendor_id}>{vv.name}{pv?.price != null ? ` (${money(pv.price)})` : ""}{pv ? "" : " ·not linked"}</option>; })}
@@ -3092,7 +3155,7 @@ function PrepSheet({ products, reload }) {
   );
 }
 
-function Recipes({ products, receipts, reload }) {
+function Recipes({ products, receipts, reload, onhand }) {
   const [view, setView] = useState("menu");   // "menu" = costed menu recipes, "cook" = per-item cook directions
   const [q, setQ] = useState("");
   const [edit, setEdit] = useState(null);   // product being edited
@@ -3108,7 +3171,7 @@ function Recipes({ products, receipts, reload }) {
       ))}
     </div>
   );
-  if (view === "menu") return <div>{switcher}<MenuRecipes products={products} receipts={receipts} /></div>;
+  if (view === "menu") return <div>{switcher}<MenuRecipes products={products} receipts={receipts} onhand={onhand} /></div>;
   return (
     <div>
       {switcher}
@@ -3211,7 +3274,7 @@ const stageSelect = (v, onChange, style) => (
   <select value={v || "before"} onChange={(e) => onChange(e.target.value)} style={style}>{STAGES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select>);
 const OZ_PER = { oz: 1, ounce: 1, ounces: 1, lb: 16, lbs: 16, pound: 16, pounds: 16, g: 1 / 28.3495, kg: 35.274 };
 const FLOZ_PER = { "fl oz": 1, floz: 1, gal: 128, gallon: 128, qt: 32, pt: 16 };
-const EACHISH = ["each", "ea", "ct", "count", "unit", "units"];
+const EACHISH = ["each", "ea", "ct", "count", "unit", "units", "bottle", "bottles", "can", "cans"];
 const VOL_TSP = { tsp: 1, tbsp: 3, "fl oz": 6, floz: 6, cup: 48, cups: 48, pt: 96, pint: 96, qt: 192, quart: 192, gal: 768, gallon: 768, ml: 0.202884, l: 202.884, liter: 202.884 };
 // How many `to` units are in one `from` unit, when it's a straight weight-to-weight or volume-to-volume conversion.
 const sameUnit = (a, b) => {
@@ -3255,37 +3318,49 @@ function unitsPerPurchase(p) {
 // Cost per COUNT UNIT straight off the most recent delivery: what was spent on that line
 // ÷ the count units it brought in. Recipes then convert from the count unit down to oz/each
 // using the product's size (a 1 gallon jug = 128 oz).
-function lastPaidByProduct(receipts, byId) {
-  const out = {};
+function lastPaidByProduct(receipts, byId, onhand) {
+  // 1) Every delivery line, as $ and count units of the product that was received.
+  const lines = [];
   for (const r of receipts || []) for (const l of r.receipt_line || []) {
-    const uc = num(l.unit_cost), qty = num(l.purchase_qty), units = num(l.qty_count_units);
+    const uc = num(l.unit_cost), qty = num(l.purchase_qty), stored = num(l.qty_count_units);
     if (uc == null || !qty) continue;
-    const per = units ? (uc * qty) / units                       // as received
-      : (unitsPerPurchase(byId?.[l.product_id]) ? uc / unitsPerPurchase(byId[l.product_id]) : null);
-    const d = r.received_date || "";
-    const cur = out[l.product_id];
-    if (per != null && per > 0 && (!cur || d > cur.date)) out[l.product_id] = { per, date: d, from: l.product_id };
+    const upp = unitsPerPurchase(byId?.[l.product_id]);
+    const units = stored || (upp ? qty * upp : null);
+    if (!units || !(uc > 0)) continue;
+    lines.push({ pid: l.product_id, date: r.received_date || "", dollars: uc * qty, units });
   }
-  // Alternates are the same ingredient, so the family shares one price: whichever
-  // member was delivered most recently sets the cost for all of them, converted
-  // into each one's own count unit. Buying the backup brand updates the recipe.
-  const all = Object.values(byId || {});
-  for (const primary of all) {
-    if (primary.backup_for) continue;
-    const fam = [primary].concat(all.filter((x) => Number(x.backup_for) === Number(primary.product_id)));
-    if (fam.length < 2) continue;
-    let best = null;
-    for (const m of fam) {
-      const e = out[m.product_id];
-      if (e && (!best || (e.date || "") > (best.e.date || ""))) best = { m, e };
+  // 2) Group by ITEM (family root). Purchase options (backup_for) are the same item bought
+  //    as a different SKU, so they share one cost. Units are converted into the root's count unit.
+  const rootOf = (pid) => { const p = byId?.[pid]; return p && p.backup_for && byId[p.backup_for] ? Number(p.backup_for) : Number(pid); };
+  const ratio = (pid) => { const p = byId?.[pid], r = byId?.[rootOf(pid)]; return (p && r) ? altRatio(p, r) : 1; };
+  const fam = {};
+  for (const x of lines) {
+    const k = rootOf(x.pid), rr = ratio(x.pid);
+    if (rr == null || !(rr > 0)) continue;              // can't convert -> leave it out rather than corrupt the blend
+    (fam[k] ||= []).push({ ...x, rootUnits: x.units * rr });
+  }
+  // 3) Blended FIFO cost: the oldest stock is used first, so what's still on the shelf is the
+  //    NEWEST deliveries. Walk deliveries newest -> oldest until they cover what's on hand and
+  //    average those layers. Nothing on hand (or no count) -> the latest delivery's price.
+  const out = {};
+  const members = {};
+  for (const p of Object.values(byId || {})) (members[rootOf(p.product_id)] ||= []).push(p);
+  for (const [k, ls] of Object.entries(fam)) {
+    ls.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    const latest = ls[0];
+    let onHandRoot = 0;
+    for (const m of members[k] || []) { const t = num(onhand?.[m.product_id]?.total) || 0, rr = ratio(m.product_id); if (t > 0 && rr) onHandRoot += t * rr; }
+    let per = latest.dollars / latest.rootUnits, layers = 1, blended = false;
+    if (onHandRoot > 0) {
+      let need = onHandRoot, $ = 0, u = 0; layers = 0;
+      for (const x of ls) { if (need <= 1e-9) break; const take = Math.min(need, x.rootUnits); $ += x.dollars * (take / x.rootUnits); u += take; need -= take; layers++; }
+      if (u > 0) { per = $ / u; blended = layers > 1 || ls.length > 1; }
     }
-    if (!best) continue;
-    for (const m of fam) {
-      if (m.product_id === best.m.product_id) continue;
-      // best.e.per is $ per ONE of best.m's count units; r = m's units in one of best.m's
-      const r = unitConv(measure(best.m), measure(m));
-      if (r == null || !(r > 0)) continue;
-      out[m.product_id] = { per: best.e.per / r, date: best.e.date, from: best.m.product_id };
+    for (const m of members[k] || []) {
+      const rr = ratio(m.product_id);
+      if (rr == null || !(rr > 0)) continue;
+      // per is $ per ONE root unit; one of m's units holds rr root units.
+      out[m.product_id] = { per: per * rr, date: latest.date, from: latest.pid, fifo: blended ? { layers, onHand: onHandRoot } : null };
     }
   }
   return out;
@@ -3347,7 +3422,7 @@ function unitCost(p) {
   return paid && paid.per > 0 ? paid.per : costPerCount(p);
 }
 const paidInfo = (p) => RECIPE_CTX.paid?.[p?.product_id] || null;
-const priceNote = (p) => paidInfo(p) ? `last paid ${paidInfo(p).date}` : "vendor list price";
+const priceNote = (p) => { const i = paidInfo(p); return !i ? "vendor list price" : i.fifo ? `blended cost of the ${i.fifo.layers} newest deliver${i.fifo.layers === 1 ? "y" : "ies"} still on hand · latest ${i.date}` : `last paid ${i.date}`; };
 // A delivery whose stored count units disagree with the product's pack setup — the receipt itself needs fixing.
 function badReceiptNote(p) {
   const i = paidInfo(p), b = i?.bad;
@@ -3841,7 +3916,7 @@ function CompareRecipes({ rows, recipesById, compsById, byId, onClose }) {
   );
 }
 
-function MenuRecipes({ products, receipts }) {
+function MenuRecipes({ products, receipts, onhand }) {
   const [rows, setRows] = useState(null);
   const [comps, setComps] = useState([]);
   const [err, setErr] = useState("");
@@ -3867,7 +3942,7 @@ function MenuRecipes({ products, receipts }) {
   if (rows == null) return <div className="stat">Loading recipes…</div>;
   const recipesById = Object.fromEntries(rows.map((r) => [r.recipe_id, r]));
   const compsById = Object.fromEntries(comps.map((c) => [c.component_id, c]));
-  RECIPE_CTX = { recipesById, compsById, byId, paid: lastPaidByProduct(receipts, byId) };
+  RECIPE_CTX = { recipesById, compsById, byId, paid: lastPaidByProduct(receipts, byId, onhand) };
   const ord = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.name.localeCompare(b.name);
   const list = rows.filter((r) => (showOff || r.active)
     && (!q || r.name.toLowerCase().includes(q.toLowerCase()))
