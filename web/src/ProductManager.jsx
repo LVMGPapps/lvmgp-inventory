@@ -1631,19 +1631,39 @@ function Receive({ products, vendors, reload }) {
     const f = e.target.files?.[0]; if (!f) return;
     setBusy(true); setErr(""); setMsg("");
     try {
-      const d = await db.scanReceipt(f, "receipt");
+      // Send the catalog along so the reader can match "DAWN BUCKET" to Dish Soap, not just guess by spelling.
+      const candidates = products.map((p) => ({ id: p.product_id, name: p.name, brand: p.brand || "",
+        sku: (p.vendors || []).map((v) => v.vendor_sku).filter(Boolean).join(" ") }));
+      const d = await db.scanReceipt(f, "receipt", candidates);
       const ven = vendors.find((v) => (d.vendor || "").toLowerCase().includes(v.name.toLowerCase()));
+      const bySku = {};
+      for (const p of products) for (const v of (p.vendors || [])) if (v.vendor_sku) bySku[String(v.vendor_sku).replace(/^0+/, "")] = p.product_id;
+      // 1) work out which app item each receipt line is: item # we've seen before, then the reader's match, then the name
+      const agg = {}, unknown = [];
+      for (const ln of (d.lines || [])) {
+        const sku = String(ln.item_no || "").replace(/^0+/, "");
+        let pid = (sku && bySku[sku]) || (byId[ln.product_id] ? Number(ln.product_id) : null);
+        if (!pid) {
+          const key = (ln.name || "").toLowerCase().slice(0, 6);
+          pid = (key && products.find((p) => p.name.toLowerCase().includes(key)))?.product_id || null;
+        }
+        if (!pid) { unknown.push(ln); continue; }
+        // the same item can print on several lines (12 @ 11.49 and 18 @ 11.49) — add them up
+        const a = (agg[pid] ||= { qty: 0, spend: 0, priced: 0, item_no: sku || "", names: [] });
+        const q = Number(ln.qty) || 1;
+        a.qty += q; a.names.push(ln.raw || ln.name);
+        if (ln.unit_price != null) { a.spend += q * Number(ln.unit_price); a.priced += q; }
+      }
       const next = rows.map((r) => ({ ...r }));
       let matched = 0; const newExtras = [];
-      for (const ln of (d.lines || [])) {
-        const key = (ln.name || "").toLowerCase().slice(0, 6);
-        const hit = key && next.find((r) => !r.scanned && r.product_name?.toLowerCase().includes(key));
-        if (hit) { hit.qty = ln.qty ?? hit.qty; hit.case_cost = ln.unit_price ?? hit.case_cost; hit.scanned = true; matched++; }
-        else {
-          const m = products.find((p) => key && p.name.toLowerCase().includes(key));
-          newExtras.push({ product_id: m?.product_id || "", qty: ln.qty || 1, case_cost: ln.unit_price ?? "", vendor_id: ven?.vendor_id || (vendors[0]?.vendor_id ?? ""), guess: ln.name });
-        }
+      for (const [pidS, a] of Object.entries(agg)) {
+        const pid = Number(pidS);
+        const price = a.priced ? +(a.spend / a.priced).toFixed(2) : null;
+        const hit = next.find((r) => !r.scanned && Number(r.product_id ?? prodOf(r)?.product_id) === pid);
+        if (hit) { hit.qty = a.qty; if (price != null) hit.case_cost = price; hit.scanned = true; hit.item_no = a.item_no; matched++; }
+        else newExtras.push({ product_id: pid, qty: a.qty, case_cost: price ?? "", vendor_id: ven?.vendor_id || (vendors[0]?.vendor_id ?? ""), guess: a.names.join(" + "), item_no: a.item_no });
       }
+      for (const ln of unknown) newExtras.push({ product_id: "", qty: ln.qty || 1, case_cost: ln.unit_price ?? "", vendor_id: ven?.vendor_id || (vendors[0]?.vendor_id ?? ""), guess: ln.raw || ln.name, item_no: String(ln.item_no || "") });
       setRows(next);
       setExtras((es) => [...es, ...newExtras]);
       setMsg(`Receipt scanned — ${matched} matched to purchased item${matched === 1 ? "" : "s"}${newExtras.length ? `, ${newExtras.length} not on the list (below)` : ""}. Review the numbers, then Receive.`);
@@ -1677,6 +1697,7 @@ function Receive({ products, vendors, reload }) {
       units_per_package: byId[r.product_id] ? usagePerPack(byId[r.product_id]) : (r.units_per_package ?? 1),
       vendor_units_per_case: r.vendor_units_per_case ?? null, vendor_units_per_package: r.vendor_units_per_package ?? null,
       order_unit: normalizeOrderUnit(r.order_unit, byId[r.product_id]),
+      vendor_sku: r.item_no || null,          // remembered so this item # matches automatically next time
     })).filter((r) => r.product_id && num(r.qty) > 0);
     if (!payload.length) return;
     setBusy(true);

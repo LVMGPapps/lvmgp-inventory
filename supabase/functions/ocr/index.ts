@@ -1,95 +1,82 @@
-// Secure admin endpoint for in-app user management.
-// Holds the service-role key server-side (never in the browser) and only lets
-// signed-in admins create users, set passwords, invite, or remove people.
-//
-// Deploy:  supabase functions deploy admin-users
-// Lock down (optional but recommended): set the admins who may manage users:
-//   supabase secrets set ADMIN_EMAILS="jen@lvmgp.com,other@lvmgp.com"
-// If ADMIN_EMAILS is not set, any signed-in user may manage users.
-// (SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY are provided automatically.)
-
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+// Supabase Edge Function: receipt / product-label OCR for the LVMGP inventory app.
+// Called by db.scanReceipt() as supabase.functions.invoke("ocr").
+// Holds ANTHROPIC_API_KEY server-side (Edge Function secret); the browser never sees it.
+// Deployed as "ocr" (an older copy lived under the dashboard's default name "quick-api").
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
-const json = (obj: unknown, status = 200) =>
-  new Response(JSON.stringify(obj), { status, headers: { ...cors, "Content-Type": "application/json" } });
+
+const MODEL = Deno.env.get("OCR_MODEL") ?? "claude-sonnet-5-5";
+
+const RECEIPT_PROMPT =
+  "Read this supplier receipt or invoice (often Costco, Sysco, Amazon or Pepsi). " +
+  "Costco receipts abbreviate item names (e.g. 'KS TORT CHIP' = Kirkland Signature tortilla chips, 'BR CHSE BL' = a cheese blend) — expand them into a plain product name. " +
+  "A line like '12 @ 11.49' printed above an item means qty 12 at 11.49 each. " +
+  "Skip subtotal, tax, total and payment lines. A discount line (e.g. '0000396652 / 242668  10.00-') is an instant savings on the item number after the slash: " +
+  "subtract it from that item's unit_price instead of listing it. " +
+  "qty is the number of units bought; unit_price is the price of ONE unit after instant savings. " +
+  "List every item line, including non-food items.";
+
+const RECEIPT_SHAPE =
+  'Return ONLY JSON, no markdown: {"vendor":string,"date":"YYYY-MM-DD" or "",' +
+  '"lines":[{"name":string,"raw":string (text as printed),"item_no":string or "","qty":number,"unit_price":number or null,"product_id":number or null}]}';
+
+const PRODUCT_PROMPT =
+  "Identify the single food-service product shown. Return ONLY JSON, no markdown: " +
+  '{"name":string,"brand":string,"supc":string,' +
+  '"barcode":string (digits if clearly readable else ""),"category":string,' +
+  '"pack":number,"size":number,"size_unit":string,"unit_price":number or null}';
+
+type Cand = { id: number; name: string; brand?: string; sku?: string };
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   try {
-    const url = Deno.env.get("SUPABASE_URL") || Deno.env.get("SB_URL") || "";
-    const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SB_SERVICE_ROLE_KEY") || "";
-    const adminEmails = (Deno.env.get("ADMIN_EMAILS") || "")
-      .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
-    if (!url || !serviceKey) {
-      return json({ error: "Server not configured: set the SB_SERVICE_ROLE_KEY secret (your project's service_role key)." }, 500);
+    const key = Deno.env.get("ANTHROPIC_API_KEY");
+    if (!key) return json({ error: "ANTHROPIC_API_KEY secret is not set on this Supabase project" }, 500);
+    const { image, media_type = "image/jpeg", kind = "receipt", candidates } = await req.json();
+    if (!image) return json({ error: "missing image" }, 400);
+
+    let prompt = PRODUCT_PROMPT;
+    if (kind !== "product") {
+      prompt = RECEIPT_PROMPT;
+      if (Array.isArray(candidates) && candidates.length) {
+        const list = (candidates as Cand[]).slice(0, 600)
+          .map((c) => `${c.id} | ${c.name}${c.brand ? " | " + c.brand : ""}${c.sku ? " | item# " + c.sku : ""}`).join("\n");
+        prompt += "\n\nThese are the items in the buyer's inventory app (id | name | brand | vendor item#). " +
+          "For each receipt line set product_id to the id of the inventory item it is, if you are reasonably sure " +
+          "(e.g. 'DAWN BUCKET' = Dish Soap, 'TORT ROUNDS' = Tortilla Chips, 'BR CHSE BL' = a pizza cheese blend, 'KS FRNCH FRY' = French Fries). " +
+          "A matching vendor item# is a certain match. Otherwise null.\n" + list;
+      }
+      prompt += "\n\n" + RECEIPT_SHAPE;
     }
 
-    const token = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
-    if (!token) return json({ error: "Not signed in (no token reached the function)." }, 401);
-
-    const admin = createClient(url, serviceKey);
-
-    // Identify the caller by verifying their token explicitly.
-    const { data: { user }, error: uErr } = await admin.auth.getUser(token);
-    if (uErr || !user) return json({ error: "Not signed in (token not valid). Sign out and back in, then retry." }, 401);
-
-    const email = (user.email || "").toLowerCase();
-    const isAdmin = adminEmails.length === 0 ? true : adminEmails.includes(email);
-    if (!isAdmin) return json({ error: "You're not an admin. Ask an admin to manage users." }, 403);
-
-    const body = await req.json().catch(() => ({}));
-    const action = body.action;
-
-    if (action === "list") {
-      const { data, error } = await admin.auth.admin.listUsers({ perPage: 200 });
-      if (error) throw error;
-      const users = (data.users || []).map((u) => ({
-        id: u.id, email: u.email, created_at: u.created_at,
-        last_sign_in_at: u.last_sign_in_at, confirmed: !!u.email_confirmed_at,
-      }));
-      return json({ users });
-    }
-
-    if (action === "create") {
-      const { email: e, password } = body;
-      if (!e || !password) return json({ error: "Email and password are required." }, 400);
-      const { data, error } = await admin.auth.admin.createUser({ email: e, password, email_confirm: true });
-      if (error) throw error;
-      return json({ user: { id: data.user.id, email: data.user.email } });
-    }
-
-    if (action === "invite") {
-      const { email: e, redirectTo } = body;
-      if (!e) return json({ error: "Email is required." }, 400);
-      const { data, error } = await admin.auth.admin.inviteUserByEmail(e, redirectTo ? { redirectTo } : undefined);
-      if (error) throw error;
-      return json({ user: { id: data.user.id, email: data.user.email } });
-    }
-
-    if (action === "password") {
-      const { user_id, password } = body;
-      if (!user_id || !password) return json({ error: "user_id and password are required." }, 400);
-      const { error } = await admin.auth.admin.updateUserById(user_id, { password });
-      if (error) throw error;
-      return json({ ok: true });
-    }
-
-    if (action === "delete") {
-      const { user_id } = body;
-      if (!user_id) return json({ error: "user_id is required." }, 400);
-      if (user_id === user.id) return json({ error: "You can't delete your own account." }, 400);
-      const { error } = await admin.auth.admin.deleteUser(user_id);
-      if (error) throw error;
-      return json({ ok: true });
-    }
-
-    return json({ error: "Unknown action." }, 400);
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: 8000,
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type, data: image } },
+          { type: "text", text: prompt },
+        ] }],
+      }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) return json({ error: `Anthropic API ${resp.status}: ${data?.error?.message ?? JSON.stringify(data).slice(0, 300)}` }, 502);
+    const text = (data.content ?? []).filter((b: { type: string }) => b.type === "text").map((b: { text: string }) => b.text).join("\n");
+    const m = text.replace(/```json|```/g, "").match(/\{[\s\S]*\}/);
+    if (!m) return json({ error: "model did not return JSON", text: text.slice(0, 300) }, 502);
+    return json(JSON.parse(m[0]), 200);
   } catch (e) {
-    return json({ error: String((e as Error)?.message || e) }, 500);
+    return json({ error: String(e) }, 500);
   }
 });
+
+function json(body: unknown, status: number) {
+  return new Response(JSON.stringify(body), { status, headers: { ...cors, "content-type": "application/json" } });
+}
