@@ -9,6 +9,7 @@ Every night this:
   4. sends both (per hour) to the inventory app, where the "Sales & usage" report reads them.
 
 Re-sending a day is safe: the newest upload for a day replaces the older one in the report.
+Sales dollars are sent BEFORE sales tax.
 
 First time (PowerShell, in the folder this file is in):
     python lvmgp_sales_sync.py --setup        # asks for the passwords/keys once, saves them next to this file
@@ -189,7 +190,7 @@ class Recipes:
         self.comps = {}
         for c in data["comps"]:
             por = c.get("portions") or None
-            if por: por = {str(k): num(v) for k, v in por.items()}
+            if por: por = {str(k): num(v.get("qty") if isinstance(v, dict) else v) for k, v in por.items()}
             self.comps[c["component_id"]] = (c["kind"], c["name"], c["product_id"], c["unit"], num(c["factor"]),
                                              num(c["full_qty"]), num(c["kids_qty"]), por, c["sub_recipe_id"])
         self.products = {p["product_id"]: (p["name"], p.get("use_unit") or p.get("measure") or "") for p in data["products"]}
@@ -339,7 +340,7 @@ def sql_connect(cfg):
 def read_day(conn, day):
     cur = conn.cursor()
     cur.execute("""
-        SELECT h.TrxId, h.TrxDate, l.LineId, l.ParentLineId, l.product_id, l.quantity, l.amount
+        SELECT h.TrxId, h.TrxDate, l.LineId, l.ParentLineId, l.product_id, l.quantity, l.amount, l.tax_percentage
         FROM dbo.trx_lines l JOIN dbo.trx_header h ON h.TrxId = l.TrxId
         WHERE h.TrxDate >= ? AND h.TrxDate < ? AND h.Status = 'CLOSED' AND l.CancelledTime IS NULL
         ORDER BY h.TrxDate, l.TrxId, l.LineId""", datetime(day.year, day.month, day.day), datetime(day.year, day.month, day.day) + timedelta(days=1))
@@ -347,7 +348,9 @@ def read_day(conn, day):
     for r in cur.fetchall():
         out.append({"TrxId": r.TrxId, "hour": r.TrxDate.strftime("%Y-%m-%d %H:00"), "LineId": r.LineId,
                     "ParentLineId": r.ParentLineId, "product_id": r.product_id,
-                    "quantity": float(r.quantity or 0), "amount": float(r.amount or 0)})
+                    "quantity": float(r.quantity or 0),
+                    # trx_lines.amount INCLUDES sales tax; revenue is reported before tax
+                    "amount": float(r.amount or 0) / (1 + float(r.tax_percentage or 0) / 100)})
     return out
 
 

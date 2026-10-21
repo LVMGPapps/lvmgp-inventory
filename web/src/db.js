@@ -554,7 +554,7 @@ export async function linkBarcode(productId, code) {
 }
 
 // ---- Receiving (+ OCR via edge function) ----
-export async function scanReceipt(file, kind = "receipt") {
+export async function scanReceipt(file, kind = "receipt", candidates = null) {
   const image = await new Promise((res, rej) => {
     const r = new FileReader();
     r.onload = () => res(String(r.result).split(",")[1]);
@@ -562,9 +562,15 @@ export async function scanReceipt(file, kind = "receipt") {
     r.readAsDataURL(file);
   });
   const { data, error } = await supabase.functions.invoke("ocr", {
-    body: { image, media_type: file.type || "image/jpeg", kind },
+    body: { image, media_type: file.type || "image/jpeg", kind, candidates },
   });
-  if (error) throw error;
+  if (error) {
+    // Surface the function's own message ("API key not set", etc.) instead of "non-2xx status".
+    let msg = error.message;
+    try { const body = await error.context?.json?.(); if (body?.error) msg = body.error; } catch {}
+    throw new Error(msg);
+  }
+  if (data?.error) throw new Error(data.error);
   return data;
 }
 
@@ -742,7 +748,7 @@ export async function deleteReceipt(receipt_id) {
 // rows: [{shopping_line_id?, product_id, vendor_id, qty, unit_cost, count_per_case}]
 export async function receiveRows(rows, received_date) {
   const me = await uid();
-  const date = received_date || new Date().toISOString().slice(0, 10);
+  const date = received_date || (() => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); })();
   const byVendor = {};
   for (const r of rows) (byVendor[r.vendor_id ?? "none"] ||= []).push(r);
   for (const key of Object.keys(byVendor)) {
@@ -770,7 +776,7 @@ export async function receiveRows(rows, received_date) {
       });
       if (casePrice != null && vendor_id != null) {
         await supabase.from("product_vendor").upsert(
-          { product_id: ln.product_id, vendor_id, current_price: casePrice },
+          { product_id: ln.product_id, vendor_id, current_price: casePrice, ...(ln.vendor_sku ? { vendor_sku: String(ln.vendor_sku) } : {}) },
           { onConflict: "product_id,vendor_id" });
         await supabase.from("price_history").insert({
           product_id: ln.product_id, vendor_id, price: casePrice, source: "receipt" });
@@ -935,10 +941,13 @@ export async function getPosSales(fromISO, toISO) {
     .select("sold_hour, pos_product_id, is_modifier, item_name, category, qty, amount")
     .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("pos_product_id"));
 }
-export async function getPosUsage(fromISO, toISO) {
-  return pageAll(() => supabase.from("v_pos_usage")
-    .select("sold_hour, product_id, source_item, qty")
-    .gte("sold_hour", fromISO).lt("sold_hour", toISO).order("sold_hour").order("product_id").order("source_item"));
+export async function getPosUsage(fromISO, toISO, productIds) {
+  return pageAll(() => {
+    let q = supabase.from("v_pos_usage").select("sold_hour, product_id, source_item, qty")
+      .gte("sold_hour", fromISO).lt("sold_hour", toISO);
+    if (productIds && productIds.length) q = q.in("product_id", productIds);
+    return q.order("sold_hour").order("product_id").order("source_item");
+  });
 }
 export async function getPosUnmatched(fromISO, toISO) {
   return pageAll(() => supabase.from("v_pos_unmatched")
@@ -950,5 +959,6 @@ export async function getPosSyncStatus() {
     .select("sale_day, synced_at").order("sale_day", { ascending: false }).limit(1);
   if (error) throw error;
   const { data: last } = await supabase.from("pos_sync_log").select("synced_at").order("synced_at", { ascending: false }).limit(1);
-  return { lastDay: data?.[0]?.sale_day || null, lastSync: last?.[0]?.synced_at || null };
+  const { data: first } = await supabase.from("pos_current_batch").select("sale_day").order("sale_day", { ascending: true }).limit(1);
+  return { lastDay: data?.[0]?.sale_day || null, lastSync: last?.[0]?.synced_at || null, firstDay: first?.[0]?.sale_day || null };
 }
