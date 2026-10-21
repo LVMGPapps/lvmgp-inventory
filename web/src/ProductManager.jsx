@@ -46,6 +46,9 @@ const vUnitsPerCase = (p, v) => (vPPC(p, v) * vUPP(p, v)) || 1;                 
 const vCostPerUnit = (p, v) => (v?.price != null ? Number(v.price) / vUnitsPerCase(p, v) : null);  // apples-to-apples $/each
 const vPkgName = (p, v, n) => (v?.package_unit || p.package_unit || "package") + (n === 1 ? "" : "s");
 const unitsPerBuy = (p, ou) => { const o = ou || p.buy_by || "case"; return o === "case" ? usagePerCase(p) : o === "package" ? usagePerPack(p) : 1; };
+// Today's date where the user is (YYYY-MM-DD). toISOString() is UTC, which in Las Vegas
+// turns into TOMORROW after 5 pm (4 pm in summer) — a Sunday-evening delivery would land in next week.
+const localToday = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
 const measure = (p) => p.usage_measure || p.count_unit || "each";   // the size unit inside a package (internal math only)
 // "pounds" + "s" was giving "poundss"; some units are already plural or don't
 // take one at all.
@@ -1578,7 +1581,7 @@ function normalizeOrderUnit(orderUnit, p) {
 function Receive({ products, vendors, reload }) {
   const [rows, setRows] = useState(null);   // awaiting (purchased) rows, editable
   const [extras, setExtras] = useState([]); // scanned lines not on the purchased list
-  const [recvDate, setRecvDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [recvDate, setRecvDate] = useState(() => localToday());
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
@@ -1644,7 +1647,7 @@ function Receive({ products, vendors, reload }) {
       setRows(next);
       setExtras((es) => [...es, ...newExtras]);
       setMsg(`Receipt scanned — ${matched} matched to purchased item${matched === 1 ? "" : "s"}${newExtras.length ? `, ${newExtras.length} not on the list (below)` : ""}. Review the numbers, then Receive.`);
-    } catch (e2) { setErr("Couldn't read that receipt. You can still receive items by hand."); }
+    } catch (e2) { setErr("Couldn't read that receipt" + (e2?.message ? ` (${e2.message})` : "") + ". You can still receive items by hand."); }
     finally { setBusy(false); e.target.value = ""; }
   }
 
@@ -1694,7 +1697,7 @@ function Receive({ products, vendors, reload }) {
     <div>
       <div className="toolbar">
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, color: "#3A3D44" }}>
-          Received date <input type="date" value={recvDate} max={new Date().toISOString().slice(0, 10)} onChange={(e) => setRecvDate(e.target.value)} />
+          Received date <input type="date" value={recvDate} max={localToday()} onChange={(e) => setRecvDate(e.target.value)} />
         </label>
         <label className="btn btn-primary">{busy ? <><span className="spin" /> Working…</> : "📷 Scan a receipt"}<input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={onFile} disabled={busy} /></label>
         {rows.length > 0 && <button className="btn btn-ghost" onClick={() => receive(rows)}>Receive everything</button>}
@@ -1787,7 +1790,7 @@ function Receive({ products, vendors, reload }) {
                 const dirty = d.dirtyDate || l.dirty;
                 return (
                   <tr key={l.receipt_line_id}>
-                    <td><input type="date" value={d.received_date} max={new Date().toISOString().slice(0, 10)} onChange={(e) => e.target.value && setDate(e.target.value)} /></td>
+                    <td><input type="date" value={d.received_date} max={localToday()} onChange={(e) => e.target.value && setDate(e.target.value)} /></td>
                     <td>{l.product_name}<div className="stat">{packLine(prodOf(l))}</div></td>
                     <td className="fig">
                       <input className="fig" style={{ width: 66 }} type="number" step="0.001" min="0" value={l.purchase_qty} onChange={(e) => editLine({ purchase_qty: e.target.value })} />
@@ -2655,7 +2658,7 @@ function Waste({ products, locations, reload }) {
   async function load() { try { setRecent(await db.getWaste(120)); } catch {} }
   useEffect(() => { load(); }, []);
 
-  const today0 = new Date().toISOString().slice(0, 10);
+  const today0 = localToday();
   const addRow = (p) => { if (rows.some((r) => r.product_id === p.product_id)) return; setRows((s) => [...s, { product_id: p.product_id, cases: "", packages: "", each: "", reason: "spoiled", note: "", date: today0 }]); };
   const setRow = (pid, patch) => setRows((s) => s.map((r) => r.product_id === pid ? { ...r, ...patch } : r));
   const delRow = (pid) => setRows((s) => s.filter((r) => r.product_id !== pid));
@@ -2757,7 +2760,7 @@ function Waste({ products, locations, reload }) {
 
 function PrepSheet({ products, reload }) {
   const HANDOFFS = [["open", "Open"], ["mid", "Shift change"], ["close", "Close"]];
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(localToday());
   const [handoff, setHandoff] = useState("open");
   const [pars, setPars] = useState({});
   const [log, setLog] = useState({});
@@ -2799,7 +2802,7 @@ function PrepSheet({ products, reload }) {
 
   // Ready now / WIP for an item from live batches (fallbacks the cook confirms).
   function readyWip(p) {
-    const today5 = new Date().toISOString().slice(0, 10);
+    const today5 = localToday();
     const mine = batches.filter((b) => String(b.product_id) === String(p.product_id));
     let ready = 0, wip = 0;
     for (const b of mine) { const rem = Number(b.remaining) || 0; const isReady = b.ready_early || !b.ready_on || b.ready_on <= today5; if (isReady) ready += rem; else wip += rem; }
@@ -2847,7 +2850,7 @@ function PrepSheet({ products, reload }) {
     setBusy(true);
     try {
       // FIFO check across all items before writing anything
-      const today4 = new Date().toISOString().slice(0, 10);
+      const today4 = localToday();
       const violations = [];
       for (const it of items) {
         const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id))
@@ -2990,7 +2993,7 @@ function PrepSheet({ products, reload }) {
         <div>
           <div className="stat" style={{ marginBottom: 8 }}>Thawed batches in the fridge, <b>oldest first</b>. Use the top one first; discard anything past its date (logs to waste).</div>
           {batches.length === 0 ? <div className="note">No active thawed batches. Pull items on the Log tab to create them.</div> : (() => {
-            const today2 = new Date().toISOString().slice(0, 10);
+            const today2 = localToday();
             const byProd = {};
             for (const b of batches) { const bp = byId[b.product_id]; if (bp?.prep_to_freezer) continue; (byProd[b.product_id] ||= []).push(b); }
             return Object.entries(byProd).map(([pid, list]) => { const p = byId[pid]; if (!p) return null; const u = (p.prep_unit === "each" ? (measure(p) || "each") : p.prep_unit === "package" ? pkgName(p, 2) : "cases"); return (
@@ -3111,7 +3114,7 @@ function PrepSheet({ products, reload }) {
               {items.map((it) => {
                 const mine = batches.filter((b) => String(b.product_id) === String(it.p.product_id))
                   .slice().sort((a, b) => String(a.thawed_on).localeCompare(String(b.thawed_on)));   // oldest first
-                const today3 = new Date().toISOString().slice(0, 10);
+                const today3 = localToday();
                 const leftOf = (b) => { const v = draft[`b${b.batch_id}`]; return v === undefined ? (Number(b.remaining) || 0) : (Number(v) || 0); };
                 const inFridge = mine.reduce((a, b) => a + leftOf(b), 0);
                 const pull = Math.max(0, it.par - inFridge);

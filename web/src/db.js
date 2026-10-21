@@ -564,7 +564,13 @@ export async function scanReceipt(file, kind = "receipt") {
   const { data, error } = await supabase.functions.invoke("ocr", {
     body: { image, media_type: file.type || "image/jpeg", kind },
   });
-  if (error) throw error;
+  if (error) {
+    // Surface the function's own message ("API key not set", etc.) instead of "non-2xx status".
+    let msg = error.message;
+    try { const body = await error.context?.json?.(); if (body?.error) msg = body.error; } catch {}
+    throw new Error(msg);
+  }
+  if (data?.error) throw new Error(data.error);
   return data;
 }
 
