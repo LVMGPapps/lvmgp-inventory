@@ -657,7 +657,7 @@ export async function ensureOpenList(domain = "fnb") {
 export async function getShopping(domain = "fnb") {
   const listId = await ensureOpenList(domain);
   const { data, error } = await supabase.from("shopping_line")
-    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status, order_unit")
+    .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status, order_unit, price_check")
     .eq("shopping_list_id", listId).neq("status", "received")
     .order("shopping_line_id");
   if (error) throw error;
@@ -682,7 +682,8 @@ export async function removeShoppingLine(lineId) {
 }
 // Bulk move all lines for one vendor (vendorId may be null) from one status to another.
 export async function setVendorStatus(listId, vendorId, toStatus, fromStatus) {
-  let q = supabase.from("shopping_line").update({ status: toStatus }).eq("shopping_list_id", listId);
+  // Price-check reminders are never ordered, so bulk purchase skips them.
+  let q = supabase.from("shopping_line").update({ status: toStatus }).eq("shopping_list_id", listId).eq("price_check", false);
   q = vendorId == null ? q.is("vendor_id", null) : q.eq("vendor_id", vendorId);
   if (fromStatus) q = q.eq("status", fromStatus);
   const { error } = await q;
@@ -696,7 +697,7 @@ export async function getReceivables(domain = "fnb") {
     .select("shopping_line_id, product_id, vendor_id, qty, unit_cost, status, order_unit," +
       " product(name, count_per_case, count_unit, package_unit, packages_per_case, usage_per_package, usage_measure, buy_by, purchase_unit, product_vendor(vendor_id, current_price, packages_per_case, usage_per_package))," +
       " vendor(name)")
-    .eq("shopping_list_id", listId).eq("status", "purchased").order("shopping_line_id");
+    .eq("shopping_list_id", listId).eq("status", "purchased").eq("price_check", false).order("shopping_line_id");
   if (error) throw error;
   return (data ?? []).map((l) => {
     const pv = (l.product?.product_vendor ?? []).find((v) => v.vendor_id === l.vendor_id);
