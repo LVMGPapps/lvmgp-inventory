@@ -1990,7 +1990,7 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
     setBuilding(true);
     try {
       const fresh = await db.getShopping();                        // live list, not stale state
-      const have = new Set((fresh.lines || []).map((l) => l.product_id));
+      const have = new Set((fresh.lines || []).filter((l) => !l.price_check).map((l) => l.product_id));
       let added = 0;
       for (const s of suggestions) {
         if (have.has(s.product.product_id)) continue;
@@ -2007,14 +2007,14 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   }
   async function dedupe() {
     const seen = new Set(); const dups = [];
-    for (const l of lines) { if (seen.has(l.product_id)) dups.push(l); else seen.add(l.product_id); }
+    for (const l of lines) { if (l.price_check) continue; if (seen.has(l.product_id)) dups.push(l); else seen.add(l.product_id); }
     if (!dups.length) { setNote("No duplicates on the list."); return; }
     for (const l of dups) await db.removeShoppingLine(l.shopping_line_id);
     setNote(`Removed ${dups.length} duplicate line${dups.length === 1 ? "" : "s"}.`);
     load();
   }
   async function clearOptional() {
-    const opt = lines.filter((l) => { const p = byId[l.product_id]; return p && (p.not_stocked || (Number(p.par_level) || 0) <= 0); });
+    const opt = lines.filter((l) => { if (l.price_check) return false; const p = byId[l.product_id]; return p && (p.not_stocked || (Number(p.par_level) || 0) <= 0); });
     if (!opt.length) { setNote("No optional (no-par / not-stocked) items on the list."); return; }
     if (!confirm(`Remove ${opt.length} optional item${opt.length === 1 ? "" : "s"} (no par / not stocked) from the list?`)) return;
     for (const l of opt) await db.removeShoppingLine(l.shopping_line_id);
@@ -2022,6 +2022,9 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
     load();
   }
 
+  const priceChecks = lines.filter((l) => l.price_check);
+  const pcVendors = [...new Set(priceChecks.map((l) => vName[l.vendor_id] || "the store"))];
+  async function gotPic(line) { await db.removeShoppingLine(line.shopping_line_id); load(); }
   const groups = {};
   for (const l of lines) { const k = l.vendor_id ?? "none"; (groups[k] ||= []).push(l); }
   const order = Object.keys(groups).sort((a, b) => (vName[a] || "zz").localeCompare(vName[b] || "zz"));
@@ -2029,22 +2032,27 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
   return (
     <div>
       <div className="toolbar">
-        <Picker products={products} exclude={lines.map((l) => l.product_id)} onPick={add} />
+        <Picker products={products} exclude={lines.filter((l) => !l.price_check).map((l) => l.product_id)} onPick={add} />
         <button className="btn btn-ghost" disabled={building || !suggestions.length} onClick={buildFromUsage}>{building ? "Building…" : `🧮 Build from usage${suggestions.length ? ` (${suggestions.length})` : ""}`}</button>
         {(() => { const seen = new Set(); const dupCount = lines.filter((l) => seen.has(l.product_id) ? true : (seen.add(l.product_id), false)).length; return dupCount > 0 ? <button className="mini mini-danger" onClick={dedupe}>Remove {dupCount} duplicate{dupCount === 1 ? "" : "s"}</button> : null; })()}
         {lines.some((l) => { const p = byId[l.product_id]; return p && (p.not_stocked || (Number(p.par_level) || 0) <= 0); }) && <button className="mini" onClick={clearOptional}>Clear optional</button>}
       </div>
       {note && <div className="ok">{note}</div>}
+      {priceChecks.length > 0 && (
+        <div className="note" style={{ marginBottom: 14, background: "#FDECEC", borderColor: "#D9534F", color: "#7a1f1c" }}>
+          <b>📸 Price check at {pcVendors.join(" / ")}:</b> {priceChecks.length} item{priceChecks.length === 1 ? " is" : "s are"} tagged <b>📸 Price check</b> below. Take a photo of each shelf tag (the price <b>and</b> the pack size, e.g. "48 ct" or "194 oz"), tap <b>Got pic</b>, and send the photos to Claude to update the prices.
+        </div>
+      )}
       <div className="note" style={{ marginBottom: 14 }}>Add items by hand, or tap <b>Build from usage</b> to fill the order up to each item's <b>par</b> (or a week's usage if that's higher), minus what's on hand, rounded up to whole cases. Then mark items <b>Purchased</b> — one at a time or a whole vendor at once — and they move to the <b>Receive</b> tab.</div>
       {lines.length === 0 ? <div className="empty">Add items to build your order.</div> : order.map((k) => {
         const g = groups[k];
-        const openCount = g.filter((l) => l.status === "open").length;
+        const openCount = g.filter((l) => l.status === "open" && !l.price_check).length;
         return (
           <div className="vgroup" key={k}>
             <div className="vgroup-h">
               <span className="vname">{vName[k] || "No vendor"}</span>
               <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <span className="stat">{g.length} items</span>
+                <span className="stat">{g.filter((l) => !l.price_check).length} items</span>
                 {openCount > 0
                   ? <button className="mini" onClick={() => purchaseVendor(k === "none" ? null : Number(k), true)}>Mark all purchased</button>
                   : <button className="mini" onClick={() => purchaseVendor(k === "none" ? null : Number(k), false)}>Undo all</button>}
@@ -2058,6 +2066,14 @@ function Shopping({ products, vendors, onhand, counts, receipts, locations }) {
               const p = byId[l.product_id]; if (!p) return null;
               const done = l.status === "purchased";
               const optional = p.not_stocked || (Number(p.par_level) || 0) <= 0;
+              if (l.price_check) return (
+                <div className="crow" style={{ gridTemplateColumns: "1fr 116px", background: "#FFF5F5" }} key={l.shopping_line_id}>
+                  <div><b>{p.name}</b><span className="bchip" style={{ marginLeft: 6, background: "#FDECEC", borderColor: "#D9534F", color: "#7a1f1c" }}>📸 Price check</span><div className="stat">Photo of the shelf tag: price and pack size. Not an order.</div></div>
+                  <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                    <button className="mini" style={{ borderColor: "#0E7C6B", color: "#0a5c50" }} onClick={() => gotPic(l)}>Got pic</button>
+                  </div>
+                </div>
+              );
               return (
                 <div className="crow" style={{ gridTemplateColumns: "1fr 116px 54px 82px 116px", opacity: done ? 0.55 : 1 }} key={l.shopping_line_id}>
                   <div><b>{p.backup_for ? "✳ " : ""}{p.name}</b>{optional && <span className="bchip" style={{ marginLeft: 6, background: "#EEE", borderColor: "#B7BBC4", color: "#666" }}>{p.not_stocked ? "not stocked" : "no par"}</span>}{p.backup_for && <span className="stat"> · Purchase option of {byId[p.backup_for]?.name || "another item"}</span>}<div className="stat">on hand <b style={{ color: "#191B1F" }}>{fmtQty(p, onhand?.[p.product_id]?.total ?? 0)}</b> · used last wk <b style={{ color: "#191B1F" }}>{fmtQty(p, stats[p.product_id]?.usedUnits ?? 0)}</b>{optional ? "" : <> · suggest <b style={{ color: "#191B1F" }}>{stats[p.product_id]?.suggestCases ?? 0}</b> {stats[p.product_id]?.suggestCases === 1 ? "case" : "cases"}</>}</div></div>
